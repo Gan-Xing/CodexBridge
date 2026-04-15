@@ -1,0 +1,16 @@
+{
+  "name": "codexbridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Codex-centered bridge for multiple chat platforms and model providers.",
+  "scripts": {
+    "start": "node src/index.js",
+    "weixin:login": "node src/cli.js weixin login",
+    "weixin:serve": "node src/cli.js weixin serve",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}
