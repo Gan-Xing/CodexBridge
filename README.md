@@ -1,6 +1,6 @@
-# CodexPhone
+# CodexBridge
 
-CodexPhone is a Codex-centered gateway for connecting multiple model providers and multiple chat platforms through one project.
+CodexBridge is a Codex-centered gateway for connecting multiple model providers and multiple chat platforms through one project.
 
 ## Scope
 
