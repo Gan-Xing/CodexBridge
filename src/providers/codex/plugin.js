@@ -1,4 +1,4 @@
-import { CodexAppClient, createNoopLogger } from './app_client.js';
+import { CodexAppClient, createNoopLogger, readCodexAccountIdentity } from './app_client.js';
 
 export class CodexProviderPlugin {
   constructor({
@@ -37,7 +37,27 @@ export class CodexProviderPlugin {
     return client.listThreads({});
   }
 
-  async startTurn({ providerProfile, bridgeSession, sessionSettings, event, inputText }) {
+  async resumeThread({ providerProfile, threadId }) {
+    const client = await this.ensureClient(providerProfile);
+    return client.resumeThread({ threadId });
+  }
+
+  async reconnectProfile({ providerProfile }) {
+    const previousClient = this.clients.get(providerProfile.id) ?? null;
+    if (previousClient) {
+      this.clients.delete(providerProfile.id);
+      await previousClient.stop();
+    }
+    const client = this.clientFactory(providerProfile);
+    this.clients.set(providerProfile.id, client);
+    await client.start();
+    return {
+      connected: client.isConnected(),
+      accountIdentity: readCodexAccountIdentity(),
+    };
+  }
+
+  async startTurn({ providerProfile, bridgeSession, sessionSettings, event, inputText, onProgress = null }) {
     const client = await this.ensureClient(providerProfile);
     const modelInfo = await this.resolveModelInfo(providerProfile, client, sessionSettings?.model ?? null);
     const effort = this.resolveReasoningEffort(modelInfo, sessionSettings?.reasoningEffort ?? null);
@@ -48,10 +68,16 @@ export class CodexProviderPlugin {
       model: modelInfo?.model ?? null,
       effort,
       serviceTier: sessionSettings?.serviceTier ?? null,
+      approvalPolicy: sessionSettings?.approvalPolicy ?? 'on-request',
+      sandboxMode: sessionSettings?.sandboxMode ?? 'workspace-write',
       collaborationMode: 'default',
+      onProgress,
     });
     return {
       outputText: result.outputText,
+      outputState: result.outputState ?? 'complete',
+      previewText: result.previewText ?? '',
+      finalSource: result.finalSource ?? 'thread_items',
       threadId: result.threadId,
       title: result.title ?? bridgeSession.title,
     };

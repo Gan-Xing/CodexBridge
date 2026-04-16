@@ -33,6 +33,9 @@
  * @property {string | null} model
  * @property {string | null} reasoningEffort
  * @property {string | null} serviceTier
+ * @property {'read-only' | 'default' | 'full-access' | null | undefined} [accessPreset]
+ * @property {string | null | undefined} [approvalPolicy]
+ * @property {string | null | undefined} [sandboxMode]
  * @property {string | null} locale
  * @property {Record<string, unknown>} metadata
  * @property {number} updatedAt

@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WeixinAccountStore } from './platforms/weixin/account_store.js';
@@ -94,6 +95,9 @@ async function runWeixinServe(args) {
     providerProfiles: codexProfiles.profiles,
     defaultProviderProfileId: codexProfiles.defaultProviderProfileId,
     repositories,
+    restartBridge: async () => {
+      await queueWeixinBridgeRestart();
+    },
   });
   const platformPlugin = runtime.registry.getPlatform('weixin');
   const bridgeRuntime = new WeixinBridgeRuntime({
@@ -238,6 +242,33 @@ function truncate(value, maxLength) {
     return value;
   }
   return `${value.slice(0, Math.max(0, maxLength - 3))}...`;
+}
+
+async function queueWeixinBridgeRestart() {
+  const scriptPath = path.resolve(process.cwd(), 'scripts/service/restart-systemd-user.sh');
+  const unitName = `codexbridge-weixin-restart-${Date.now()}`;
+  try {
+    const child = spawn('systemd-run', [
+      '--user',
+      '--unit', unitName,
+      '--collect',
+      '/bin/bash',
+      scriptPath,
+    ], {
+      detached: true,
+      stdio: 'ignore',
+      cwd: process.cwd(),
+    });
+    child.unref();
+    return;
+  } catch {}
+
+  const fallback = spawn('/bin/bash', [scriptPath], {
+    detached: true,
+    stdio: 'ignore',
+    cwd: process.cwd(),
+  });
+  fallback.unref();
 }
 
 function printUsage() {

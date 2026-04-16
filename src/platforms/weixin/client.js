@@ -122,6 +122,17 @@ export class WeixinIlinkClient {
   }) {
     const abortController = new AbortController();
     const timer = setTimeout(() => abortController.abort(), timeoutMs);
+    const startTime = Date.now();
+    debugWeixinHttp('request_start', {
+      method,
+      endpoint,
+      timeoutMs,
+      authorized,
+      bodyLength: typeof body === 'string' ? Buffer.byteLength(body, 'utf8') : 0,
+      getUpdatesCursorPreview: endpoint === 'ilink/bot/getupdates'
+        ? previewGetUpdatesCursor(body)
+        : null,
+    });
     try {
       const response = await this.fetch(`${this.baseUrl}/${endpoint}`, {
         method,
@@ -133,10 +144,27 @@ export class WeixinIlinkClient {
         }),
       });
       const raw = await response.text();
+      debugWeixinHttp('request_end', {
+        method,
+        endpoint,
+        status: response.status,
+        ok: response.ok,
+        durationMs: Date.now() - startTime,
+        responseLength: raw.length,
+        responsePreview: previewResponse(raw),
+      });
       if (!response.ok) {
         throw new Error(`iLink ${method} ${endpoint} HTTP ${response.status}: ${raw.slice(0, 200)}`);
       }
       return raw ? JSON.parse(raw) : {};
+    } catch (error) {
+      debugWeixinHttp('request_error', {
+        method,
+        endpoint,
+        durationMs: Date.now() - startTime,
+        error: error instanceof Error ? (error.stack || error.message) : String(error),
+      });
+      throw error;
     } finally {
       clearTimeout(timer);
     }
@@ -163,6 +191,37 @@ function randomWechatUin() {
 
 function isAbortError(error) {
   return error instanceof Error && error.name === 'AbortError';
+}
+
+function debugWeixinHttp(event, payload) {
+  if (process.env.CODEXBRIDGE_DEBUG_WEIXIN !== '1') {
+    return;
+  }
+  const line = `[weixin-http] ${event} ${JSON.stringify(payload)}\n`;
+  process.stderr.write(line);
+}
+
+function previewGetUpdatesCursor(body) {
+  if (typeof body !== 'string' || !body) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(body);
+    const cursor = typeof parsed?.get_updates_buf === 'string' ? parsed.get_updates_buf : '';
+    if (!cursor) {
+      return null;
+    }
+    return cursor.length <= 24 ? cursor : `${cursor.slice(0, 12)}...${cursor.slice(-8)}`;
+  } catch {
+    return null;
+  }
+}
+
+function previewResponse(raw, maxLength = 200) {
+  if (typeof raw !== 'string' || !raw) {
+    return null;
+  }
+  return raw.length <= maxLength ? raw : `${raw.slice(0, maxLength - 3)}...`;
 }
 
 export async function qrLogin({

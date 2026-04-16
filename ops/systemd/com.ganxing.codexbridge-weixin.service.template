@@ -1,0 +1,23 @@
+[Unit]
+Description=__SERVICE_DESCRIPTION__
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__ROOT_DIR__
+EnvironmentFile=__ENV_FILE__
+Environment=PATH=__PATH__
+Environment=HOME=__HOME__
+Environment=USER=__USER__
+Environment=LOGNAME=__LOGNAME__
+ExecStart=__NODE_BIN__ __ROOT_DIR__/src/cli.js weixin serve --state-dir __STATE_DIR__
+StandardOutput=append:__STDOUT_LOG__
+StandardError=append:__STDERR_LOG__
+Restart=always
+RestartSec=2
+TimeoutStopSec=20
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=default.target

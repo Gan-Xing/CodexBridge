@@ -61,6 +61,36 @@ Run the WeChat bridge loop:
 npm run weixin:serve
 ```
 
+## systemd User Service
+
+Install and start the user service on Linux:
+
+```bash
+bash ./scripts/service/install-systemd-user.sh
+```
+
+Useful follow-up commands:
+
+```bash
+bash ./scripts/service/status-systemd-user.sh
+bash ./scripts/service/restart-systemd-user.sh
+bash ./scripts/service/logs-systemd-user.sh
+bash ./scripts/service/logs-systemd-user.sh --follow
+```
+
+The installer writes a per-user environment file to:
+
+```text
+~/.config/codexbridge/weixin.service.env
+```
+
+That file is the stable place to adjust:
+
+- `WEIXIN_ACCOUNT_ID`
+- `CODEX_DEFAULT_PROVIDER_PROFILE_ID`
+- optional proxy profile keys such as `CODEX_PROVIDER_*`
+- `CODEXBRIDGE_DEBUG_WEIXIN`
+
 Optional flags:
 
 - `--base-url`

@@ -165,3 +165,96 @@ test('CodexProviderPlugin resolves default model metadata from listModels when p
     ['startTurn', 'gpt-5.4', 'medium'],
   ]);
 });
+
+test('CodexProviderPlugin reconnectProfile replaces the existing client instance', async () => {
+  const lifecycle = [];
+  let clientIndex = 0;
+  const plugin = new CodexProviderPlugin({
+    clientFactory: () => {
+      clientIndex += 1;
+      const name = `client-${clientIndex}`;
+      let connected = false;
+      return {
+        async start() {
+          if (connected) {
+            return;
+          }
+          connected = true;
+          lifecycle.push([name, 'start']);
+        },
+        async stop() {
+          connected = false;
+          lifecycle.push([name, 'stop']);
+        },
+        isConnected() {
+          return connected;
+        },
+        async startThread() {
+          return {
+            threadId: `${name}-thread`,
+            cwd: '/tmp/work',
+            title: null,
+          };
+        },
+        async readThread(threadId) {
+          return { threadId, cwd: '/tmp/work', title: null };
+        },
+        async listThreads() {
+          return [];
+        },
+        async startTurn(params) {
+          return {
+            outputText: `${name}-done`,
+            outputState: 'complete',
+            threadId: params.threadId,
+            title: null,
+          };
+        },
+        async interruptTurn() {},
+        async listModels() {
+          return [{ model: 'gpt-5.4' }];
+        },
+        async resumeThread() {
+          return {};
+        },
+      };
+    },
+  });
+  const profile = makeProfile();
+
+  await plugin.startThread({
+    providerProfile: profile,
+    cwd: '/tmp/work',
+  });
+  const reconnect = await plugin.reconnectProfile({
+    providerProfile: profile,
+  });
+  const turn = await plugin.startTurn({
+    providerProfile: profile,
+    bridgeSession: {
+      id: 'session-1',
+      codexThreadId: 'thread-1',
+      cwd: '/tmp/work',
+      title: null,
+    },
+    sessionSettings: {
+      model: null,
+      reasoningEffort: null,
+      serviceTier: null,
+    },
+    event: {
+      platform: 'weixin',
+      externalScopeId: 'wxid_1',
+      text: 'hello',
+    },
+    inputText: 'hello',
+  });
+
+  assert.equal(reconnect.connected, true);
+  assert.deepEqual(lifecycle, [
+    ['client-1', 'start'],
+    ['client-1', 'stop'],
+    ['client-2', 'start'],
+  ]);
+  assert.equal(turn.outputText, 'client-2-done');
+});

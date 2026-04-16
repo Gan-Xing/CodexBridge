@@ -6,3 +6,4 @@ dist/
 build/
 .next/
 coverage/
+.telegram-inbox/

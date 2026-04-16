@@ -151,6 +151,38 @@ test('WeixinPlatformPlugin builds outbound text payloads with stored context tok
   assert.ok(deliveries.some((delivery) => /【Title】/.test(delivery.payload.msg.item_list[0].text_item.text)));
 });
 
+
+
+test('WeixinPlatformPlugin aggregates short lines into delivery chunks under the 2048-byte Weixin limit', () => {
+  const plugin = new WeixinPlatformPlugin({
+    config: {
+      enabled: true,
+      accountId: 'bot-account',
+      token: 'token',
+      baseUrl: 'https://ilinkai.weixin.qq.com',
+      cdnBaseUrl: 'https://novac2c.cdn.weixin.qq.com/c2c',
+      dmPolicy: 'open',
+      groupPolicy: 'disabled',
+      allowFrom: [],
+      groupAllowFrom: [],
+      stateDir: '/tmp',
+      accountsDir: '/tmp',
+      maxMessageLength: 4000,
+    },
+    accountStore: new WeixinAccountStore({ rootDir: makeTempAccountsDir() }),
+  });
+
+  const deliveries = plugin.buildTextDeliveries({
+    externalScopeId: 'wxid_sender',
+    content: '第一句。\n第二句。\n第三句。\n第四句。\n第五句。',
+  });
+
+  assert.equal(deliveries.length, 1);
+  const deliveredText = deliveries[0]?.payload.msg.item_list[0].text_item.text;
+  assert.equal(deliveredText, '第一句。\n第二句。\n第三句。\n第四句。\n第五句。');
+  assert.ok(Buffer.byteLength(deliveredText, 'utf8') < 2048);
+});
+
 test('WeixinPlatformPlugin builds typing payloads when a typing ticket is known', () => {
   const plugin = new WeixinPlatformPlugin({
     config: {
@@ -269,7 +301,7 @@ test('WeixinPlatformPlugin sendText and sendTyping call the underlying iLink cli
   };
   plugin.recordTypingTicket('wxid_sender', 'typing-1');
 
-  await plugin.sendText({
+  const delivery = await plugin.sendText({
     externalScopeId: 'wxid_sender',
     content: 'hello from bridge',
   });
@@ -278,6 +310,8 @@ test('WeixinPlatformPlugin sendText and sendTyping call the underlying iLink cli
     status: 'stop',
   });
 
+  assert.equal(delivery.success, true);
+  assert.equal(delivery.deliveredText, 'hello from bridge');
   assert.equal(sentMessages.length, 1);
   assert.equal(sentMessages[0]?.toUserId, 'wxid_sender');
   assert.equal(sentMessages[0]?.contextToken, 'ctx-1');
@@ -287,4 +321,90 @@ test('WeixinPlatformPlugin sendText and sendTyping call the underlying iLink cli
     typingTicket: 'typing-1',
     status: 2,
   });
+});
+
+
+test('WeixinPlatformPlugin sendText returns a structured failure when iLink sendmessage keeps returning a non-zero ret code', async () => {
+  const rootDir = makeTempAccountsDir();
+  const accountStore = new WeixinAccountStore({ rootDir });
+  const plugin = new WeixinPlatformPlugin({
+    accountStore,
+    config: {
+      enabled: true,
+      accountId: 'bot-account',
+      token: 'token',
+      baseUrl: 'https://ilinkai.weixin.qq.com',
+      cdnBaseUrl: 'https://novac2c.cdn.weixin.qq.com/c2c',
+      dmPolicy: 'open',
+      groupPolicy: 'disabled',
+      allowFrom: [],
+      groupAllowFrom: [],
+      stateDir: path.dirname(path.dirname(rootDir)),
+      accountsDir: rootDir,
+      maxMessageLength: 4000,
+    },
+  });
+  let attempts = 0;
+  plugin.client = {
+    async sendMessage() {
+      attempts += 1;
+      return { ret: -2 };
+    },
+  };
+
+  const result = await plugin.sendText({
+    externalScopeId: 'wxid_sender',
+    content: 'hello from bridge',
+  });
+
+  assert.equal(result.success, false);
+  assert.equal(result.deliveredCount, 0);
+  assert.equal(result.failedIndex, 0);
+  assert.equal(result.failedText, 'hello from bridge');
+  assert.match(result.error, /ret=-2/);
+  assert.equal(attempts, 4);
+});
+
+test('WeixinPlatformPlugin keeps fenced code blocks intact when splitting long text deliveries', () => {
+  const rootDir = makeTempAccountsDir();
+  const plugin = new WeixinPlatformPlugin({
+    accountStore: new WeixinAccountStore({ rootDir }),
+    config: {
+      enabled: true,
+      accountId: 'bot-account',
+      token: 'token',
+      baseUrl: 'https://ilinkai.weixin.qq.com',
+      cdnBaseUrl: 'https://novac2c.cdn.weixin.qq.com/c2c',
+      dmPolicy: 'open',
+      groupPolicy: 'disabled',
+      allowFrom: [],
+      groupAllowFrom: [],
+      stateDir: path.dirname(path.dirname(rootDir)),
+      accountsDir: rootDir,
+      maxMessageLength: 4000,
+    },
+  });
+
+  const deliveries = plugin.buildTextDeliveries({
+    externalScopeId: 'wxid_sender',
+    content: [
+      '前言。',
+      '',
+      '```bash',
+      'pnpm cmc -- mission create \\',
+      '  --mission-id asp-phase1-core \\',
+      '  --project agent-social-publisher \\',
+      '  --cwd /home/ubuntu/dev/agent-social-publisher',
+      '```',
+      '',
+      '收尾。',
+    ].join('\n'),
+  });
+
+  const texts = deliveries.map((entry) => entry.payload.msg.item_list[0].text_item.text);
+  assert.equal(texts.length, 1);
+  const codeBlockChunk = texts[0];
+  assert.match(codeBlockChunk, /```bash/);
+  assert.match(codeBlockChunk, /--project agent-social-publisher/);
+  assert.match(codeBlockChunk, /```/);
 });
