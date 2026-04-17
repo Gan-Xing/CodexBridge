@@ -70,6 +70,39 @@
  * @property {string | null} cwd
  * @property {string | null} title
  * @property {number | null | undefined} [updatedAt]
+ * @property {string | null | undefined} [preview]
+ * @property {ProviderThreadTurn[] | null | undefined} [turns]
+ * @property {string | null | undefined} [bridgeSessionId]
+ */
+
+/**
+ * @typedef {Object} ProviderThreadTurnItem
+ * @property {string} type
+ * @property {string | null} role
+ * @property {string | null} phase
+ * @property {string} text
+ */
+
+/**
+ * @typedef {Object} ProviderThreadTurn
+ * @property {string} id
+ * @property {string | null} status
+ * @property {string | null} error
+ * @property {ProviderThreadTurnItem[]} items
+ */
+
+/**
+ * @typedef {Object} ProviderThreadListResult
+ * @property {ProviderThreadSummary[]} items
+ * @property {string | null} nextCursor
+ */
+
+/**
+ * @typedef {Object} ThreadMetadata
+ * @property {string} providerProfileId
+ * @property {string} threadId
+ * @property {string | null} alias
+ * @property {number} updatedAt
  */
 
 /**
@@ -100,8 +133,8 @@
  * @property {string} kind
  * @property {string} displayName
  * @property {(params: { providerProfile: ProviderProfile, cwd?: string | null, title?: string | null, metadata?: Record<string, unknown> }) => Promise<ProviderThreadStartResult>} startThread
- * @property {(params: { providerProfile: ProviderProfile, threadId: string }) => Promise<ProviderThreadSummary | null>} readThread
- * @property {(params: { providerProfile: ProviderProfile }) => Promise<ProviderThreadSummary[]>} listThreads
+ * @property {(params: { providerProfile: ProviderProfile, threadId: string, includeTurns?: boolean }) => Promise<ProviderThreadSummary | null>} readThread
+ * @property {(params: { providerProfile: ProviderProfile, limit?: number, cursor?: string | null, searchTerm?: string | null }) => Promise<ProviderThreadListResult>} listThreads
  * @property {(params: { providerProfile: ProviderProfile, bridgeSession: BridgeSession, sessionSettings: SessionSettings | null, event: InboundTextEvent, inputText: string }) => Promise<ProviderTurnResult>} startTurn
  */
 

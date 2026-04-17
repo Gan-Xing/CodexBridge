@@ -5,6 +5,7 @@ import { InMemoryBridgeSessionRepository } from '../store/in_memory/in_memory_br
 import { InMemoryPlatformBindingRepository } from '../store/in_memory/in_memory_platform_binding_repository.js';
 import { InMemoryProviderProfileRepository } from '../store/in_memory/in_memory_provider_profile_repository.js';
 import { InMemorySessionSettingsRepository } from '../store/in_memory/in_memory_session_settings_repository.js';
+import { InMemoryThreadMetadataRepository } from '../store/in_memory/in_memory_thread_metadata_repository.js';
 import { PluginRegistry } from './plugin_registry.js';
 
 export function createCodexBridgeRuntime({
@@ -27,6 +28,7 @@ export function createCodexBridgeRuntime({
   const bridgeSessionsRepository = repositories.bridgeSessions ?? new InMemoryBridgeSessionRepository();
   const platformBindingsRepository = repositories.platformBindings ?? new InMemoryPlatformBindingRepository();
   const sessionSettingsRepository = repositories.sessionSettings ?? new InMemorySessionSettingsRepository();
+  const threadMetadataRepository = repositories.threadMetadata ?? new InMemoryThreadMetadataRepository();
 
   for (const providerProfile of providerProfiles) {
     providerProfilesRepository.save(providerProfile);
@@ -41,6 +43,7 @@ export function createCodexBridgeRuntime({
     providerProfiles: providerProfilesRepository,
     bridgeSessions: bridgeSessionsRepository,
     sessionSettings: sessionSettingsRepository,
+    threadMetadata: threadMetadataRepository,
     providerRegistry: registry,
     sessionRouter,
   });
@@ -66,6 +69,7 @@ export function createCodexBridgeRuntime({
       bridgeSessions: bridgeSessionsRepository,
       platformBindings: platformBindingsRepository,
       sessionSettings: sessionSettingsRepository,
+      threadMetadata: threadMetadataRepository,
     },
     services: {
       sessionRouter,

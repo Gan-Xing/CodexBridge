@@ -2,6 +2,71 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { CodexAppClient } from '../../../src/providers/codex/app_client.js';
 
+test('CodexAppClient listThreads returns preview rows and nextCursor', async () => {
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+  });
+
+  client.request = async (method, params) => {
+    assert.equal(method, 'thread/list');
+    assert.equal(params.cursor, 'cursor-1');
+    assert.equal(params.searchTerm, 'bridge');
+    return {
+      data: [{
+        id: 'thread-1',
+        name: 'Bridge thread',
+        cwd: '/tmp/work',
+        updatedAt: 123,
+        preview: 'hello bridge',
+      }],
+      nextCursor: 'cursor-2',
+    };
+  };
+
+  const result = await client.listThreads({
+    limit: 5,
+    cursor: 'cursor-1',
+    searchTerm: 'bridge',
+  });
+
+  assert.deepEqual(result, {
+    items: [{
+      threadId: 'thread-1',
+      title: 'Bridge thread',
+      cwd: '/tmp/work',
+      updatedAt: 123000,
+      preview: 'hello bridge',
+    }],
+    nextCursor: 'cursor-2',
+  });
+});
+
+test('CodexAppClient normalizes second-based thread timestamps to milliseconds', async () => {
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+  });
+
+  client.request = async (method) => {
+    if (method === 'thread/read') {
+      return {
+        thread: {
+          id: 'thread-1',
+          name: 'Bridge thread',
+          cwd: '/tmp/work',
+          updatedAt: 1776425803,
+          preview: 'hello bridge',
+          turns: [],
+        },
+      };
+    }
+    throw new Error(`Unexpected method: ${method}`);
+  };
+
+  const result = await client.readThread('thread-1', false);
+
+  assert.equal(result?.updatedAt, 1776425803000);
+});
+
 test('CodexAppClient startTurn sends explicit default collaboration settings payload', async () => {
   const client = new CodexAppClient({
     codexCliBin: 'codex',

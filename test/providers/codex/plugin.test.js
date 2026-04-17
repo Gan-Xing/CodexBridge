@@ -166,6 +166,56 @@ test('CodexProviderPlugin resolves default model metadata from listModels when p
   ]);
 });
 
+test('CodexProviderPlugin forwards thread list paging and includeTurns reads to the app client', async () => {
+  const calls = [];
+  const plugin = new CodexProviderPlugin({
+    clientFactory: () => ({
+      async start() {},
+      async startThread() {
+        return { threadId: 'thread-1', cwd: null, title: null };
+      },
+      async readThread(threadId, includeTurns) {
+        calls.push(['readThread', threadId, includeTurns]);
+        return { threadId, title: 'Thread 1', cwd: '/tmp/work', turns: includeTurns ? [] : undefined };
+      },
+      async listThreads(params) {
+        calls.push(['listThreads', params]);
+        return { items: [{ threadId: 'thread-1', title: 'Thread 1' }], nextCursor: 'cursor-2' };
+      },
+      async startTurn() {
+        return { outputText: 'done', threadId: 'thread-1', title: null };
+      },
+      async interruptTurn() {},
+      async listModels() {
+        return [{ model: 'gpt-5.4' }];
+      },
+    }),
+  });
+  const profile = makeProfile();
+
+  const listed = await plugin.listThreads({
+    providerProfile: profile,
+    limit: 5,
+    cursor: 'cursor-1',
+    searchTerm: 'bridge',
+  });
+  const thread = await plugin.readThread({
+    providerProfile: profile,
+    threadId: 'thread-1',
+    includeTurns: true,
+  });
+
+  assert.deepEqual(listed, {
+    items: [{ threadId: 'thread-1', title: 'Thread 1' }],
+    nextCursor: 'cursor-2',
+  });
+  assert.equal(thread.threadId, 'thread-1');
+  assert.deepEqual(calls, [
+    ['listThreads', { limit: 5, cursor: 'cursor-1', searchTerm: 'bridge' }],
+    ['readThread', 'thread-1', true],
+  ]);
+});
+
 test('CodexProviderPlugin reconnectProfile replaces the existing client instance', async () => {
   const lifecycle = [];
   let clientIndex = 0;

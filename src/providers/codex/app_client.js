@@ -82,15 +82,19 @@ export class CodexAppClient extends EventEmitter {
     this.rejectPending(new Error('Codex app client stopped'));
   }
 
-  async listThreads({ limit = 20, searchTerm = null } = {}) {
+  async listThreads({ limit = 20, cursor = null, searchTerm = null, archived = false } = {}) {
     const result = await this.request('thread/list', {
       limit,
+      cursor,
       sortKey: 'updated_at',
       searchTerm,
-      archived: false,
+      archived,
     }, { timeoutMs: 30_000 });
     const rows = Array.isArray(result?.data) ? result.data : [];
-    return rows.map(mapThreadSummary);
+    return {
+      items: rows.map(mapThreadSummary),
+      nextCursor: typeof result?.nextCursor === 'string' ? result.nextCursor : null,
+    };
   }
 
   async readThread(threadId, includeTurns = false) {
@@ -514,7 +518,7 @@ function mapThreadSummary(raw) {
     threadId: String(raw.id),
     title: raw.name ? String(raw.name) : null,
     cwd: raw.cwd ? String(raw.cwd) : null,
-    updatedAt: Number(raw.updatedAt || 0),
+    updatedAt: normalizeTimestamp(raw.updatedAt),
     preview: typeof raw.preview === 'string' ? raw.preview : '',
   };
 }
@@ -524,9 +528,18 @@ function mapThread(raw, includeTurns) {
     threadId: String(raw.id),
     title: raw.name ? String(raw.name) : null,
     cwd: raw.cwd ? String(raw.cwd) : null,
-    updatedAt: Number(raw.updatedAt || 0),
+    updatedAt: normalizeTimestamp(raw.updatedAt),
+    preview: typeof raw.preview === 'string' ? raw.preview : '',
     turns: includeTurns && Array.isArray(raw.turns) ? raw.turns.map(mapTurn) : [],
   };
+}
+
+function normalizeTimestamp(value) {
+  const numeric = Number(value || 0);
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return 0;
+  }
+  return numeric < 10_000_000_000 ? numeric * 1000 : numeric;
 }
 
 function mapTurn(raw) {

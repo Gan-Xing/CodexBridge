@@ -11,7 +11,14 @@ class FakeProviderPlugin {
     this.resumeThreadCalls = [];
     this.startTurnCalls = [];
     this.threadCounter = 0;
+    this.baseTime = Date.now();
+    this.clock = 0;
     this.threads = new Map();
+  }
+
+  nextUpdatedAt() {
+    this.clock += 1;
+    return this.baseTime + this.clock;
   }
 
   async startThread({ providerProfile, cwd, title, metadata }) {
@@ -21,18 +28,46 @@ class FakeProviderPlugin {
       threadId: `${providerProfile.id}-thread-${this.threadCounter}`,
       cwd: cwd ?? `/tmp/${providerProfile.id}`,
       title: title ?? `${providerProfile.displayName} thread ${this.threadCounter}`,
-      updatedAt: Date.now(),
+      updatedAt: this.nextUpdatedAt(),
+      preview: '',
+      turns: [],
     };
     this.threads.set(thread.threadId, thread);
     return thread;
   }
 
-  async readThread({ threadId }) {
-    return this.threads.get(threadId) ?? null;
+  async readThread({ threadId, includeTurns = false }) {
+    const thread = this.threads.get(threadId) ?? null;
+    if (!thread) {
+      return null;
+    }
+    return {
+      ...thread,
+      turns: includeTurns ? thread.turns : [],
+    };
   }
 
-  async listThreads() {
-    return [...this.threads.values()].sort((left, right) => (right.updatedAt ?? 0) - (left.updatedAt ?? 0));
+  async listThreads({ limit = 20, cursor = null, searchTerm = null } = {}) {
+    const offset = cursor ? Number(cursor) : 0;
+    const normalizedSearch = String(searchTerm ?? '').trim().toLowerCase();
+    const filtered = [...this.threads.values()]
+      .filter((thread) => {
+        if (!normalizedSearch) {
+          return true;
+        }
+        const haystack = [thread.threadId, thread.title, thread.preview]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase();
+        return haystack.includes(normalizedSearch);
+      })
+      .sort((left, right) => (right.updatedAt ?? 0) - (left.updatedAt ?? 0));
+    const items = filtered.slice(offset, offset + limit);
+    const nextOffset = offset + items.length;
+    return {
+      items,
+      nextCursor: nextOffset < filtered.length ? String(nextOffset) : null,
+    };
   }
 
   async resumeThread({ threadId }) {
@@ -43,12 +78,14 @@ class FakeProviderPlugin {
         threadId,
         cwd: '/tmp/restored',
         title: `restored ${threadId}`,
-        updatedAt: Date.now(),
+        updatedAt: this.nextUpdatedAt(),
+        preview: '',
+        turns: [],
       };
       this.threads.set(threadId, restored);
       return restored;
     }
-    return existingThread;
+    return this.threads.get(threadId) ?? null;
   }
 
   async startTurn({ providerProfile, bridgeSession, sessionSettings, event, inputText }) {
@@ -57,12 +94,26 @@ class FakeProviderPlugin {
     if (!existingThread) {
       throw new Error(`thread not found: ${bridgeSession.codexThreadId}`);
     }
+    const outputText = `${this.replyPrefix}: ${inputText}`;
     this.threads.set(bridgeSession.codexThreadId, {
       ...existingThread,
-      updatedAt: Date.now(),
+      updatedAt: this.nextUpdatedAt(),
+      preview: inputText,
+      turns: [
+        ...existingThread.turns,
+        {
+          id: `${bridgeSession.codexThreadId}-turn-${existingThread.turns.length + 1}`,
+          status: 'complete',
+          error: null,
+          items: [
+            { role: 'user', text: inputText, type: 'message', phase: 'final' },
+            { role: 'assistant', text: outputText, type: 'message', phase: 'final' },
+          ],
+        },
+      ],
     });
     return {
-      outputText: `${this.replyPrefix}: ${inputText}`,
+      outputText,
       threadId: bridgeSession.codexThreadId,
       title: bridgeSession.title,
     };
@@ -237,6 +288,56 @@ test('/status reports when no bridge session is bound yet', async () => {
   assert.match(result.messages[1]?.text ?? '', /Default provider profile: openai-default/);
 });
 
+test('/helps lists all supported slash commands and help entrypoints', async () => {
+  const { runtime } = makeRuntime();
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-1',
+    text: '/helps',
+  });
+
+  const text = result.messages[0]?.text ?? '';
+  assert.match(text, /Slash 命令/);
+  assert.match(text, /\/threads 查看当前 provider 的线程列表首页/);
+  assert.match(text, /\/rename 给线程设置本地显示名/);
+  assert.match(text, /帮助：\/helps <命令>/);
+  assert.match(text, /示例：\/helps threads  或  \/threads -h/);
+});
+
+test('/helps threads renders usage, examples, and notes for a specific command', async () => {
+  const { runtime } = makeRuntime();
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-1',
+    text: '/helps threads',
+  });
+
+  const text = result.messages[0]?.text ?? '';
+  assert.match(text, /命令：\/threads/);
+  assert.match(text, /说明：查看当前 provider 的线程列表首页/);
+  assert.match(text, /用法：/);
+  assert.match(text, /\/threads -h/);
+  assert.match(text, /\/open 2/);
+  assert.match(text, /微信里推荐先 \/threads，再用序号操作/);
+});
+
+test('slash commands support first-argument help flags like -h', async () => {
+  const { runtime } = makeRuntime();
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-1',
+    text: '/threads -h',
+  });
+
+  const text = result.messages[0]?.text ?? '';
+  assert.match(text, /命令：\/threads/);
+  assert.match(text, /\/threads -h/);
+  assert.match(text, /\/peek 2/);
+});
+
 test('/new creates a fresh session on the current provider profile', async () => {
   const { runtime, openai } = makeRuntime();
   await runtime.services.bridgeCoordinator.handleInboundEvent({
@@ -289,7 +390,7 @@ test('/provider without args lists current and available profiles', async () => 
   assert.match(result.messages[3]?.text ?? '', /minimax-default/);
 });
 
-test('/threads lists provider-scoped threads and marks the current thread', async () => {
+test('/threads renders a paged thread browser with previews and commands', async () => {
   const { runtime } = makeRuntime();
 
   await runtime.services.bridgeCoordinator.handleInboundEvent({
@@ -309,11 +410,72 @@ test('/threads lists provider-scoped threads and marks the current thread', asyn
     text: '/threads',
   });
 
-  assert.match(result.messages[0]?.text ?? '', /Provider profile: openai-default/);
-  assert.match(result.messages[1]?.text ?? '', /Available threads/);
-  const threadLines = result.messages.slice(2).map((message) => message.text);
-  assert.ok(threadLines.some((line) => /^\* openai-default-thread-1 \| /.test(line)));
-  assert.ok(threadLines.some((line) => /^- openai-default-thread-2 \| /.test(line)));
+  const text = result.messages[0]?.text ?? '';
+  assert.match(text, /Threads \| openai-default/);
+  assert.match(text, /当前绑定：OpenAI Default thread 1/);
+  assert.match(text, /\* \d+\. OpenAI Default thread 1/);
+  assert.match(text, /预览：hello from wx/);
+  assert.match(text, /操作：\/open \d+  \/peek \d+  \/rename \d+ 新名字  \/search 关键词  \/threads/);
+});
+
+test('/next and /prev paginate the current thread browser page', async () => {
+  const { runtime } = makeRuntime();
+
+  for (let index = 1; index <= 6; index += 1) {
+    await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: `wx-thread-${index}`,
+      text: `hello ${index}`,
+    });
+  }
+
+  const firstPage = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-browser',
+    text: '/threads',
+  });
+  const nextPage = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-browser',
+    text: '/next',
+  });
+  const previousPage = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-browser',
+    text: '/prev',
+  });
+
+  assert.match(firstPage.messages[0]?.text ?? '', /OpenAI Default thread 6/);
+  assert.doesNotMatch(firstPage.messages[0]?.text ?? '', /OpenAI Default thread 1/);
+  assert.match(nextPage.messages[0]?.text ?? '', /第 2 页/);
+  assert.match(nextPage.messages[0]?.text ?? '', /OpenAI Default thread 1/);
+  assert.match(previousPage.messages[0]?.text ?? '', /第 1 页/);
+  assert.match(previousPage.messages[0]?.text ?? '', /OpenAI Default thread 6/);
+});
+
+test('/search filters the thread browser by preview or title', async () => {
+  const { runtime } = makeRuntime();
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-search-1',
+    text: 'alpha deployment issue',
+  });
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-search-2',
+    text: 'beta followup',
+  });
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-browser',
+    text: '/search alpha',
+  });
+
+  assert.match(result.messages[0]?.text ?? '', /搜索：alpha/);
+  assert.match(result.messages[0]?.text ?? '', /alpha deployment issue/);
+  assert.doesNotMatch(result.messages[0]?.text ?? '', /beta followup/);
 });
 
 test('/open binds the scope to an existing provider thread', async () => {
@@ -342,6 +504,93 @@ test('/open binds the scope to an existing provider thread', async () => {
   });
 
   assert.match(status.messages[4]?.text ?? '', new RegExp(`Codex thread: ${original.session?.codexThreadId}`));
+});
+
+test('/open accepts the current-page index in addition to raw thread ids', async () => {
+  const { runtime } = makeRuntime();
+
+  const first = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'telegram',
+    externalScopeId: 'tg-topic-1',
+    text: 'first thread',
+  });
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'telegram',
+    externalScopeId: 'tg-topic-2',
+    text: 'second thread',
+  });
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-browser',
+    text: '/threads',
+  });
+  const opened = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-browser',
+    text: '/open 2',
+  });
+
+  assert.equal(opened.session?.codexThreadId, first.session?.codexThreadId);
+});
+
+test('/rename updates the local thread alias used by /threads', async () => {
+  const { runtime } = makeRuntime();
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-rename-1',
+    text: 'rename candidate',
+  });
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-browser',
+    text: '/threads',
+  });
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-browser',
+    text: '/rename 1 微信桥接排障',
+  });
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-browser',
+    text: '/threads',
+  });
+
+  assert.match(result.messages[0]?.text ?? '', /微信桥接排障/);
+});
+
+test('/peek shows recent conversation turns for the selected thread', async () => {
+  const { runtime } = makeRuntime();
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-peek-1',
+    text: 'hello bridge',
+  });
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-peek-1',
+    text: 'show me logs',
+  });
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-browser',
+    text: '/threads',
+  });
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-browser',
+    text: '/peek 1',
+  });
+
+  assert.match(result.messages[0]?.text ?? '', /线程预览：/);
+  assert.match(result.messages[0]?.text ?? '', /最近 2 轮：/);
+  assert.match(result.messages[0]?.text ?? '', /你：hello bridge/);
+  assert.match(result.messages[0]?.text ?? '', /你：show me logs/);
 });
 
 

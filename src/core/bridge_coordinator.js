@@ -1,8 +1,14 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { formatPlatformScopeKey } from './contracts.js';
 import { parseSlashCommand } from './command_parser.js';
 import { NotFoundError } from './errors.js';
+
+const THREAD_PAGE_SIZE = 5;
+const THREAD_PREVIEW_LIMIT = 72;
+const THREAD_HISTORY_TURN_LIMIT = 3;
+const HELP_FLAG_SET = new Set(['-h', '--help', '-help', '-helps']);
 
 export class BridgeCoordinator {
   constructor({
@@ -11,12 +17,15 @@ export class BridgeCoordinator {
     providerRegistry,
     defaultProviderProfileId,
     restartBridge = null,
+    now = () => Date.now(),
   }) {
     this.bridgeSessions = bridgeSessions;
     this.providerProfiles = providerProfiles;
     this.providerRegistry = providerRegistry;
     this.defaultProviderProfileId = defaultProviderProfileId;
     this.restartBridge = restartBridge;
+    this.now = now;
+    this.threadBrowserStates = new Map();
   }
 
   async handleInboundEvent(event, options = {}) {
@@ -68,7 +77,14 @@ export class BridgeCoordinator {
   }
 
   async handleCommand(event, command) {
-    switch (command.name) {
+    const commandName = normalizeCommandName(command.name);
+    if (commandName !== 'helps' && isHelpFlag(command.args[0])) {
+      return this.handleHelpsCommand(event, [commandName]);
+    }
+    switch (commandName) {
+      case 'help':
+      case 'helps':
+        return this.handleHelpsCommand(event, command.args);
       case 'status':
       case 'where':
         return this.handleStatusCommand(event);
@@ -76,8 +92,18 @@ export class BridgeCoordinator {
         return this.handleNewCommand(event, command.args);
       case 'threads':
         return this.handleThreadsCommand(event);
+      case 'search':
+        return this.handleSearchCommand(event, command.args);
+      case 'next':
+        return this.handleNextThreadsCommand(event);
+      case 'prev':
+        return this.handlePrevThreadsCommand(event);
       case 'open':
         return this.handleOpenCommand(event, command.args);
+      case 'rename':
+        return this.handleRenameCommand(event, command.args);
+      case 'peek':
+        return this.handlePeekCommand(event, command.args);
       case 'provider':
         return this.handleProviderCommand(event, command.args);
       case 'restart':
@@ -87,8 +113,26 @@ export class BridgeCoordinator {
       case 'permissions':
         return this.handlePermissionsCommand(event, command.args);
       default:
-        return messageResponse([`Unsupported command: /${command.name}`]);
+        return messageResponse([
+          `Unsupported command: /${command.name}`,
+          '用 /helps 查看可用命令。',
+        ], this.buildScopedSessionMeta(event));
     }
+  }
+
+  async handleHelpsCommand(event, args) {
+    const requested = normalizeHelpTarget(args[0]);
+    if (!requested) {
+      return textResponse(renderCommandCatalog(), this.buildScopedSessionMeta(event));
+    }
+    const spec = resolveCommandHelpSpec(requested);
+    if (!spec) {
+      return messageResponse([
+        `Unknown command: /${requested}`,
+        '用 /helps 查看可用命令。',
+      ], this.buildScopedSessionMeta(event));
+    }
+    return textResponse(renderCommandHelp(spec), this.buildScopedSessionMeta(event));
   }
 
   async handleStatusCommand(event) {
@@ -139,45 +183,141 @@ export class BridgeCoordinator {
   async handleThreadsCommand(event) {
     const scopeRef = toScopeRef(event);
     const current = this.bridgeSessions.resolveScopeSession(scopeRef);
-    const providerProfile = this.requireProviderProfile(
-      current?.providerProfileId ?? this.resolveDefaultProviderProfileId(),
-    );
-    const threads = await this.bridgeSessions.listProviderThreads(providerProfile.id);
-    if (threads.length === 0) {
-      return messageResponse([`No threads are available for provider profile ${providerProfile.id}.`]);
-    }
-    const lines = [
-      `Provider profile: ${providerProfile.id}`,
-      'Available threads:',
-      ...threads.map((thread) => {
-        const marker = current?.codexThreadId === thread.threadId ? '*' : '-';
-        const title = thread.title ?? '(untitled)';
-        const sessionLabel = thread.bridgeSessionId ? ` | session ${thread.bridgeSessionId}` : '';
-        return `${marker} ${thread.threadId} | ${title}${sessionLabel}`;
-      }),
-    ];
-    return messageResponse(lines, current ? buildSessionMeta(current) : undefined);
+    const providerProfileId = current?.providerProfileId ?? this.resolveDefaultProviderProfileId();
+    return this.renderThreadsPage(event, {
+      providerProfileId,
+      cursor: null,
+      previousCursors: [],
+      searchTerm: null,
+      pageNumber: 1,
+    });
   }
 
-  async handleOpenCommand(event, args) {
-    const requestedThreadId = args[0]?.trim() ?? '';
-    if (!requestedThreadId) {
-      return messageResponse(['Usage: /open <codex_thread_id>']);
+  async handleSearchCommand(event, args) {
+    const searchTerm = args.join(' ').trim();
+    if (!searchTerm) {
+      return messageResponse([
+        '用法：/search <关键词>',
+        '帮助：/search -h',
+      ], this.buildScopedSessionMeta(event));
     }
     const scopeRef = toScopeRef(event);
     const current = this.bridgeSessions.resolveScopeSession(scopeRef);
-    const providerProfile = this.requireProviderProfile(
-      current?.providerProfileId ?? this.resolveDefaultProviderProfileId(),
-    );
+    const providerProfileId = current?.providerProfileId ?? this.resolveDefaultProviderProfileId();
+    return this.renderThreadsPage(event, {
+      providerProfileId,
+      cursor: null,
+      previousCursors: [],
+      searchTerm,
+      pageNumber: 1,
+    });
+  }
+
+  async handleNextThreadsCommand(event) {
+    const state = this.getThreadBrowserState(event);
+    if (!state) {
+      return messageResponse(['请先运行 /threads 或 /search，建立当前页后再翻页。']);
+    }
+    if (!state.nextCursor) {
+      return messageResponse(['已经是最后一页了。'], this.buildScopedSessionMeta(event));
+    }
+    return this.renderThreadsPage(event, {
+      providerProfileId: state.providerProfileId,
+      cursor: state.nextCursor,
+      previousCursors: [...state.previousCursors, state.cursor],
+      searchTerm: state.searchTerm,
+      pageNumber: state.pageNumber + 1,
+    });
+  }
+
+  async handlePrevThreadsCommand(event) {
+    const state = this.getThreadBrowserState(event);
+    if (!state) {
+      return messageResponse(['请先运行 /threads 或 /search，建立当前页后再翻页。']);
+    }
+    if (state.previousCursors.length === 0) {
+      return messageResponse(['已经是第一页了。'], this.buildScopedSessionMeta(event));
+    }
+    const previousCursors = state.previousCursors.slice(0, -1);
+    const cursor = state.previousCursors.at(-1) ?? null;
+    return this.renderThreadsPage(event, {
+      providerProfileId: state.providerProfileId,
+      cursor,
+      previousCursors,
+      searchTerm: state.searchTerm,
+      pageNumber: Math.max(1, state.pageNumber - 1),
+    });
+  }
+
+  async handleOpenCommand(event, args) {
+    const requested = args[0]?.trim() ?? '';
+    if (!requested) {
+      return messageResponse([
+        '用法：/open <序号|codex_thread_id>',
+        '帮助：/open -h',
+      ], this.buildScopedSessionMeta(event));
+    }
+    const scopeRef = toScopeRef(event);
+    const resolvedThread = this.resolveRequestedThread(event, requested);
+    if (!resolvedThread.ok) {
+      return messageResponse([resolvedThread.message], this.buildScopedSessionMeta(event));
+    }
+    const providerProfile = this.requireProviderProfile(resolvedThread.providerProfileId);
     const session = await this.bridgeSessions.bindScopeToProviderThread(scopeRef, {
       providerProfileId: providerProfile.id,
-      codexThreadId: requestedThreadId,
+      codexThreadId: resolvedThread.threadId,
     });
     return messageResponse([
       `Opened Codex thread ${session.codexThreadId}.`,
       `Provider profile: ${providerProfile.id}`,
       `Bridge session: ${session.id}`,
     ], buildSessionMeta(session));
+  }
+
+  async handleRenameCommand(event, args) {
+    const target = args[0]?.trim() ?? '';
+    const nextName = args.slice(1).join(' ').trim();
+    if (!target || !nextName) {
+      return messageResponse([
+        '用法：/rename <序号|codex_thread_id> <新名字>',
+        '帮助：/rename -h',
+      ], this.buildScopedSessionMeta(event));
+    }
+    const resolvedThread = this.resolveRequestedThread(event, target);
+    if (!resolvedThread.ok) {
+      return messageResponse([resolvedThread.message], this.buildScopedSessionMeta(event));
+    }
+    this.bridgeSessions.renameProviderThread(resolvedThread.providerProfileId, resolvedThread.threadId, nextName);
+    this.patchThreadBrowserTitle(event, resolvedThread.providerProfileId, resolvedThread.threadId, nextName);
+    return textResponse([
+      '已更新线程显示名。',
+      `名称：${nextName}`,
+      `Thread: ${resolvedThread.threadId}`,
+      '操作：/threads  /open 1  /peek 1',
+    ].join('\n'), this.buildScopedSessionMeta(event));
+  }
+
+  async handlePeekCommand(event, args) {
+    const target = args[0]?.trim() ?? '';
+    if (!target) {
+      return messageResponse([
+        '用法：/peek <序号|codex_thread_id>',
+        '帮助：/peek -h',
+      ], this.buildScopedSessionMeta(event));
+    }
+    const resolvedThread = this.resolveRequestedThread(event, target);
+    if (!resolvedThread.ok) {
+      return messageResponse([resolvedThread.message], this.buildScopedSessionMeta(event));
+    }
+    const thread = await this.bridgeSessions.readProviderThread(
+      resolvedThread.providerProfileId,
+      resolvedThread.threadId,
+      { includeTurns: true },
+    );
+    if (!thread) {
+      return messageResponse([`线程不存在：${resolvedThread.threadId}`], this.buildScopedSessionMeta(event));
+    }
+    return textResponse(renderThreadPeek(thread), this.buildScopedSessionMeta(event));
   }
 
   async handleProviderCommand(event, args) {
@@ -270,6 +410,7 @@ export class BridgeCoordinator {
     if (!preset) {
       return messageResponse([
         '用法：/permissions [read-only|default|full-access]',
+        '帮助：/permissions -h',
       ], buildSessionMeta(session));
     }
     const access = resolveAccessModeForPreset(preset);
@@ -284,6 +425,126 @@ export class BridgeCoordinator {
       `沙箱模式：${access.sandboxMode}`,
       '下一轮生效。',
     ], buildSessionMeta(session));
+  }
+
+  async renderThreadsPage(event, {
+    providerProfileId,
+    cursor,
+    previousCursors,
+    searchTerm,
+    pageNumber,
+  }) {
+    const scopeRef = toScopeRef(event);
+    const current = this.bridgeSessions.resolveScopeSession(scopeRef);
+    const providerProfile = this.requireProviderProfile(providerProfileId);
+    const result = await this.bridgeSessions.listProviderThreads(providerProfile.id, {
+      limit: THREAD_PAGE_SIZE,
+      cursor,
+      searchTerm,
+    });
+    if (result.items.length === 0) {
+      if (searchTerm) {
+        return textResponse([
+          `Threads | ${providerProfile.id}`,
+          `搜索：${searchTerm}`,
+          '',
+          '没有找到匹配的线程。',
+          '操作：/threads 重新查看全部线程',
+        ].join('\n'), current ? buildSessionMeta(current) : undefined);
+      }
+      return textResponse([
+        `Threads | ${providerProfile.id}`,
+        '',
+        '当前 provider 还没有可用线程。',
+        '先直接发一条消息，或用 /new 新建会话。',
+      ].join('\n'), current ? buildSessionMeta(current) : undefined);
+    }
+
+    this.setThreadBrowserState(event, {
+      providerProfileId: providerProfile.id,
+      cursor,
+      previousCursors,
+      nextCursor: result.nextCursor,
+      searchTerm,
+      pageNumber,
+      items: result.items,
+      updatedAt: this.now(),
+    });
+    return textResponse(renderThreadsPageMessage({
+      providerProfile,
+      currentSession: current,
+      items: result.items,
+      pageNumber,
+      searchTerm,
+      hasPreviousPage: previousCursors.length > 0,
+      hasNextPage: Boolean(result.nextCursor),
+    }), current ? buildSessionMeta(current) : undefined);
+  }
+
+  buildScopedSessionMeta(event) {
+    const session = this.bridgeSessions.resolveScopeSession(toScopeRef(event));
+    return session ? buildSessionMeta(session) : undefined;
+  }
+
+  getThreadBrowserState(event) {
+    return this.threadBrowserStates.get(buildThreadBrowserKey(event)) ?? null;
+  }
+
+  setThreadBrowserState(event, state) {
+    this.threadBrowserStates.set(buildThreadBrowserKey(event), state);
+  }
+
+  patchThreadBrowserTitle(event, providerProfileId, threadId, title) {
+    const state = this.getThreadBrowserState(event);
+    if (!state || state.providerProfileId !== providerProfileId) {
+      return;
+    }
+    state.items = state.items.map((item) => (
+      item.threadId === threadId
+        ? { ...item, title }
+        : item
+    ));
+    state.updatedAt = this.now();
+  }
+
+  resolveRequestedThread(event, requested) {
+    const value = String(requested ?? '').trim();
+    if (!value) {
+      return {
+        ok: false,
+        message: '请提供线程序号或 thread id。',
+      };
+    }
+    if (/^\d+$/u.test(value)) {
+      const state = this.getThreadBrowserState(event);
+      if (!state) {
+        return {
+          ok: false,
+          message: '当前没有可用的线程列表上下文。先运行 /threads 或 /search。',
+        };
+      }
+      const index = Number(value);
+      const item = state.items[index - 1] ?? null;
+      if (!item) {
+        return {
+          ok: false,
+          message: `当前页没有第 ${index} 项。`,
+        };
+      }
+      return {
+        ok: true,
+        providerProfileId: state.providerProfileId,
+        threadId: item.threadId,
+      };
+    }
+    const scopeRef = toScopeRef(event);
+    const current = this.bridgeSessions.resolveScopeSession(scopeRef);
+    const state = this.getThreadBrowserState(event);
+    return {
+      ok: true,
+      providerProfileId: state?.providerProfileId ?? current?.providerProfileId ?? this.resolveDefaultProviderProfileId(),
+      threadId: value,
+    };
   }
 
   resolveDefaultProviderProfileId() {
@@ -342,7 +603,12 @@ export class BridgeCoordinator {
     });
     const nextSession = this.bridgeSessions.updateSession(session.id, {
       codexThreadId: result.threadId ?? session.codexThreadId,
-      title: result.title ?? session.title,
+      title: this.bridgeSessions.resolveThreadDisplayTitle({
+        providerProfileId: session.providerProfileId,
+        threadId: result.threadId ?? session.codexThreadId,
+        providerTitle: result.title ?? null,
+        fallbackTitle: session.title,
+      }),
       cwd: session.cwd ?? event.cwd ?? null,
     });
     return { result, session: nextSession };
@@ -408,6 +674,549 @@ function messageResponse(lines, session = undefined) {
     messages: lines.map((text) => ({ text })),
     session: session ?? null,
   };
+}
+
+function textResponse(text, session = undefined) {
+  return messageResponse([text], session);
+}
+
+function buildThreadBrowserKey(event) {
+  return formatPlatformScopeKey(event.platform, event.externalScopeId);
+}
+
+function renderThreadsPageMessage({
+  providerProfile,
+  currentSession,
+  items,
+  pageNumber,
+  searchTerm,
+  hasPreviousPage,
+  hasNextPage,
+}) {
+  const currentTitle = currentSession && currentSession.providerProfileId === providerProfile.id
+    ? currentSession.title ?? '未命名线程'
+    : '无';
+  const lines = [
+    `Threads | ${providerProfile.id}`,
+    `当前绑定：${currentTitle}`,
+    `第 ${pageNumber} 页`,
+  ];
+  if (searchTerm) {
+    lines.push(`搜索：${searchTerm}`);
+  }
+  lines.push('');
+  for (const [index, item] of items.entries()) {
+    const marker = currentSession?.providerProfileId === providerProfile.id && currentSession.codexThreadId === item.threadId
+      ? '*'
+      : ' ';
+    lines.push(`${marker} ${index + 1}. ${formatThreadTitle(item.title, item.preview)}`);
+    lines.push(`   预览：${normalizeThreadPreview(item.preview)}`);
+    lines.push(`   更新：${formatRelativeTime(item.updatedAt)}`);
+    lines.push('');
+  }
+  lines.push(buildThreadsFooter({
+    hasPreviousPage,
+    hasNextPage,
+    exampleIndex: Math.min(2, Math.max(1, items.length)),
+  }));
+  return lines.join('\n').trim();
+}
+
+function buildThreadsFooter({ hasPreviousPage, hasNextPage, exampleIndex }) {
+  const index = Number(exampleIndex || 1);
+  const commands = [`/open ${index}`, `/peek ${index}`, `/rename ${index} 新名字`, '/search 关键词', '/threads'];
+  if (hasPreviousPage) {
+    commands.push('/prev');
+  }
+  if (hasNextPage) {
+    commands.push('/next');
+  }
+  return `操作：${commands.join('  ')}`;
+}
+
+function renderThreadPeek(thread) {
+  const turns = extractRecentThreadTurns(thread.turns);
+  const lines = [
+    `线程预览：${formatThreadTitle(thread.title, thread.preview)}`,
+    `Thread: ${thread.threadId}`,
+    `预览：${normalizeThreadPreview(thread.preview)}`,
+  ];
+  if (turns.length === 0) {
+    lines.push('', '最近还没有可展示的对话内容。');
+    return lines.join('\n');
+  }
+  lines.push('', `最近 ${turns.length} 轮：`);
+  for (const [index, turn] of turns.entries()) {
+    lines.push('');
+    lines.push(`${index + 1}. 你：${truncateText(turn.userText || '(空)', 220)}`);
+    lines.push(`${formatAssistantTurnLabel(turn.status)}：${truncateText(turn.assistantText || '(空)', 260)}`);
+  }
+  return lines.join('\n');
+}
+
+function extractRecentThreadTurns(turns) {
+  if (!Array.isArray(turns) || turns.length === 0) {
+    return [];
+  }
+  const recent = [];
+  for (let index = turns.length - 1; index >= 0; index -= 1) {
+    const turn = turns[index];
+    const userText = joinTurnRoleText(turn?.items, 'user');
+    const assistantText = joinTurnRoleText(turn?.items, 'assistant');
+    if (!userText && !assistantText) {
+      continue;
+    }
+    recent.unshift({
+      userText,
+      assistantText,
+      status: classifyPreviewTurnStatus(turn?.status, assistantText),
+    });
+    if (recent.length >= THREAD_HISTORY_TURN_LIMIT) {
+      break;
+    }
+  }
+  return recent;
+}
+
+function joinTurnRoleText(items, role) {
+  if (!Array.isArray(items)) {
+    return '';
+  }
+  return compactWhitespace(items
+    .filter((item) => item?.role === role)
+    .map((item) => item?.text ?? '')
+    .join(' '));
+}
+
+function classifyPreviewTurnStatus(status, assistantText) {
+  const normalized = String(status ?? '').trim().toLowerCase();
+  if (assistantText && ['completed', 'complete', 'succeeded', 'success', 'finished'].includes(normalized)) {
+    return 'complete';
+  }
+  if (['interrupted', 'cancelled', 'canceled', 'aborted'].includes(normalized)) {
+    return 'interrupted';
+  }
+  if (['failed', 'error'].includes(normalized)) {
+    return 'failed';
+  }
+  return assistantText ? 'partial' : 'missing';
+}
+
+function formatAssistantTurnLabel(status) {
+  switch (status) {
+    case 'interrupted':
+      return 'Codex（已中断）';
+    case 'failed':
+      return 'Codex（失败）';
+    case 'partial':
+      return 'Codex（部分输出）';
+    default:
+      return 'Codex';
+  }
+}
+
+function formatThreadTitle(title, preview) {
+  const resolved = compactWhitespace(title || '');
+  if (resolved) {
+    return truncateText(resolved, 48);
+  }
+  const fallback = compactWhitespace(preview || '');
+  if (fallback) {
+    return truncateText(fallback, 48);
+  }
+  return '未命名线程';
+}
+
+function normalizeThreadPreview(preview) {
+  const normalized = compactWhitespace(preview || '');
+  return normalized ? truncateText(normalized, THREAD_PREVIEW_LIMIT) : '(空)';
+}
+
+function compactWhitespace(value) {
+  return String(value ?? '').replace(/\s+/gu, ' ').trim();
+}
+
+function truncateText(value, limit) {
+  const normalized = String(value ?? '').trim();
+  if (!normalized) {
+    return '';
+  }
+  return normalized.length > limit ? `${normalized.slice(0, limit - 1)}…` : normalized;
+}
+
+function formatRelativeTime(value, now = Date.now()) {
+  const updatedAt = normalizeEpochMs(value);
+  if (!Number.isFinite(updatedAt) || updatedAt <= 0) {
+    return '未知';
+  }
+  const diffMs = Math.max(0, now - updatedAt);
+  const diffSeconds = Math.floor(diffMs / 1000);
+  if (diffSeconds < 60) {
+    return '刚刚';
+  }
+  const diffMinutes = Math.floor(diffSeconds / 60);
+  if (diffMinutes < 60) {
+    return `${diffMinutes} 分钟前`;
+  }
+  const diffHours = Math.floor(diffMinutes / 60);
+  if (diffHours < 48) {
+    return `${diffHours} 小时前`;
+  }
+  const diffDays = Math.floor(diffHours / 24);
+  if (diffDays < 30) {
+    return `${diffDays} 天前`;
+  }
+  return new Date(updatedAt).toISOString().slice(0, 10);
+}
+
+function normalizeEpochMs(value) {
+  const numeric = Number(value || 0);
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return 0;
+  }
+  return numeric < 10_000_000_000 ? numeric * 1000 : numeric;
+}
+
+function isHelpFlag(value) {
+  return HELP_FLAG_SET.has(String(value ?? '').trim().toLowerCase());
+}
+
+function normalizeCommandName(value) {
+  return String(value ?? '').trim().toLowerCase();
+}
+
+function normalizeHelpTarget(value) {
+  const normalized = normalizeCommandName(String(value ?? '').replace(/^\//u, ''));
+  if (!normalized) {
+    return '';
+  }
+  return isHelpFlag(normalized) ? 'helps' : normalized;
+}
+
+function resolveCommandHelpSpec(name) {
+  const normalized = normalizeHelpTarget(name);
+  if (!normalized) {
+    return null;
+  }
+  const canonical = COMMAND_HELP_ALIAS_MAP.get(normalized) ?? null;
+  return canonical ? COMMAND_HELP_SPECS[canonical] ?? null : null;
+}
+
+function renderCommandCatalog() {
+  const lines = [
+    'Slash 命令',
+    '',
+  ];
+  for (const commandName of COMMAND_HELP_ORDER) {
+    const spec = COMMAND_HELP_SPECS[commandName];
+    const aliasLabel = spec.aliases.length > 0 ? ` (${spec.aliases.map((alias) => `/${alias}`).join(', ')})` : '';
+    lines.push(`/${spec.name}${aliasLabel} ${spec.summary}`);
+  }
+  lines.push('');
+  lines.push('帮助：/helps <命令>');
+  lines.push('示例：/helps threads  或  /threads -h');
+  lines.push('说明：这不是严格的 shell CLI，而是借用 CLI 的帮助习惯做聊天命令。');
+  return lines.join('\n');
+}
+
+function renderCommandHelp(spec) {
+  const lines = [
+    `命令：/${spec.name}`,
+    `说明：${spec.summary}`,
+  ];
+  if (spec.aliases.length > 0) {
+    lines.push(`别名：${spec.aliases.map((alias) => `/${alias}`).join(' ')}`);
+  }
+  lines.push('');
+  lines.push('用法：');
+  for (const usage of spec.usage) {
+    lines.push(usage);
+  }
+  lines.push('');
+  lines.push('示例：');
+  for (const example of spec.examples) {
+    lines.push(example);
+  }
+  if (spec.notes.length > 0) {
+    lines.push('');
+    lines.push('说明：');
+    for (const note of spec.notes) {
+      lines.push(note);
+    }
+  }
+  return lines.join('\n');
+}
+
+const COMMAND_HELP_SPECS = Object.freeze({
+  helps: freezeCommandHelp({
+    name: 'helps',
+    aliases: ['help'],
+    summary: '查看所有斜杠命令，或查看某个命令的帮助',
+    usage: [
+      '/helps',
+      '/helps <命令>',
+      '/helps -h',
+    ],
+    examples: [
+      '/helps',
+      '/helps threads',
+      '/help open',
+    ],
+    notes: [
+      '所有斜杠命令都支持 -h / --help / -helps。',
+    ],
+  }),
+  status: freezeCommandHelp({
+    name: 'status',
+    aliases: ['where'],
+    summary: '查看当前 scope 绑定的 bridge session、provider 和权限设置',
+    usage: [
+      '/status',
+      '/where',
+      '/status -h',
+    ],
+    examples: [
+      '/status',
+      '/where',
+    ],
+    notes: [],
+  }),
+  new: freezeCommandHelp({
+    name: 'new',
+    aliases: [],
+    summary: '创建一个新的 bridge session，可选指定 cwd',
+    usage: [
+      '/new',
+      '/new /home/ubuntu/dev/CodexBridge',
+      '/new -h',
+    ],
+    examples: [
+      '/new',
+      '/new /home/ubuntu/dev/dailywork',
+    ],
+    notes: [
+      '不改 provider，只是在当前 scope 上切到一个新线程。',
+    ],
+  }),
+  provider: freezeCommandHelp({
+    name: 'provider',
+    aliases: [],
+    summary: '查看可用 provider，或切换当前 scope 的 provider profile',
+    usage: [
+      '/provider',
+      '/provider <profileId>',
+      '/provider -h',
+    ],
+    examples: [
+      '/provider',
+      '/provider openai-default',
+    ],
+    notes: [
+      '切换 provider 会为当前 scope 创建新的 bridge session。',
+    ],
+  }),
+  threads: freezeCommandHelp({
+    name: 'threads',
+    aliases: [],
+    summary: '查看当前 provider 的线程列表首页',
+    usage: [
+      '/threads',
+      '/threads -h',
+    ],
+    examples: [
+      '/threads',
+      '/next',
+      '/open 2',
+      '/peek 2',
+    ],
+    notes: [
+      '微信里推荐先 /threads，再用序号操作，不必复制 thread id。',
+    ],
+  }),
+  search: freezeCommandHelp({
+    name: 'search',
+    aliases: [],
+    summary: '按关键词搜索线程标题或 preview，并显示第一页',
+    usage: [
+      '/search <关键词>',
+      '/search -h',
+    ],
+    examples: [
+      '/search bridge',
+      '/search 微信',
+    ],
+    notes: [
+      '搜索结果也支持 /open 1、/peek 1、/rename 1。',
+    ],
+  }),
+  next: freezeCommandHelp({
+    name: 'next',
+    aliases: [],
+    summary: '翻到当前线程列表的下一页',
+    usage: [
+      '/next',
+      '/next -h',
+    ],
+    examples: [
+      '/threads',
+      '/next',
+    ],
+    notes: [
+      '先运行 /threads 或 /search，建立当前页上下文后才能翻页。',
+    ],
+  }),
+  prev: freezeCommandHelp({
+    name: 'prev',
+    aliases: [],
+    summary: '翻到当前线程列表的上一页',
+    usage: [
+      '/prev',
+      '/prev -h',
+    ],
+    examples: [
+      '/threads',
+      '/next',
+      '/prev',
+    ],
+    notes: [
+      '先运行 /threads 或 /search，建立当前页上下文后才能翻页。',
+    ],
+  }),
+  open: freezeCommandHelp({
+    name: 'open',
+    aliases: [],
+    summary: '把当前 scope 绑定到指定线程，可用序号或 thread id',
+    usage: [
+      '/open <序号|codex_thread_id>',
+      '/open -h',
+    ],
+    examples: [
+      '/open 2',
+      '/open 019d95ad-7166-7ee3-89a3-3bbb50e0fd64',
+    ],
+    notes: [
+      '序号来自当前页的 /threads 或 /search 结果。',
+    ],
+  }),
+  peek: freezeCommandHelp({
+    name: 'peek',
+    aliases: [],
+    summary: '查看某个线程最近几轮的对话摘要',
+    usage: [
+      '/peek <序号|codex_thread_id>',
+      '/peek -h',
+    ],
+    examples: [
+      '/peek 1',
+      '/peek 019d95ad-7166-7ee3-89a3-3bbb50e0fd64',
+    ],
+    notes: [
+      '适合先判断是不是你要打开的线程。',
+    ],
+  }),
+  rename: freezeCommandHelp({
+    name: 'rename',
+    aliases: [],
+    summary: '给线程设置本地显示名，不改 provider 原始 thread id',
+    usage: [
+      '/rename <序号|codex_thread_id> <新名字>',
+      '/rename -h',
+    ],
+    examples: [
+      '/rename 2 微信桥接排障',
+      '/rename 019d95ad-7166-7ee3-89a3-3bbb50e0fd64 CodexBridge',
+    ],
+    notes: [
+      '重命名是 bridge 本地 alias，会在 /threads 中优先显示。',
+    ],
+  }),
+  permissions: freezeCommandHelp({
+    name: 'permissions',
+    aliases: [],
+    summary: '查看或切换下一轮的权限预设',
+    usage: [
+      '/permissions',
+      '/permissions <read-only|default|full-access>',
+      '/permissions -h',
+    ],
+    examples: [
+      '/permissions',
+      '/permissions full-access',
+    ],
+    notes: [
+      '权限变更在下一轮消息生效。',
+    ],
+  }),
+  reconnect: freezeCommandHelp({
+    name: 'reconnect',
+    aliases: [],
+    summary: '刷新当前 provider 的 Codex 会话',
+    usage: [
+      '/reconnect',
+      '/reconnect -h',
+    ],
+    examples: [
+      '/reconnect',
+    ],
+    notes: [
+      '适合遇到鉴权或 session 异常时使用。',
+    ],
+  }),
+  restart: freezeCommandHelp({
+    name: 'restart',
+    aliases: [],
+    summary: '重启桥接服务',
+    usage: [
+      '/restart',
+      '/restart -h',
+    ],
+    examples: [
+      '/restart',
+    ],
+    notes: [
+      '当前 host 不支持时会直接返回不可用。',
+    ],
+  }),
+});
+
+const COMMAND_HELP_ORDER = Object.freeze([
+  'helps',
+  'status',
+  'new',
+  'provider',
+  'threads',
+  'search',
+  'next',
+  'prev',
+  'open',
+  'peek',
+  'rename',
+  'permissions',
+  'reconnect',
+  'restart',
+]);
+
+const COMMAND_HELP_ALIAS_MAP = buildCommandHelpAliasMap(COMMAND_HELP_SPECS);
+
+function buildCommandHelpAliasMap(specs) {
+  const map = new Map();
+  for (const spec of Object.values(specs)) {
+    map.set(spec.name, spec.name);
+    for (const alias of spec.aliases) {
+      map.set(alias, spec.name);
+    }
+  }
+  return map;
+}
+
+function freezeCommandHelp(spec) {
+  return Object.freeze({
+    ...spec,
+    aliases: Object.freeze([...(spec.aliases ?? [])]),
+    usage: Object.freeze([...(spec.usage ?? [])]),
+    examples: Object.freeze([...(spec.examples ?? [])]),
+    notes: Object.freeze([...(spec.notes ?? [])]),
+  });
 }
 
 function isStaleThreadError(error) {

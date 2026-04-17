@@ -6,6 +6,7 @@ export class BridgeSessionService {
     providerProfiles,
     bridgeSessions,
     sessionSettings,
+    threadMetadata,
     providerRegistry,
     sessionRouter,
     now = () => Date.now(),
@@ -13,6 +14,7 @@ export class BridgeSessionService {
     this.providerProfiles = providerProfiles;
     this.bridgeSessions = bridgeSessions;
     this.sessionSettings = sessionSettings;
+    this.threadMetadata = threadMetadata;
     this.providerRegistry = providerRegistry;
     this.sessionRouter = sessionRouter;
     this.now = now;
@@ -129,6 +131,7 @@ export class BridgeSessionService {
     const thread = await providerPlugin.readThread({
       providerProfile,
       threadId: codexThreadId,
+      includeTurns: false,
     });
     if (!thread) {
       throw new NotFoundError(`Unknown provider thread: ${providerProfileId}/${codexThreadId}`);
@@ -139,7 +142,11 @@ export class BridgeSessionService {
       providerProfileId: providerProfile.id,
       codexThreadId: thread.threadId,
       cwd: thread.cwd ?? null,
-      title: thread.title ?? null,
+      title: this.resolveThreadDisplayTitle({
+        providerProfileId: providerProfile.id,
+        threadId: thread.threadId,
+        providerTitle: thread.title ?? null,
+      }),
       createdAt: now,
       updatedAt: thread.updatedAt ?? now,
     };
@@ -160,7 +167,11 @@ export class BridgeSessionService {
     return session;
   }
 
-  async listProviderThreads(providerProfileId) {
+  async listProviderThreads(providerProfileId, {
+    limit = 5,
+    cursor = null,
+    searchTerm = null,
+  } = {}) {
     const providerProfile = this.providerProfiles.get(providerProfileId);
     if (!providerProfile) {
       throw new NotFoundError(`Unknown provider profile: ${providerProfileId}`);
@@ -168,31 +179,37 @@ export class BridgeSessionService {
     const localSessions = this.listSessionsForProviderProfile(providerProfile.id);
     const localByThreadId = new Map(localSessions.map((session) => [session.codexThreadId, session]));
     const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
-    const remoteThreads = await providerPlugin.listThreads({ providerProfile });
-    const merged = new Map();
-    for (const remoteThread of remoteThreads) {
-      const localSession = localByThreadId.get(remoteThread.threadId) ?? null;
-      merged.set(remoteThread.threadId, {
-        threadId: remoteThread.threadId,
-        title: remoteThread.title ?? localSession?.title ?? null,
-        cwd: remoteThread.cwd ?? localSession?.cwd ?? null,
-        updatedAt: remoteThread.updatedAt ?? localSession?.updatedAt ?? null,
-        bridgeSessionId: localSession?.id ?? null,
-      });
-    }
-    for (const localSession of localSessions) {
-      if (merged.has(localSession.codexThreadId)) {
-        continue;
-      }
-      merged.set(localSession.codexThreadId, {
-        threadId: localSession.codexThreadId,
-        title: localSession.title ?? null,
-        cwd: localSession.cwd ?? null,
-        updatedAt: localSession.updatedAt,
-        bridgeSessionId: localSession.id,
-      });
-    }
-    return [...merged.values()].sort((left, right) => (right.updatedAt ?? 0) - (left.updatedAt ?? 0));
+    const remoteResult = await providerPlugin.listThreads({
+      providerProfile,
+      limit,
+      cursor,
+      searchTerm,
+    });
+    const remoteThreads = Array.isArray(remoteResult)
+      ? remoteResult
+      : Array.isArray(remoteResult?.items)
+        ? remoteResult.items
+        : [];
+    return {
+      items: remoteThreads.map((remoteThread) => {
+        const localSession = localByThreadId.get(remoteThread.threadId) ?? null;
+        return {
+          threadId: remoteThread.threadId,
+          title: this.resolveThreadDisplayTitle({
+            providerProfileId: providerProfile.id,
+            threadId: remoteThread.threadId,
+            providerTitle: remoteThread.title ?? null,
+            fallbackTitle: localSession?.title ?? null,
+          }),
+          cwd: remoteThread.cwd ?? localSession?.cwd ?? null,
+          updatedAt: remoteThread.updatedAt ?? localSession?.updatedAt ?? null,
+          preview: remoteThread.preview ?? null,
+          turns: Array.isArray(remoteThread.turns) ? remoteThread.turns : [],
+          bridgeSessionId: localSession?.id ?? null,
+        };
+      }),
+      nextCursor: typeof remoteResult?.nextCursor === 'string' ? remoteResult.nextCursor : null,
+    };
   }
 
   async switchScopeProvider(
@@ -220,6 +237,69 @@ export class BridgeSessionService {
 
   getSessionSettings(bridgeSessionId) {
     return this.sessionSettings.get(bridgeSessionId);
+  }
+
+  getThreadMetadata(providerProfileId, threadId) {
+    return this.threadMetadata?.get(providerProfileId, threadId) ?? null;
+  }
+
+  resolveThreadDisplayTitle({
+    providerProfileId,
+    threadId,
+    providerTitle = null,
+    fallbackTitle = null,
+  }) {
+    const alias = this.getThreadMetadata(providerProfileId, threadId)?.alias ?? null;
+    return alias ?? providerTitle ?? fallbackTitle ?? null;
+  }
+
+  async readProviderThread(providerProfileId, threadId, { includeTurns = false } = {}) {
+    const providerProfile = this.providerProfiles.get(providerProfileId);
+    if (!providerProfile) {
+      throw new NotFoundError(`Unknown provider profile: ${providerProfileId}`);
+    }
+    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+    const thread = await providerPlugin.readThread({
+      providerProfile,
+      threadId,
+      includeTurns,
+    });
+    if (!thread) {
+      return null;
+    }
+    const localSession = this.findSessionByProviderThread(providerProfile.id, thread.threadId);
+    return {
+      threadId: thread.threadId,
+      title: this.resolveThreadDisplayTitle({
+        providerProfileId: providerProfile.id,
+        threadId: thread.threadId,
+        providerTitle: thread.title ?? null,
+        fallbackTitle: localSession?.title ?? null,
+      }),
+      cwd: thread.cwd ?? localSession?.cwd ?? null,
+      updatedAt: thread.updatedAt ?? localSession?.updatedAt ?? null,
+      preview: thread.preview ?? null,
+      turns: Array.isArray(thread.turns) ? thread.turns : [],
+      bridgeSessionId: localSession?.id ?? null,
+    };
+  }
+
+  renameProviderThread(providerProfileId, threadId, alias) {
+    const normalizedAlias = String(alias ?? '').trim();
+    const nextMetadata = {
+      providerProfileId,
+      threadId,
+      alias: normalizedAlias || null,
+      updatedAt: this.now(),
+    };
+    this.threadMetadata.save(nextMetadata);
+    const session = this.findSessionByProviderThread(providerProfileId, threadId);
+    if (session) {
+      this.updateSession(session.id, {
+        title: normalizedAlias || session.title,
+      });
+    }
+    return nextMetadata;
   }
 
   upsertSessionSettings(bridgeSessionId, updates) {

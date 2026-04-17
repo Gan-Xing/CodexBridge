@@ -11,7 +11,14 @@ class FakeProviderPlugin {
     this.kind = kind;
     this.displayName = kind;
     this.threadCounter = 0;
+    this.baseTime = Date.now();
+    this.clock = 0;
     this.threads = new Map();
+  }
+
+  nextUpdatedAt() {
+    this.clock += 1;
+    return this.baseTime + this.clock;
   }
 
   async startThread({ providerProfile, cwd, title }) {
@@ -20,21 +27,45 @@ class FakeProviderPlugin {
       threadId: `${providerProfile.id}-thread-${this.threadCounter}`,
       cwd: cwd ?? `/tmp/${providerProfile.id}`,
       title: title ?? `${providerProfile.displayName} thread ${this.threadCounter}`,
-      updatedAt: Date.now(),
+      updatedAt: this.nextUpdatedAt(),
+      preview: '',
+      turns: [],
     };
     this.threads.set(thread.threadId, thread);
     return thread;
   }
 
-  async readThread({ threadId }) {
-    return this.threads.get(threadId) ?? null;
+  async readThread({ threadId, includeTurns = false }) {
+    const thread = this.threads.get(threadId) ?? null;
+    if (!thread) {
+      return null;
+    }
+    return {
+      ...thread,
+      turns: includeTurns ? thread.turns : [],
+    };
   }
 
-  async listThreads() {
-    return [...this.threads.values()];
+  async listThreads({ limit = 20, cursor = null } = {}) {
+    const offset = cursor ? Number(cursor) : 0;
+    const threads = [...this.threads.values()];
+    const items = threads.slice(offset, offset + limit);
+    const nextOffset = offset + items.length;
+    return {
+      items,
+      nextCursor: nextOffset < threads.length ? String(nextOffset) : null,
+    };
   }
 
   async startTurn({ bridgeSession, inputText }) {
+    const existingThread = this.threads.get(bridgeSession.codexThreadId);
+    if (existingThread) {
+      this.threads.set(bridgeSession.codexThreadId, {
+        ...existingThread,
+        preview: inputText,
+        updatedAt: this.nextUpdatedAt(),
+      });
+    }
     return {
       outputText: `echo: ${inputText}`,
       threadId: bridgeSession.codexThreadId,
@@ -89,4 +120,48 @@ test('file-backed repositories preserve scope bindings across runtime restarts',
   assert.match(status.messages[0]?.text ?? '', /Scope: weixin:wx-user-1/);
   assert.match(status.messages[4]?.text ?? '', new RegExp(`Codex thread: ${first.session?.codexThreadId}`));
   assert.equal(status.session?.bridgeSessionId, first.session?.bridgeSessionId);
+});
+
+test('file-backed repositories preserve thread aliases across runtime restarts', async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-json-store-'));
+  const providerProfile = makeProviderProfile('openai-default', 'openai-native', 'OpenAI Default');
+  const providerPlugin = new FakeProviderPlugin('openai-native');
+
+  const runtimeA = createCodexBridgeRuntime({
+    providerPlugins: [providerPlugin],
+    providerProfiles: [providerProfile],
+    defaultProviderProfileId: providerProfile.id,
+    repositories: createFileJsonRepositories(stateDir),
+  });
+
+  await runtimeA.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-1',
+    text: 'rename me',
+  });
+  await runtimeA.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-browser',
+    text: '/threads',
+  });
+  await runtimeA.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-browser',
+    text: '/rename 1 微信桥接排障',
+  });
+
+  const runtimeB = createCodexBridgeRuntime({
+    providerPlugins: [providerPlugin],
+    providerProfiles: [providerProfile],
+    defaultProviderProfileId: providerProfile.id,
+    repositories: createFileJsonRepositories(stateDir),
+  });
+
+  const result = await runtimeB.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-browser',
+    text: '/threads',
+  });
+
+  assert.match(result.messages[0]?.text ?? '', /微信桥接排障/);
 });

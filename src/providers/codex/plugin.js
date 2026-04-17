@@ -27,14 +27,14 @@ export class CodexProviderPlugin {
     });
   }
 
-  async readThread({ providerProfile, threadId }) {
+  async readThread({ providerProfile, threadId, includeTurns = false }) {
     const client = await this.ensureClient(providerProfile);
-    return client.readThread(threadId, false);
+    return client.readThread(threadId, includeTurns);
   }
 
-  async listThreads({ providerProfile }) {
+  async listThreads({ providerProfile, limit = 20, cursor = null, searchTerm = null }) {
     const client = await this.ensureClient(providerProfile);
-    return client.listThreads({});
+    return client.listThreads({ limit, cursor, searchTerm });
   }
 
   async resumeThread({ providerProfile, threadId }) {
