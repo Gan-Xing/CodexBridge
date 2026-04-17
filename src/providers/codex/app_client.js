@@ -160,6 +160,7 @@ export class CodexAppClient extends EventEmitter {
     approvalPolicy = 'on-request',
     collaborationMode = 'default',
     onProgress = null,
+    onTurnStarted = null,
     timeoutMs = 15 * 60 * 1000,
   }) {
     const result = await this.request('turn/start', {
@@ -187,6 +188,12 @@ export class CodexAppClient extends EventEmitter {
     const turn = result?.turn;
     if (!turn?.id) {
       throw new Error('Codex turn/start returned no turn id');
+    }
+    if (typeof onTurnStarted === 'function') {
+      await onTurnStarted({
+        turnId: String(turn.id),
+        threadId,
+      });
     }
     return this.waitForTurnResult({
       threadId,

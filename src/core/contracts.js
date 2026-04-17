@@ -108,6 +108,7 @@
 /**
  * @typedef {Object} ProviderTurnResult
  * @property {string} outputText
+ * @property {string | null | undefined} [turnId]
  * @property {string | null | undefined} [threadId]
  * @property {string | null | undefined} [title]
  */
@@ -135,7 +136,8 @@
  * @property {(params: { providerProfile: ProviderProfile, cwd?: string | null, title?: string | null, metadata?: Record<string, unknown> }) => Promise<ProviderThreadStartResult>} startThread
  * @property {(params: { providerProfile: ProviderProfile, threadId: string, includeTurns?: boolean }) => Promise<ProviderThreadSummary | null>} readThread
  * @property {(params: { providerProfile: ProviderProfile, limit?: number, cursor?: string | null, searchTerm?: string | null }) => Promise<ProviderThreadListResult>} listThreads
- * @property {(params: { providerProfile: ProviderProfile, bridgeSession: BridgeSession, sessionSettings: SessionSettings | null, event: InboundTextEvent, inputText: string }) => Promise<ProviderTurnResult>} startTurn
+ * @property {(params: { providerProfile: ProviderProfile, bridgeSession: BridgeSession, sessionSettings: SessionSettings | null, event: InboundTextEvent, inputText: string, onProgress?: ((progress: Record<string, unknown>) => Promise<void> | void) | null, onTurnStarted?: ((meta: Record<string, unknown>) => Promise<void> | void) | null }) => Promise<ProviderTurnResult>} startTurn
+ * @property {(params: { providerProfile: ProviderProfile, threadId: string, turnId: string }) => Promise<void>} [interruptTurn]
  */
 
 export const PLATFORM_IDS = Object.freeze({

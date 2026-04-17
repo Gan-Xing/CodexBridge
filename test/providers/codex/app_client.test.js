@@ -172,6 +172,53 @@ test('CodexAppClient omits null reasoning effort from default collaboration sett
   });
 });
 
+test('CodexAppClient notifies onTurnStarted before waiting for turn completion', async () => {
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+  });
+  const seen = [];
+
+  client.request = async (method) => {
+    if (method === 'turn/start') {
+      return { turn: { id: 'turn-1' } };
+    }
+    if (method === 'thread/read') {
+      return {
+        thread: {
+          id: 'thread-1',
+          name: 'Thread 1',
+          turns: [{
+            id: 'turn-1',
+            status: 'completed',
+            items: [{
+              type: 'assistant_message',
+              text: 'done',
+            }],
+          }],
+        },
+      };
+    }
+    return {};
+  };
+
+  const result = await client.startTurn({
+    threadId: 'thread-1',
+    inputText: 'hello',
+    model: 'gpt-5.4',
+    effort: 'medium',
+    onTurnStarted: async (meta) => {
+      seen.push(meta);
+    },
+    timeoutMs: 10,
+  });
+
+  assert.equal(result.turnId, 'turn-1');
+  assert.deepEqual(seen, [{
+    turnId: 'turn-1',
+    threadId: 'thread-1',
+  }]);
+});
+
 test('CodexAppClient times out individual JSON-RPC requests and clears pending state', async () => {
   const client = new CodexAppClient({
     codexCliBin: 'codex',

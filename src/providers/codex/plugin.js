@@ -57,7 +57,15 @@ export class CodexProviderPlugin {
     };
   }
 
-  async startTurn({ providerProfile, bridgeSession, sessionSettings, event, inputText, onProgress = null }) {
+  async startTurn({
+    providerProfile,
+    bridgeSession,
+    sessionSettings,
+    event,
+    inputText,
+    onProgress = null,
+    onTurnStarted = null,
+  }) {
     const client = await this.ensureClient(providerProfile);
     const modelInfo = await this.resolveModelInfo(providerProfile, client, sessionSettings?.model ?? null);
     const effort = this.resolveReasoningEffort(modelInfo, sessionSettings?.reasoningEffort ?? null);
@@ -72,12 +80,14 @@ export class CodexProviderPlugin {
       sandboxMode: sessionSettings?.sandboxMode ?? 'workspace-write',
       collaborationMode: 'default',
       onProgress,
+      onTurnStarted,
     });
     return {
       outputText: result.outputText,
       outputState: result.outputState ?? 'complete',
       previewText: result.previewText ?? '',
       finalSource: result.finalSource ?? 'thread_items',
+      turnId: result.turnId ?? null,
       threadId: result.threadId,
       title: result.title ?? bridgeSession.title,
     };

@@ -88,7 +88,7 @@ Acceptance:
 - [x] Implement `/permissions`
 - [x] Implement `/reconnect`
 - [x] Implement `/restart`
-- [ ] Implement `/interrupt`
+- [x] Implement `/stop` (`/interrupt` compatibility alias)
 
 Acceptance:
 

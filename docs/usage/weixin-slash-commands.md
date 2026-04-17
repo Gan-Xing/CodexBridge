@@ -16,6 +16,7 @@ It borrows the most useful CLI help conventions while staying chat-friendly:
 
 ```text
 /helps
+/stop
 /threads
 /open 2
 /peek 2
@@ -39,13 +40,26 @@ Examples:
 
 ### `/status` and `/where`
 
-Show the current scope binding, provider profile, Codex thread, and access settings.
+Show the current scope binding, provider profile, Codex thread, access settings, and active-turn state.
 
 Examples:
 
 ```text
 /status
 /where
+```
+
+### `/stop` and `/interrupt`
+
+Request an interrupt for the active Codex turn.
+`/stop` is the primary command.
+`/interrupt` is kept as a compatibility alias.
+
+Examples:
+
+```text
+/stop
+/interrupt
 ```
 
 ### `/new`
@@ -214,6 +228,7 @@ For day-to-day use on WeChat:
 2. Use `/peek 1` or `/peek 2` to inspect candidates
 3. Use `/open 1` or `/open 2` to bind the thread
 4. Use `/rename 1 <alias>` if you want a stable, readable name
-5. Use `/permissions` when you need to inspect or change the next-turn access preset
+5. Use `/stop` if the current reply needs to be interrupted
+6. Use `/permissions` when you need to inspect or change the next-turn access preset
 
 This workflow avoids copying raw thread ids and works well in a chat UI without buttons.

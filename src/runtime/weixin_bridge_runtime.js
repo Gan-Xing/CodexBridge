@@ -1,3 +1,4 @@
+import { parseSlashCommand } from '../core/command_parser.js';
 import { WeixinPoller } from '../platforms/weixin/poller.js';
 
 export class WeixinBridgeRuntime {
@@ -16,6 +17,7 @@ export class WeixinBridgeRuntime {
     this.previewHardLimitBytes = previewHardLimitBytes;
     this.previewIntervalMs = previewIntervalMs;
     this.poller = null;
+    this.backgroundTasks = new Set();
     this.scopeChains = new Map();
   }
 
@@ -24,7 +26,7 @@ export class WeixinBridgeRuntime {
     this.poller = new WeixinPoller({
       plugin: this.platformPlugin,
       onEvent: async (event) => {
-        await this.handleInboundEvent(event);
+        await this.dispatchInboundEvent(event);
       },
       onError: async (error) => {
         await this.onError(error);
@@ -36,6 +38,7 @@ export class WeixinBridgeRuntime {
   async stop() {
     this.poller?.stop();
     this.poller = null;
+    await this.waitForIdle();
     await this.platformPlugin.stop();
   }
 
@@ -51,9 +54,30 @@ export class WeixinBridgeRuntime {
     return this.enqueueScopeWork(event.externalScopeId, async () => this.processInboundEvent(event));
   }
 
+  async dispatchInboundEvent(event) {
+    const command = parseSlashCommand(String(event?.text ?? ''));
+    if (command) {
+      return this.processInboundEvent(event);
+    }
+    const task = this.processInboundEvent(event)
+      .catch(async (error) => {
+        await this.onError(error);
+      });
+    this.trackBackgroundTask(task);
+    return { type: 'scheduled' };
+  }
+
+  async waitForIdle() {
+    const tasks = [...this.backgroundTasks];
+    if (tasks.length === 0) {
+      return;
+    }
+    await Promise.allSettled(tasks);
+  }
+
   async processInboundEvent(event) {
     const streamState = createStreamState();
-    await this.safeSendTyping(event.externalScopeId, 'start');
+    const typingStart = this.safeSendTyping(event.externalScopeId, 'start');
     try {
       const response = await this.bridgeCoordinator.handleInboundEvent(event, {
         onProgress: async (progress) => {
@@ -90,6 +114,7 @@ export class WeixinBridgeRuntime {
       await this.runPostResponseAction(response, event);
       return response;
     } finally {
+      await typingStart;
       await this.safeSendTyping(event.externalScopeId, 'stop');
     }
   }
@@ -357,6 +382,13 @@ export class WeixinBridgeRuntime {
         this.scopeChains.delete(scopeId);
       }
     }
+  }
+
+  trackBackgroundTask(task) {
+    this.backgroundTasks.add(task);
+    task.finally(() => {
+      this.backgroundTasks.delete(task);
+    });
   }
 }
 

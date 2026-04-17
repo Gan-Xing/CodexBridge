@@ -19,4 +19,8 @@ export class MiniMaxViaCLIProxyProviderPlugin {
   async startTurn() {
     throw new Error('MiniMaxViaCLIProxyProviderPlugin.startTurn is not implemented yet');
   }
+
+  async interruptTurn() {
+    throw new Error('MiniMaxViaCLIProxyProviderPlugin.interruptTurn is not implemented yet');
+  }
 }

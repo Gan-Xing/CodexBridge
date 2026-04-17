@@ -1,3 +1,4 @@
+import { ActiveTurnRegistry } from '../core/active_turn_registry.js';
 import { BridgeSessionService } from '../core/bridge_session_service.js';
 import { BridgeCoordinator } from '../core/bridge_coordinator.js';
 import { SessionRouter } from '../core/session_router.js';
@@ -47,12 +48,14 @@ export function createCodexBridgeRuntime({
     providerRegistry: registry,
     sessionRouter,
   });
+  const activeTurns = new ActiveTurnRegistry();
 
   const resolvedDefaultProviderProfileId = defaultProviderProfileId
     ?? providerProfiles[0]?.id
     ?? null;
   const bridgeCoordinator = new BridgeCoordinator({
     bridgeSessions,
+    activeTurns,
     providerProfiles: providerProfilesRepository,
     providerRegistry: registry,
     defaultProviderProfileId: resolvedDefaultProviderProfileId,
@@ -72,6 +75,7 @@ export function createCodexBridgeRuntime({
       threadMetadata: threadMetadataRepository,
     },
     services: {
+      activeTurns,
       sessionRouter,
       bridgeSessions,
       bridgeCoordinator,

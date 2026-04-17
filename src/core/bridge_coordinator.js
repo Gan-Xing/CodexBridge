@@ -13,6 +13,7 @@ const HELP_FLAG_SET = new Set(['-h', '--help', '-help', '-helps']);
 export class BridgeCoordinator {
   constructor({
     bridgeSessions,
+    activeTurns = null,
     providerProfiles,
     providerRegistry,
     defaultProviderProfileId,
@@ -20,6 +21,7 @@ export class BridgeCoordinator {
     now = () => Date.now(),
   }) {
     this.bridgeSessions = bridgeSessions;
+    this.activeTurns = activeTurns;
     this.providerProfiles = providerProfiles;
     this.providerRegistry = providerRegistry;
     this.defaultProviderProfileId = defaultProviderProfileId;
@@ -38,14 +40,25 @@ export class BridgeCoordinator {
 
   async handleConversationTurn(event, options = {}) {
     const scopeRef = toScopeRef(event);
-    const session = await this.bridgeSessions.resolveOrCreateScopeSession(scopeRef, {
-      providerProfileId: this.resolveDefaultProviderProfileId(),
-      cwd: event.cwd ?? null,
-      providerStartOptions: {
-        sourcePlatform: event.platform,
-      },
-    });
+    const activeTurn = this.activeTurns?.resolveScopeTurn(scopeRef) ?? null;
+    if (activeTurn) {
+      return this.buildActiveTurnBlockedResponse(event, activeTurn);
+    }
+    this.activeTurns?.beginScopeTurn(scopeRef);
+    let session = null;
     try {
+      session = await this.bridgeSessions.resolveOrCreateScopeSession(scopeRef, {
+        providerProfileId: this.resolveDefaultProviderProfileId(),
+        cwd: event.cwd ?? null,
+        providerStartOptions: {
+          sourcePlatform: event.platform,
+        },
+      });
+      this.activeTurns?.updateScopeTurn(scopeRef, {
+        bridgeSessionId: session.id,
+        providerProfileId: session.providerProfileId,
+        threadId: session.codexThreadId,
+      });
       const { result, session: nextSession } = await this.startTurnWithRecovery(scopeRef, session, event, options);
       const response = messageResponse([result.outputText], buildSessionMeta(nextSession));
       response.meta = {
@@ -62,7 +75,7 @@ export class BridgeCoordinator {
       if (!failure) {
         throw error;
       }
-      const response = messageResponse([''], buildSessionMeta(session));
+      const response = messageResponse([''], session ? buildSessionMeta(session) : this.buildScopedSessionMeta(event));
       response.meta = {
         ...(response.meta ?? {}),
         codexTurn: {
@@ -73,6 +86,8 @@ export class BridgeCoordinator {
         },
       };
       return response;
+    } finally {
+      this.activeTurns?.endScopeTurn(scopeRef);
     }
   }
 
@@ -90,6 +105,9 @@ export class BridgeCoordinator {
         return this.handleStatusCommand(event);
       case 'new':
         return this.handleNewCommand(event, command.args);
+      case 'stop':
+      case 'interrupt':
+        return this.handleStopCommand(event);
       case 'threads':
         return this.handleThreadsCommand(event);
       case 'search':
@@ -146,6 +164,7 @@ export class BridgeCoordinator {
     }
     const providerProfile = this.requireProviderProfile(session.providerProfileId);
     const settings = this.bridgeSessions.getSessionSettings(session.id);
+    const activeTurn = this.activeTurns?.resolveScopeTurn(scopeRef) ?? null;
     return messageResponse([
       `Scope: ${event.platform}:${event.externalScopeId}`,
       `Bridge session: ${session.id}`,
@@ -158,10 +177,17 @@ export class BridgeCoordinator {
       `Access preset: ${formatAccessPreset(resolveAccessPreset(settings))}`,
       `Approval policy: ${resolveApprovalPolicy(settings)}`,
       `Sandbox mode: ${resolveSandboxMode(settings)}`,
+      `Active turn: ${formatActiveTurnValue(activeTurn)}`,
+      `Turn state: ${formatActiveTurnState(activeTurn)}`,
+      ...(activeTurn ? [`Turn control: /stop (/interrupt)`] : []),
     ], buildSessionMeta(session));
   }
 
   async handleNewCommand(event, args) {
+    const activeResponse = this.rejectIfActiveTurnForCommand(event, 'new');
+    if (activeResponse) {
+      return activeResponse;
+    }
     const scopeRef = toScopeRef(event);
     const existing = this.bridgeSessions.resolveScopeSession(scopeRef);
     const providerProfileId = existing?.providerProfileId ?? this.resolveDefaultProviderProfileId();
@@ -250,6 +276,10 @@ export class BridgeCoordinator {
   }
 
   async handleOpenCommand(event, args) {
+    const activeResponse = this.rejectIfActiveTurnForCommand(event, 'open');
+    if (activeResponse) {
+      return activeResponse;
+    }
     const requested = args[0]?.trim() ?? '';
     if (!requested) {
       return messageResponse([
@@ -275,6 +305,10 @@ export class BridgeCoordinator {
   }
 
   async handleRenameCommand(event, args) {
+    const activeResponse = this.rejectIfActiveTurnForCommand(event, 'rename');
+    if (activeResponse) {
+      return activeResponse;
+    }
     const target = args[0]?.trim() ?? '';
     const nextName = args.slice(1).join(' ').trim();
     if (!target || !nextName) {
@@ -336,6 +370,10 @@ export class BridgeCoordinator {
     if (!profile) {
       return messageResponse([`Unknown provider profile: ${requested}`]);
     }
+    const activeResponse = this.rejectIfActiveTurnForCommand(event, 'provider');
+    if (activeResponse) {
+      return activeResponse;
+    }
     const switched = await this.bridgeSessions.switchScopeProvider(scopeRef, {
       nextProviderProfileId: profile.id,
       providerStartOptions: {
@@ -351,6 +389,10 @@ export class BridgeCoordinator {
   }
 
   async handleRestartCommand(event) {
+    const activeResponse = this.rejectIfActiveTurnForCommand(event, 'restart');
+    if (activeResponse) {
+      return activeResponse;
+    }
     if (typeof this.restartBridge !== 'function') {
       return messageResponse(['Current host does not support /restart.']);
     }
@@ -370,6 +412,10 @@ export class BridgeCoordinator {
   }
 
   async handleReconnectCommand(event) {
+    const activeResponse = this.rejectIfActiveTurnForCommand(event, 'reconnect');
+    if (activeResponse) {
+      return activeResponse;
+    }
     const scopeRef = toScopeRef(event);
     const session = this.bridgeSessions.resolveScopeSession(scopeRef);
     const providerProfileId = session?.providerProfileId ?? this.resolveDefaultProviderProfileId();
@@ -406,6 +452,10 @@ export class BridgeCoordinator {
     if (args.length === 0) {
       return messageResponse(renderPermissionsLines(this.bridgeSessions.getSessionSettings(session.id)), buildSessionMeta(session));
     }
+    const activeResponse = this.rejectIfActiveTurnForCommand(event, 'permissions');
+    if (activeResponse) {
+      return activeResponse;
+    }
     const preset = normalizeAccessPreset(args[0]);
     if (!preset) {
       return messageResponse([
@@ -425,6 +475,32 @@ export class BridgeCoordinator {
       `沙箱模式：${access.sandboxMode}`,
       '下一轮生效。',
     ], buildSessionMeta(session));
+  }
+
+  async handleStopCommand(event) {
+    const scopeRef = toScopeRef(event);
+    const active = this.activeTurns?.resolveScopeTurn(scopeRef) ?? null;
+    if (!active) {
+      return messageResponse(['当前没有进行中的回复。'], this.buildScopedSessionMeta(event));
+    }
+    if (active.interruptRequested) {
+      return messageResponse(['已经请求过中断了，正在等待当前回复停止。'], buildActiveTurnMeta(active));
+    }
+    this.activeTurns?.requestInterrupt(scopeRef);
+    if (!active.turnId) {
+      return messageResponse(['已请求中断。当前回复仍在启动，拿到 turn id 后会自动中断。'], buildActiveTurnMeta(active));
+    }
+    try {
+      await this.dispatchInterruptForActiveTurn(active);
+      return messageResponse(['已请求中断当前回复。'], buildActiveTurnMeta(active));
+    } catch (error) {
+      this.activeTurns?.updateScopeTurn(scopeRef, {
+        interruptRequested: false,
+      });
+      return messageResponse([
+        `中断失败：${formatUserError(error)}`,
+      ], buildActiveTurnMeta(active));
+    }
   }
 
   async renderThreadsPage(event, {
@@ -484,6 +560,25 @@ export class BridgeCoordinator {
   buildScopedSessionMeta(event) {
     const session = this.bridgeSessions.resolveScopeSession(toScopeRef(event));
     return session ? buildSessionMeta(session) : undefined;
+  }
+
+  buildActiveTurnBlockedResponse(event, activeTurn) {
+    return messageResponse([
+      '当前已有一轮回复在进行中。',
+      activeTurn.interruptRequested
+        ? '已请求中断，请等待当前回复停止。'
+        : '请先等待，或使用 /stop（兼容 /interrupt）中断。',
+    ], buildActiveTurnMeta(activeTurn) ?? this.buildScopedSessionMeta(event));
+  }
+
+  rejectIfActiveTurnForCommand(event, commandName = 'generic') {
+    const activeTurn = this.activeTurns?.resolveScopeTurn(toScopeRef(event)) ?? null;
+    if (!activeTurn) {
+      return null;
+    }
+    return messageResponse([
+      renderCommandBlockedMessage(commandName, activeTurn.interruptRequested),
+    ], buildActiveTurnMeta(activeTurn) ?? this.buildScopedSessionMeta(event));
   }
 
   getThreadBrowserState(event) {
@@ -600,6 +695,26 @@ export class BridgeCoordinator {
       event,
       inputText: event.text,
       onProgress: options.onProgress ?? null,
+      onTurnStarted: async (meta = {}) => {
+        const scopeRef = toScopeRef(event);
+        const active = this.activeTurns?.updateScopeTurn(scopeRef, {
+          bridgeSessionId: session.id,
+          providerProfileId: session.providerProfileId,
+          threadId: meta.threadId ?? session.codexThreadId,
+          turnId: meta.turnId ?? null,
+        }) ?? null;
+        if (typeof options.onTurnStarted === 'function') {
+          await options.onTurnStarted({
+            turnId: meta.turnId ?? null,
+            threadId: meta.threadId ?? session.codexThreadId,
+            bridgeSessionId: session.id,
+            providerProfileId: session.providerProfileId,
+          });
+        }
+        if (active?.interruptRequested && active.turnId && !active.interruptDispatched) {
+          await this.dispatchInterruptForActiveTurn(active);
+        }
+      },
     });
     const nextSession = this.bridgeSessions.updateSession(session.id, {
       codexThreadId: result.threadId ?? session.codexThreadId,
@@ -612,6 +727,31 @@ export class BridgeCoordinator {
       cwd: session.cwd ?? event.cwd ?? null,
     });
     return { result, session: nextSession };
+  }
+
+  async dispatchInterruptForActiveTurn(activeTurn) {
+    if (!activeTurn?.providerProfileId || !activeTurn?.threadId || !activeTurn?.turnId) {
+      throw new Error('当前回复尚未拿到可中断的 turn id。');
+    }
+    if (activeTurn.interruptDispatched) {
+      return;
+    }
+    const providerProfile = this.requireProviderProfile(activeTurn.providerProfileId);
+    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+    if (typeof providerPlugin.interruptTurn !== 'function') {
+      throw new Error(`当前 provider 不支持中断：${providerProfile.providerKind}`);
+    }
+    this.activeTurns?.noteInterruptDispatched(activeTurn.scopeRef, true);
+    try {
+      await providerPlugin.interruptTurn({
+        providerProfile,
+        threadId: activeTurn.threadId,
+        turnId: activeTurn.turnId,
+      });
+    } catch (error) {
+      this.activeTurns?.noteInterruptDispatched(activeTurn.scopeRef, false);
+      throw error;
+    }
   }
 
   async retryTurnOnSameSession(session, event, options = {}, originalError) {
@@ -666,6 +806,50 @@ function buildSessionMeta(session) {
     providerProfileId: session.providerProfileId,
     codexThreadId: session.codexThreadId,
   };
+}
+
+function buildActiveTurnMeta(activeTurn) {
+  if (!activeTurn?.bridgeSessionId || !activeTurn?.providerProfileId || !activeTurn?.threadId) {
+    return null;
+  }
+  return {
+    bridgeSessionId: activeTurn.bridgeSessionId,
+    providerProfileId: activeTurn.providerProfileId,
+    codexThreadId: activeTurn.threadId,
+  };
+}
+
+function renderCommandBlockedMessage(commandName, interruptRequested) {
+  const action = {
+    new: '新建会话',
+    open: '切换线程',
+    rename: '重命名线程',
+    provider: '切换 provider',
+    reconnect: '刷新当前 Codex 会话',
+    restart: '重启桥接',
+    permissions: '切换权限预设',
+  }[commandName] ?? '执行这个操作';
+  if (interruptRequested) {
+    return `已请求中断，请等待当前回复停止后再${action}。`;
+  }
+  return `当前有回复在进行中，暂时不能${action}。请先等待，或使用 /stop（兼容 /interrupt）中断。`;
+}
+
+function formatActiveTurnValue(activeTurn) {
+  if (!activeTurn) {
+    return 'none';
+  }
+  return activeTurn.turnId ?? '(starting)';
+}
+
+function formatActiveTurnState(activeTurn) {
+  if (!activeTurn) {
+    return 'idle';
+  }
+  if (activeTurn.interruptRequested) {
+    return 'interrupt requested';
+  }
+  return activeTurn.turnId ? 'running' : 'starting';
 }
 
 function messageResponse(lines, session = undefined) {
@@ -969,7 +1153,7 @@ const COMMAND_HELP_SPECS = Object.freeze({
   status: freezeCommandHelp({
     name: 'status',
     aliases: ['where'],
-    summary: '查看当前 scope 绑定的 bridge session、provider 和权限设置',
+    summary: '查看当前 scope 绑定、provider、权限设置，以及 active turn 状态',
     usage: [
       '/status',
       '/where',
@@ -980,6 +1164,23 @@ const COMMAND_HELP_SPECS = Object.freeze({
       '/where',
     ],
     notes: [],
+  }),
+  stop: freezeCommandHelp({
+    name: 'stop',
+    aliases: ['interrupt'],
+    summary: '请求中断当前正在执行的回复',
+    usage: [
+      '/stop',
+      '/interrupt',
+      '/stop -h',
+    ],
+    examples: [
+      '/stop',
+      '/interrupt',
+    ],
+    notes: [
+      '如果当前没有进行中的回复，会直接提示无可中断目标。',
+    ],
   }),
   new: freezeCommandHelp({
     name: 'new',
@@ -1182,6 +1383,7 @@ const COMMAND_HELP_SPECS = Object.freeze({
 const COMMAND_HELP_ORDER = Object.freeze([
   'helps',
   'status',
+  'stop',
   'new',
   'provider',
   'threads',

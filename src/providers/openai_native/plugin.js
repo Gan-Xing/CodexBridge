@@ -19,4 +19,8 @@ export class OpenAINativeProviderPlugin {
   async startTurn() {
     throw new Error('OpenAINativeProviderPlugin.startTurn is not implemented yet');
   }
+
+  async interruptTurn() {
+    throw new Error('OpenAINativeProviderPlugin.interruptTurn is not implemented yet');
+  }
 }

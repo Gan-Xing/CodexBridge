@@ -10,6 +10,7 @@ class FakeProviderPlugin {
     this.startThreadCalls = [];
     this.resumeThreadCalls = [];
     this.startTurnCalls = [];
+    this.interruptTurnCalls = [];
     this.threadCounter = 0;
     this.baseTime = Date.now();
     this.clock = 0;
@@ -88,11 +89,18 @@ class FakeProviderPlugin {
     return this.threads.get(threadId) ?? null;
   }
 
-  async startTurn({ providerProfile, bridgeSession, sessionSettings, event, inputText }) {
+  async startTurn({ providerProfile, bridgeSession, sessionSettings, event, inputText, onTurnStarted = null }) {
     this.startTurnCalls.push({ providerProfile, bridgeSession, sessionSettings, event, inputText });
     const existingThread = this.threads.get(bridgeSession.codexThreadId);
     if (!existingThread) {
       throw new Error(`thread not found: ${bridgeSession.codexThreadId}`);
+    }
+    const turnId = `${bridgeSession.codexThreadId}-turn-${existingThread.turns.length + 1}`;
+    if (typeof onTurnStarted === 'function') {
+      await onTurnStarted({
+        turnId,
+        threadId: bridgeSession.codexThreadId,
+      });
     }
     const outputText = `${this.replyPrefix}: ${inputText}`;
     this.threads.set(bridgeSession.codexThreadId, {
@@ -102,7 +110,7 @@ class FakeProviderPlugin {
       turns: [
         ...existingThread.turns,
         {
-          id: `${bridgeSession.codexThreadId}-turn-${existingThread.turns.length + 1}`,
+          id: turnId,
           status: 'complete',
           error: null,
           items: [
@@ -114,9 +122,14 @@ class FakeProviderPlugin {
     });
     return {
       outputText,
+      turnId,
       threadId: bridgeSession.codexThreadId,
       title: bridgeSession.title,
     };
+  }
+
+  async interruptTurn({ providerProfile, threadId, turnId }) {
+    this.interruptTurnCalls.push({ providerProfile, threadId, turnId });
   }
 }
 
@@ -145,6 +158,18 @@ function makeRuntime({ restartBridge = null } = {}) {
     restartBridge,
   });
   return { runtime, openai, minimax };
+}
+
+async function waitForCondition(predicate, { timeoutMs = 1000, intervalMs = 10 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const value = predicate();
+    if (value) {
+      return value;
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  throw new Error('Timed out waiting for condition');
 }
 
 test('bridge coordinator creates a default-provider session for normal text and starts a turn', async () => {
@@ -288,6 +313,25 @@ test('/status reports when no bridge session is bound yet', async () => {
   assert.match(result.messages[1]?.text ?? '', /Default provider profile: openai-default/);
 });
 
+test('/status includes active-turn state when a session is idle', async () => {
+  const { runtime } = makeRuntime();
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-status-1',
+    text: 'hello',
+  });
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-status-1',
+    text: '/status',
+  });
+
+  assert.equal(result.messages[11]?.text ?? '', 'Active turn: none');
+  assert.equal(result.messages[12]?.text ?? '', 'Turn state: idle');
+});
+
 test('/helps lists all supported slash commands and help entrypoints', async () => {
   const { runtime } = makeRuntime();
 
@@ -299,6 +343,7 @@ test('/helps lists all supported slash commands and help entrypoints', async () 
 
   const text = result.messages[0]?.text ?? '';
   assert.match(text, /Slash 命令/);
+  assert.match(text, /\/stop \(\/interrupt\) 请求中断当前正在执行的回复/);
   assert.match(text, /\/threads 查看当前 provider 的线程列表首页/);
   assert.match(text, /\/rename 给线程设置本地显示名/);
   assert.match(text, /帮助：\/helps <命令>/);
@@ -366,6 +411,330 @@ test('slash commands treat help flags in later argument positions as help reques
   const text = result.messages[0]?.text ?? '';
   assert.match(text, /命令：\/permissions/);
   assert.match(text, /\/permissions -h/);
+});
+
+test('/stop reports when there is no active turn to interrupt', async () => {
+  const { runtime } = makeRuntime();
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-1',
+    text: '/stop',
+  });
+
+  assert.equal(result.messages[0]?.text ?? '', '当前没有进行中的回复。');
+});
+
+test('/stop interrupts the active turn once the provider has issued a turn id', async () => {
+  const { runtime, openai } = makeRuntime();
+  const scopeRef = {
+    platform: 'weixin',
+    externalScopeId: 'wx-user-1',
+  };
+  let releaseTurn;
+  const turnGate = new Promise((resolve) => {
+    releaseTurn = resolve;
+  });
+  let interrupted = false;
+
+  openai.startTurn = async ({ bridgeSession, inputText, onTurnStarted = null }) => {
+    const existingThread = openai.threads.get(bridgeSession.codexThreadId);
+    const turnId = `${bridgeSession.codexThreadId}-turn-${(existingThread?.turns.length ?? 0) + 1}`;
+    await onTurnStarted?.({
+      turnId,
+      threadId: bridgeSession.codexThreadId,
+    });
+    await turnGate;
+    return {
+      outputText: interrupted ? '' : `openai: ${inputText}`,
+      outputState: interrupted ? 'interrupted' : 'complete',
+      turnId,
+      threadId: bridgeSession.codexThreadId,
+      title: bridgeSession.title,
+    };
+  };
+  openai.interruptTurn = async (params) => {
+    interrupted = true;
+    openai.interruptTurnCalls.push(params);
+    releaseTurn();
+  };
+
+  const firstTurn = runtime.services.bridgeCoordinator.handleInboundEvent({
+    ...scopeRef,
+    text: 'long running turn',
+  });
+
+  await waitForCondition(() => runtime.services.activeTurns.resolveScopeTurn(scopeRef)?.turnId);
+
+  const stopResult = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    ...scopeRef,
+    text: '/stop',
+  });
+
+  assert.equal(stopResult.messages[0]?.text ?? '', '已请求中断当前回复。');
+  assert.equal(openai.interruptTurnCalls.length, 1);
+
+  const firstResult = await firstTurn;
+  assert.equal(firstResult.meta?.codexTurn?.outputState, 'interrupted');
+});
+
+test('/interrupt remains a compatibility alias and can queue an interrupt before turn startup completes', async () => {
+  const { runtime, openai } = makeRuntime();
+  const scopeRef = {
+    platform: 'weixin',
+    externalScopeId: 'wx-user-2',
+  };
+  let releaseStart;
+  const startGate = new Promise((resolve) => {
+    releaseStart = resolve;
+  });
+  let releaseFinish;
+  const finishGate = new Promise((resolve) => {
+    releaseFinish = resolve;
+  });
+
+  openai.startTurn = async ({ bridgeSession, onTurnStarted = null }) => {
+    await startGate;
+    await onTurnStarted?.({
+      turnId: `${bridgeSession.codexThreadId}-turn-pending`,
+      threadId: bridgeSession.codexThreadId,
+    });
+    await finishGate;
+    return {
+      outputText: '',
+      outputState: 'interrupted',
+      turnId: `${bridgeSession.codexThreadId}-turn-pending`,
+      threadId: bridgeSession.codexThreadId,
+      title: bridgeSession.title,
+    };
+  };
+  openai.interruptTurn = async (params) => {
+    openai.interruptTurnCalls.push(params);
+    releaseFinish();
+  };
+
+  const firstTurn = runtime.services.bridgeCoordinator.handleInboundEvent({
+    ...scopeRef,
+    text: 'slow startup turn',
+  });
+
+  await waitForCondition(() => runtime.services.activeTurns.resolveScopeTurn(scopeRef));
+
+  const stopResult = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    ...scopeRef,
+    text: '/interrupt',
+  });
+
+  assert.equal(stopResult.messages[0]?.text ?? '', '已请求中断。当前回复仍在启动，拿到 turn id 后会自动中断。');
+  releaseStart();
+  await waitForCondition(() => openai.interruptTurnCalls.length === 1);
+  await firstTurn;
+});
+
+test('/status shows running active-turn details and control hint', async () => {
+  const { runtime, openai } = makeRuntime();
+  const scopeRef = {
+    platform: 'weixin',
+    externalScopeId: 'wx-user-status-2',
+  };
+  let releaseTurn;
+  const turnGate = new Promise((resolve) => {
+    releaseTurn = resolve;
+  });
+
+  openai.startTurn = async ({ bridgeSession, inputText, onTurnStarted = null }) => {
+    await onTurnStarted?.({
+      turnId: `${bridgeSession.codexThreadId}-turn-1`,
+      threadId: bridgeSession.codexThreadId,
+    });
+    await turnGate;
+    return {
+      outputText: `openai: ${inputText}`,
+      turnId: `${bridgeSession.codexThreadId}-turn-1`,
+      threadId: bridgeSession.codexThreadId,
+      title: bridgeSession.title,
+    };
+  };
+
+  const firstTurn = runtime.services.bridgeCoordinator.handleInboundEvent({
+    ...scopeRef,
+    text: 'long running turn',
+  });
+
+  await waitForCondition(() => runtime.services.activeTurns.resolveScopeTurn(scopeRef)?.turnId);
+
+  const status = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    ...scopeRef,
+    text: '/status',
+  });
+
+  assert.match(status.messages[11]?.text ?? '', /Active turn: .*turn-1/);
+  assert.equal(status.messages[12]?.text ?? '', 'Turn state: running');
+  assert.equal(status.messages[13]?.text ?? '', 'Turn control: /stop (/interrupt)');
+
+  releaseTurn();
+  await firstTurn;
+});
+
+test('bridge coordinator blocks new conversation turns while another turn is already active', async () => {
+  const { runtime, openai } = makeRuntime();
+  const scopeRef = {
+    platform: 'weixin',
+    externalScopeId: 'wx-user-3',
+  };
+  let releaseTurn;
+  const turnGate = new Promise((resolve) => {
+    releaseTurn = resolve;
+  });
+
+  openai.startTurn = async ({ bridgeSession, inputText, onTurnStarted = null }) => {
+    await onTurnStarted?.({
+      turnId: `${bridgeSession.codexThreadId}-turn-1`,
+      threadId: bridgeSession.codexThreadId,
+    });
+    await turnGate;
+    return {
+      outputText: `openai: ${inputText}`,
+      turnId: `${bridgeSession.codexThreadId}-turn-1`,
+      threadId: bridgeSession.codexThreadId,
+      title: bridgeSession.title,
+    };
+  };
+
+  const firstTurn = runtime.services.bridgeCoordinator.handleInboundEvent({
+    ...scopeRef,
+    text: 'first turn',
+  });
+
+  await waitForCondition(() => runtime.services.activeTurns.resolveScopeTurn(scopeRef));
+
+  const blocked = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    ...scopeRef,
+    text: 'second turn',
+  });
+
+  assert.equal(blocked.messages[0]?.text ?? '', '当前已有一轮回复在进行中。');
+  assert.equal(blocked.messages[1]?.text ?? '', '请先等待，或使用 /stop（兼容 /interrupt）中断。');
+
+  releaseTurn();
+  await firstTurn;
+});
+
+test('bridge coordinator shows command-specific blocked messages while a turn is active', async () => {
+  const { runtime, openai } = makeRuntime();
+  const scopeRef = {
+    platform: 'weixin',
+    externalScopeId: 'wx-user-4',
+  };
+  let releaseTurn;
+  const turnGate = new Promise((resolve) => {
+    releaseTurn = resolve;
+  });
+
+  openai.startTurn = async ({ bridgeSession, inputText, onTurnStarted = null }) => {
+    await onTurnStarted?.({
+      turnId: `${bridgeSession.codexThreadId}-turn-1`,
+      threadId: bridgeSession.codexThreadId,
+    });
+    await turnGate;
+    return {
+      outputText: `openai: ${inputText}`,
+      turnId: `${bridgeSession.codexThreadId}-turn-1`,
+      threadId: bridgeSession.codexThreadId,
+      title: bridgeSession.title,
+    };
+  };
+
+  const firstTurn = runtime.services.bridgeCoordinator.handleInboundEvent({
+    ...scopeRef,
+    text: 'first turn',
+  });
+
+  await waitForCondition(() => runtime.services.activeTurns.resolveScopeTurn(scopeRef));
+
+  const checks = [
+    ['/new', '当前有回复在进行中，暂时不能新建会话。请先等待，或使用 /stop（兼容 /interrupt）中断。'],
+    ['/open thread-1', '当前有回复在进行中，暂时不能切换线程。请先等待，或使用 /stop（兼容 /interrupt）中断。'],
+    ['/rename thread-1 新名字', '当前有回复在进行中，暂时不能重命名线程。请先等待，或使用 /stop（兼容 /interrupt）中断。'],
+    ['/provider minimax-default', '当前有回复在进行中，暂时不能切换 provider。请先等待，或使用 /stop（兼容 /interrupt）中断。'],
+    ['/permissions full-access', '当前有回复在进行中，暂时不能切换权限预设。请先等待，或使用 /stop（兼容 /interrupt）中断。'],
+    ['/reconnect', '当前有回复在进行中，暂时不能刷新当前 Codex 会话。请先等待，或使用 /stop（兼容 /interrupt）中断。'],
+    ['/restart', '当前有回复在进行中，暂时不能重启桥接。请先等待，或使用 /stop（兼容 /interrupt）中断。'],
+  ];
+
+  for (const [text, expected] of checks) {
+    const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      ...scopeRef,
+      text,
+    });
+    assert.equal(result.messages[0]?.text ?? '', expected);
+  }
+
+  releaseTurn();
+  await firstTurn;
+});
+
+test('command-specific blocked messages switch to wait-for-stop wording after interrupt is requested', async () => {
+  const { runtime, openai } = makeRuntime();
+  const scopeRef = {
+    platform: 'weixin',
+    externalScopeId: 'wx-user-5',
+  };
+  let releaseTurn;
+  const turnGate = new Promise((resolve) => {
+    releaseTurn = resolve;
+  });
+  let interrupted = false;
+
+  openai.startTurn = async ({ bridgeSession, onTurnStarted = null }) => {
+    await onTurnStarted?.({
+      turnId: `${bridgeSession.codexThreadId}-turn-1`,
+      threadId: bridgeSession.codexThreadId,
+    });
+    await turnGate;
+    return {
+      outputText: '',
+      outputState: interrupted ? 'interrupted' : 'complete',
+      turnId: `${bridgeSession.codexThreadId}-turn-1`,
+      threadId: bridgeSession.codexThreadId,
+      title: bridgeSession.title,
+    };
+  };
+  openai.interruptTurn = async (params) => {
+    interrupted = true;
+    openai.interruptTurnCalls.push(params);
+  };
+
+  const firstTurn = runtime.services.bridgeCoordinator.handleInboundEvent({
+    ...scopeRef,
+    text: 'first turn',
+  });
+
+  await waitForCondition(() => runtime.services.activeTurns.resolveScopeTurn(scopeRef)?.turnId);
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    ...scopeRef,
+    text: '/stop',
+  });
+
+  const blocked = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    ...scopeRef,
+    text: '/provider minimax-default',
+  });
+
+  assert.equal(blocked.messages[0]?.text ?? '', '已请求中断，请等待当前回复停止后再切换 provider。');
+
+  const status = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    ...scopeRef,
+    text: '/status',
+  });
+
+  assert.match(status.messages[11]?.text ?? '', /Active turn: .*turn-1/);
+  assert.equal(status.messages[12]?.text ?? '', 'Turn state: interrupt requested');
+  assert.equal(status.messages[13]?.text ?? '', 'Turn control: /stop (/interrupt)');
+
+  releaseTurn();
+  await firstTurn;
 });
 
 test('/new creates a fresh session on the current provider profile', async () => {

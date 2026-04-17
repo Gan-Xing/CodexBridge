@@ -87,6 +87,54 @@ test('WeixinBridgeRuntime forwards poll events into the bridge coordinator and s
     { externalScopeId: 'wxid_1', status: 'stop' },
   ]);});
 
+test('WeixinBridgeRuntime dispatches plain-text turns in the background so slash commands can run immediately', async () => {
+  const sent = [];
+  let releaseTurn;
+  const turnGate = new Promise((resolve) => {
+    releaseTurn = resolve;
+  });
+  const runtime = makeRuntime({
+    sendText: async ({ externalScopeId, content }) => {
+      sent.push({ externalScopeId, content });
+    },
+    coordinator: {
+      async handleInboundEvent(event) {
+        if (event.text === 'hello') {
+          await turnGate;
+          return completeResponse('final answer');
+        }
+        return {
+          type: 'message',
+          messages: [{ text: 'stop requested' }],
+        };
+      },
+    },
+  });
+
+  await runtime.dispatchInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wxid_1',
+    text: 'hello',
+  });
+  await runtime.dispatchInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wxid_1',
+    text: '/stop',
+  });
+
+  assert.deepEqual(sent, [
+    { externalScopeId: 'wxid_1', content: 'stop requested' },
+  ]);
+
+  releaseTurn();
+  await runtime.waitForIdle();
+
+  assert.deepEqual(sent, [
+    { externalScopeId: 'wxid_1', content: 'stop requested' },
+    { externalScopeId: 'wxid_1', content: 'final answer' },
+  ]);
+});
+
 test('WeixinBridgeRuntime suppresses the final send when streamed preview already matches the final content', async () => {
   const sent = [];
   const runtime = makeRuntime({

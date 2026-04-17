@@ -166,6 +166,70 @@ test('CodexProviderPlugin resolves default model metadata from listModels when p
   ]);
 });
 
+test('CodexProviderPlugin forwards onTurnStarted to the app client and returns the turn id', async () => {
+  const plugin = new CodexProviderPlugin({
+    clientFactory: () => ({
+      async start() {},
+      async startThread() {
+        return { threadId: 'thread-1', cwd: null, title: null };
+      },
+      async readThread(threadId) {
+        return { threadId, title: null, cwd: null };
+      },
+      async listThreads() {
+        return [];
+      },
+      async startTurn(params) {
+        await params.onTurnStarted?.({
+          turnId: 'turn-1',
+          threadId: params.threadId,
+        });
+        return {
+          outputText: 'done',
+          turnId: 'turn-1',
+          threadId: params.threadId,
+          title: null,
+        };
+      },
+      async interruptTurn() {},
+      async listModels() {
+        return [{ model: 'gpt-5.4' }];
+      },
+    }),
+  });
+  const seen = [];
+
+  const result = await plugin.startTurn({
+    providerProfile: makeProfile(),
+    bridgeSession: {
+      id: 'session-1',
+      codexThreadId: 'thread-1',
+      cwd: '/tmp/work',
+      title: null,
+    },
+    sessionSettings: {
+      model: null,
+      reasoningEffort: null,
+      serviceTier: null,
+    },
+    event: {
+      platform: 'weixin',
+      externalScopeId: 'wxid_1',
+      text: 'hello',
+    },
+    inputText: 'hello',
+    onTurnStarted: async (meta) => {
+      seen.push(meta);
+    },
+  });
+
+  assert.equal(result.turnId, 'turn-1');
+  assert.deepEqual(seen, [{
+    turnId: 'turn-1',
+    threadId: 'thread-1',
+  }]);
+});
+
 test('CodexProviderPlugin forwards thread list paging and includeTurns reads to the app client', async () => {
   const calls = [];
   const plugin = new CodexProviderPlugin({
