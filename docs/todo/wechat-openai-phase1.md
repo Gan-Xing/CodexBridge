@@ -74,16 +74,28 @@ Acceptance:
 
 ## Phase 5: Command Surface
 
+- [x] Implement `/helps`
 - [x] Implement `/status`
 - [x] Implement `/new`
+- [x] Implement `/provider`
 - [x] Implement `/threads`
+- [x] Implement `/search`
+- [x] Implement `/next`
+- [x] Implement `/prev`
 - [x] Implement `/open`
+- [x] Implement `/peek`
+- [x] Implement `/rename`
+- [x] Implement `/permissions`
+- [x] Implement `/reconnect`
+- [x] Implement `/restart`
 - [ ] Implement `/interrupt`
 
 Acceptance:
 
 - [x] Commands operate on bridge session state, not raw platform state
-- [ ] Commands work in WeChat DM for the default provider profile
+- [x] Commands work in WeChat DM for the default provider profile
+- [x] Thread browsing works without buttons by using page-local indexes
+- [x] Every slash command has discoverable help via `/helps` and `-h`
 
 ## Phase 6: Telegram Re-entry
 

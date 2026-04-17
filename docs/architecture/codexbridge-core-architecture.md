@@ -191,9 +191,16 @@ The first real implementation is intentionally narrow:
 - Codex only
 - default provider profile only
 - text only
-- minimal slash-style commands
+- text-first slash-style commands with help-driven discovery
 
 This keeps the first bridge real and debuggable.
+
+Current WeChat command design principle:
+
+- no button dependency in core behavior
+- `/helps` is the command catalog
+- `/<command> -h` is the fast path to per-command help
+- thread operations should prefer page indexes over copied raw thread ids
 
 ## Telegram Re-entry
 
@@ -226,3 +233,4 @@ It is:
 3. platform and Codex engine adapter contracts
 4. zero-dependency in-memory implementations for testing the model
 5. bootstrap code that future WeChat/Codex code can attach to without redesign
+6. a text-first command surface that can later be rendered as richer UI on Telegram without changing core semantics

@@ -13,6 +13,7 @@ CodexBridge is a Codex-centered gateway for connecting multiple chat platforms t
 
 - [Core architecture](./docs/architecture/codexbridge-core-architecture.md)
 - [WeChat + Codex Phase 1 TODO](./docs/todo/wechat-openai-phase1.md)
+- [WeChat slash command reference](./docs/usage/weixin-slash-commands.md)
 
 ## Repository Layout
 
@@ -37,11 +38,43 @@ Project bootstrap is now focused on:
 
 Current implemented bridge pieces:
 
-- Core session routing with `/status`, `/new`, `/threads`, `/open`, and `/provider`
+- Core session routing with WeChat-friendly slash commands, including `/helps`, `/status`, `/new`, `/provider`, `/threads`, `/search`, `/next`, `/prev`, `/open`, `/peek`, `/rename`, `/permissions`, `/reconnect`, and `/restart`
 - File-backed JSON repositories for persistent bridge state
 - WeChat platform skeleton for Hermes-compatible iLink config loading, QR account state reuse, inbound DM normalization, long-poll client/poller wiring, context-token persistence, text chunking, and outbound text/typing delivery
 - Codex profile loader and initial Codex app-server client/plugin path for shared thread execution
 - WeChat runtime wiring that feeds poll events into the shared bridge coordinator and sends responses back through the WeChat transport
+
+## WeChat Slash Commands
+
+The WeChat bridge now uses a text-first command surface designed for chat, not buttons.
+Recommended entrypoints:
+
+```text
+/helps
+/helps threads
+/threads
+/search bridge
+/open 2
+/peek 2
+/rename 2 微信桥接排障
+/permissions
+```
+
+All slash commands support command-scoped help flags:
+
+```text
+/threads -h
+/open --help
+/permissions -helps
+```
+
+Best-practice rule:
+
+- use `/helps` for command discovery
+- use `/threads` and numeric indexes on WeChat instead of copying raw thread ids
+- use `/helps <command>` when you need exact usage and examples
+
+See the full command reference in [docs/usage/weixin-slash-commands.md](./docs/usage/weixin-slash-commands.md).
 
 ## Validation
 
