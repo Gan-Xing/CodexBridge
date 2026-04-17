@@ -78,7 +78,7 @@ export class BridgeCoordinator {
 
   async handleCommand(event, command) {
     const commandName = normalizeCommandName(command.name);
-    if (commandName !== 'helps' && isHelpFlag(command.args[0])) {
+    if (commandName !== 'helps' && command.args.some((arg) => isHelpFlag(arg))) {
       return this.handleHelpsCommand(event, [commandName]);
     }
     switch (commandName) {
@@ -878,7 +878,7 @@ function normalizeEpochMs(value) {
 }
 
 function isHelpFlag(value) {
-  return HELP_FLAG_SET.has(String(value ?? '').trim().toLowerCase());
+  return HELP_FLAG_SET.has(normalizeHelpFlag(value));
 }
 
 function normalizeCommandName(value) {
@@ -1217,6 +1217,13 @@ function freezeCommandHelp(spec) {
     examples: Object.freeze([...(spec.examples ?? [])]),
     notes: Object.freeze([...(spec.notes ?? [])]),
   });
+}
+
+function normalizeHelpFlag(value) {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[—–－﹣]/gu, '-');
 }
 
 function isStaleThreadError(error) {

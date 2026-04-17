@@ -338,6 +338,36 @@ test('slash commands support first-argument help flags like -h', async () => {
   assert.match(text, /\/peek 2/);
 });
 
+test('slash commands support -help, -helps, and --help variants', async () => {
+  const { runtime } = makeRuntime();
+
+  for (const text of ['/permissions -help', '/permissions -helps', '/permissions --help']) {
+    const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-user-1',
+      text,
+    });
+
+    const body = result.messages[0]?.text ?? '';
+    assert.match(body, /命令：\/permissions/);
+    assert.match(body, /\/permissions <read-only\|default\|full-access>/);
+  }
+});
+
+test('slash commands treat help flags in later argument positions as help requests', async () => {
+  const { runtime } = makeRuntime();
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-1',
+    text: '/permissions full-access -h',
+  });
+
+  const text = result.messages[0]?.text ?? '';
+  assert.match(text, /命令：\/permissions/);
+  assert.match(text, /\/permissions -h/);
+});
+
 test('/new creates a fresh session on the current provider profile', async () => {
   const { runtime, openai } = makeRuntime();
   await runtime.services.bridgeCoordinator.handleInboundEvent({
