@@ -39,7 +39,7 @@ Project bootstrap is now focused on:
 
 Current implemented bridge pieces:
 
-- Core session routing with WeChat-friendly slash commands, including `/helps`, `/status`, `/stop`, `/new`, `/provider`, `/threads`, `/search`, `/next`, `/prev`, `/open`, `/peek`, `/rename`, `/permissions`, `/reconnect`, and `/restart`
+- Core session routing with WeChat-friendly slash commands, including `/helps`, `/status`, `/stop`, `/new`, `/provider`, `/threads`, `/search`, `/next`, `/prev`, `/open`, `/peek`, `/rename`, `/permissions`, `/reconnect`, `/restart`, and `/lang`
 - File-backed JSON repositories for persistent bridge state
 - WeChat platform skeleton for Hermes-compatible iLink config loading, QR account state reuse, inbound DM normalization, long-poll client/poller wiring, context-token persistence, text chunking, and outbound text/typing delivery
 - Codex profile loader and initial Codex app-server client/plugin path for shared thread execution
@@ -73,6 +73,7 @@ Recommended entrypoints:
 /pk 2
 /rename 2 微信桥接排障
 /rn 2 微信桥接排障
+/lang
 /permissions
 /perm
 ```
@@ -89,6 +90,7 @@ Best-practice rule:
 
 - use `/helps` for command discovery
 - use `/threads` and numeric indexes on WeChat instead of copying raw thread ids
+- use `/lang zh-CN` or `/lang en` to switch reply language for the current scope
 - use `/helps <command>` when you need exact usage and examples
 
 See the full command reference in [docs/usage/weixin-slash-commands.md](./docs/usage/weixin-slash-commands.md).
@@ -112,6 +114,31 @@ npm run weixin:serve
 ```
 
 By default the bridge uses the directory where `weixin:serve` is launched as the shared working directory for new sessions. You can override it with `--cwd` or `CODEXBRIDGE_DEFAULT_CWD`, and you can still rebind a specific chat with `/new /absolute/path/to/project`.
+
+## i18n
+
+The bridge now uses one unified i18n layer for user-visible runtime text.
+
+- Supported locales:
+  - `zh-CN`
+  - `en`
+- Default locale: `zh-CN`
+- Process-wide override:
+  - `CODEXBRIDGE_LOCALE=zh-CN`
+  - `CODEXBRIDGE_LOCALE=en`
+
+Example:
+
+```bash
+CODEXBRIDGE_LOCALE=en npm run weixin:serve
+```
+
+The locale currently affects:
+
+- slash-command replies
+- WeChat runtime failure messages
+- CLI login / serve prompts
+- bridge restart completion notifications
 
 ## systemd User Service
 

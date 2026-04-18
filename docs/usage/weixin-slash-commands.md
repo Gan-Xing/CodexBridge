@@ -2,6 +2,25 @@
 
 This document describes the current text-first slash command surface for the WeChat bridge.
 
+## Locale
+
+Slash-command replies now go through the shared i18n layer.
+
+- Supported locales:
+  - `zh-CN`
+  - `en`
+- Command-level precedence: `/lang` value overrides scope override and environment default for that scope/session.
+- Default locale: `zh-CN`
+- Override with:
+  - `CODEXBRIDGE_LOCALE=zh-CN`
+  - `CODEXBRIDGE_LOCALE=en`
+
+Example:
+
+```bash
+CODEXBRIDGE_LOCALE=en npm run weixin:serve
+```
+
 ## Design Rule
 
 The WeChat bridge is not a strict shell CLI.
@@ -11,6 +30,7 @@ It borrows the most useful CLI help conventions while staying chat-friendly:
 - `/helps <command>` shows one command in detail
 - every slash command supports `-h`, `--help`, `-help`, and `-helps`
 - every slash command also supports a short alias such as `/h`, `/st`, `/sp`, `/n`, `/pd`, `/th`, `/se`, `/nx`, `/pv`, `/o`, `/pk`, `/rn`, `/perm`, `/rc`, and `/rs`
+- `/lang` and `/lang <zh|en>` to switch reply language for this scope (higher priority than env).
 - thread browsing is index-first on WeChat, so `/open 2` is preferred over copying raw thread ids
 
 ## Fast Start
@@ -37,6 +57,7 @@ It borrows the most useful CLI help conventions while staying chat-friendly:
 /pk 2
 /rename 2 微信桥接排障
 /rn 2 微信桥接排障
+/lang zh
 /permissions
 /perm
 ```
@@ -231,6 +252,19 @@ Example:
 ```text
 /restart
 /rs
+```
+
+### `/lang`
+
+View or switch the current scope's language.
+
+Examples:
+
+```text
+/lang
+/lang zh-CN
+/lang en
+/lang zh
 ```
 
 ## Help Conventions
