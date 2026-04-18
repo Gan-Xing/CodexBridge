@@ -163,6 +163,7 @@ export class CodexAppClient extends EventEmitter {
     sandboxMode = 'workspace-write',
     approvalPolicy = 'on-request',
     collaborationMode = 'default',
+    developerInstructions = '',
     onProgress = null,
     onTurnStarted = null,
     timeoutMs = 15 * 60 * 1000,
@@ -187,6 +188,7 @@ export class CodexAppClient extends EventEmitter {
         collaborationMode,
         model,
         effort,
+        developerInstructions,
       }),
     }, { timeoutMs: 30_000 });
     const turn = result?.turn;
@@ -517,13 +519,13 @@ export class CodexAppClient extends EventEmitter {
   }
 }
 
-function serializeCollaborationMode({ collaborationMode, model, effort }) {
+function serializeCollaborationMode({ collaborationMode, model, effort, developerInstructions = '' }) {
   if (!collaborationMode) {
     return null;
   }
   const settings = {
     model,
-    developer_instructions: '',
+    developer_instructions: developerInstructions,
   };
   if (effort) {
     settings.reasoning_effort = effort;
