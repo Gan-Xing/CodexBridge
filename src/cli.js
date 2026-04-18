@@ -1,4 +1,5 @@
-import fs from 'node:fs/promises';
+import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -85,6 +86,7 @@ async function runWeixinServe(args) {
   const stateDir = path.resolve(options.stateDir ?? defaultCodexBridgeStateDir());
   const accountsDir = path.join(stateDir, 'weixin', 'accounts');
   const accountStore = new WeixinAccountStore({ rootDir: accountsDir });
+  const serveLock = await acquireServeLock(path.join(stateDir, 'runtime', 'weixin-serve.lock'));
   const repositories = createFileJsonRepositories(path.join(stateDir, 'runtime'));
   const codexProfiles = loadCodexProfilesFromEnv();
   const runtime = createCodexBridgeRuntime({
@@ -113,8 +115,12 @@ async function runWeixinServe(args) {
   process.stdout.write(`启动 WeChat bridge\n`);
   process.stdout.write(`state_dir: ${stateDir}\n`);
   process.stdout.write(`default_provider_profile: ${runtime.config.defaultProviderProfileId}\n`);
+  process.stdout.write(`serve_lock: ${serveLock.lockPath}\n`);
 
   let stopped = false;
+  process.once('exit', () => {
+    serveLock.releaseSync();
+  });
   const stop = async (signal) => {
     if (stopped) {
       return;
@@ -124,6 +130,7 @@ async function runWeixinServe(args) {
     try {
       await bridgeRuntime.stop();
     } finally {
+      await serveLock.release();
       process.exit(0);
     }
   };
@@ -131,7 +138,11 @@ async function runWeixinServe(args) {
   process.on('SIGINT', () => { void stop('SIGINT'); });
   process.on('SIGTERM', () => { void stop('SIGTERM'); });
 
-  await bridgeRuntime.start();
+  try {
+    await bridgeRuntime.start();
+  } finally {
+    await serveLock.release();
+  }
 }
 
 function parseWeixinLoginArgs(args) {
@@ -188,7 +199,7 @@ function parseWeixinServeArgs(args) {
 
 async function materializeQrArtifact({ stateDir, qrcode, qrcodeImageContent }) {
   const outputDir = path.join(stateDir, 'weixin', 'login');
-  await fs.mkdir(outputDir, { recursive: true });
+  await fsp.mkdir(outputDir, { recursive: true });
   if (typeof qrcodeImageContent === 'string' && qrcodeImageContent.startsWith('data:image/')) {
     const match = qrcodeImageContent.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/u);
     if (!match) {
@@ -196,7 +207,7 @@ async function materializeQrArtifact({ stateDir, qrcode, qrcodeImageContent }) {
     }
     const extension = mimeToExtension(match[1]);
     const filePath = path.join(outputDir, `${sanitizeFileSegment(qrcode)}.${extension}`);
-    await fs.writeFile(filePath, Buffer.from(match[2], 'base64'));
+    await fsp.writeFile(filePath, Buffer.from(match[2], 'base64'));
     return { filePath, sourceUrl: null };
   }
   if (typeof qrcodeImageContent === 'string' && /^https?:\/\//u.test(qrcodeImageContent)) {
@@ -207,7 +218,7 @@ async function materializeQrArtifact({ stateDir, qrcode, qrcodeImageContent }) {
         const extension = mimeToExtension(contentType);
         const filePath = path.join(outputDir, `${sanitizeFileSegment(qrcode)}.${extension}`);
         const buffer = Buffer.from(await response.arrayBuffer());
-        await fs.writeFile(filePath, buffer);
+        await fsp.writeFile(filePath, buffer);
         return { filePath, sourceUrl: qrcodeImageContent };
       }
     } catch {
@@ -244,6 +255,87 @@ function truncate(value, maxLength) {
     return value;
   }
   return `${value.slice(0, Math.max(0, maxLength - 3))}...`;
+}
+
+async function acquireServeLock(lockPath) {
+  await fsp.mkdir(path.dirname(lockPath), { recursive: true });
+  try {
+    return await createServeLock(lockPath);
+  } catch (error) {
+    if (error?.code !== 'EEXIST') {
+      throw error;
+    }
+  }
+
+  const existing = readServeLock(lockPath);
+  if (existing?.pid && isProcessAlive(existing.pid)) {
+    throw new Error(
+      `WeChat bridge is already running for ${lockPath} (pid ${existing.pid}). Stop the existing process before starting another.`,
+    );
+  }
+
+  await fsp.rm(lockPath, { force: true });
+  return createServeLock(lockPath);
+}
+
+async function createServeLock(lockPath) {
+  const handle = await fsp.open(lockPath, 'wx');
+  const payload = {
+    pid: process.pid,
+    startedAt: new Date().toISOString(),
+    cwd: process.cwd(),
+  };
+  await handle.writeFile(`${JSON.stringify(payload, null, 2)}\n`, 'utf8');
+  let released = false;
+
+  return {
+    lockPath,
+    async release() {
+      if (released) {
+        return;
+      }
+      released = true;
+      try {
+        await handle.close();
+      } catch {}
+      await fsp.rm(lockPath, { force: true });
+    },
+    releaseSync() {
+      if (released) {
+        return;
+      }
+      released = true;
+      try {
+        handle.close().catch(() => {});
+      } catch {}
+      try {
+        fs.rmSync(lockPath, { force: true });
+      } catch {}
+    },
+  };
+}
+
+function readServeLock(lockPath) {
+  if (!fs.existsSync(lockPath)) {
+    return null;
+  }
+  try {
+    return JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function isProcessAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function queueWeixinBridgeRestart() {
@@ -294,6 +386,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === thisFile) {
 }
 
 export {
+  acquireServeLock,
   main,
   materializeQrArtifact,
   parseWeixinLoginArgs,
