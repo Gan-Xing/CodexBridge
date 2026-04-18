@@ -2,19 +2,30 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { WeixinBridgeRuntime } from '../../src/runtime/weixin_bridge_runtime.js';
 
-function makeRuntime({ coordinator, sendText, sendTyping, previewSoftTargetBytes = 1, previewIntervalMs = 0 }) {
+function makeRuntime({
+  coordinator,
+  sendText,
+  sendTyping,
+  commitSyncCursor,
+  previewSoftTargetBytes = 1,
+  previewIntervalMs = 0,
+}) {
   return new WeixinBridgeRuntime({
     platformPlugin: {
       async start() {},
       async stop() {},
       async pollOnce() {
         return {
+          syncCursor: 'cursor-1',
           events: [{
             platform: 'weixin',
             externalScopeId: 'wxid_1',
             text: 'hello',
           }],
         };
+      },
+      async commitSyncCursor(syncCursor) {
+        await commitSyncCursor?.(syncCursor);
       },
       async sendText(payload) {
         const result = await sendText(payload);
@@ -54,8 +65,12 @@ function completeResponse(text) {
 test('WeixinBridgeRuntime forwards poll events into the bridge coordinator and sends the response', async () => {
   const seen = [];
   const sent = [];
+  const committed = [];
   const typing = [];
   const runtime = makeRuntime({
+    commitSyncCursor: async (syncCursor) => {
+      committed.push(syncCursor);
+    },
     sendText: async ({ externalScopeId, content }) => {
       sent.push({ externalScopeId, content });
     },
@@ -85,7 +100,9 @@ test('WeixinBridgeRuntime forwards poll events into the bridge coordinator and s
   assert.deepEqual(typing, [
     { externalScopeId: 'wxid_1', status: 'start' },
     { externalScopeId: 'wxid_1', status: 'stop' },
-  ]);});
+  ]);
+  assert.deepEqual(committed, ['cursor-1']);
+});
 
 test('WeixinBridgeRuntime dispatches plain-text turns in the background so slash commands can run immediately', async () => {
   const sent = [];
@@ -111,11 +128,13 @@ test('WeixinBridgeRuntime dispatches plain-text turns in the background so slash
     },
   });
 
-  await runtime.dispatchInboundEvent({
+  const scheduled = await runtime.dispatchInboundEvent({
     platform: 'weixin',
     externalScopeId: 'wxid_1',
     text: 'hello',
   });
+  assert.equal(scheduled.type, 'scheduled');
+  assert.equal(typeof scheduled.completion?.then, 'function');
   await runtime.dispatchInboundEvent({
     platform: 'weixin',
     externalScopeId: 'wxid_1',

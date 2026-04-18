@@ -47,6 +47,7 @@ export class WeixinBridgeRuntime {
     for (const event of result.events) {
       await this.handleInboundEvent(event);
     }
+    await this.platformPlugin.commitSyncCursor?.(result.syncCursor);
     return result;
   }
 
@@ -62,9 +63,13 @@ export class WeixinBridgeRuntime {
     const task = this.processInboundEvent(event)
       .catch(async (error) => {
         await this.onError(error);
+        throw error;
       });
     this.trackBackgroundTask(task);
-    return { type: 'scheduled' };
+    return {
+      type: 'scheduled',
+      completion: task,
+    };
   }
 
   async waitForIdle() {
@@ -386,9 +391,11 @@ export class WeixinBridgeRuntime {
 
   trackBackgroundTask(task) {
     this.backgroundTasks.add(task);
-    task.finally(() => {
-      this.backgroundTasks.delete(task);
-    });
+    task
+      .catch(() => {})
+      .finally(() => {
+        this.backgroundTasks.delete(task);
+      });
   }
 }
 

@@ -120,11 +120,15 @@ export class WeixinPlatformPlugin {
     }));
   }
 
-  async pollOnce() {
+  loadSyncCursor() {
+    return this.accountStore.loadSyncCursor(this.config.accountId);
+  }
+
+  async pollOnce({ syncCursor: requestedSyncCursor = null } = {}) {
     if (!this.client) {
       throw new Error('WeixinPlatformPlugin.pollOnce requires start() first');
     }
-    const syncCursor = this.accountStore.loadSyncCursor(this.config.accountId);
+    const syncCursor = stringValue(requestedSyncCursor) ?? this.loadSyncCursor();
     debugWeixin('poll_start', {
       accountId: this.config.accountId,
       baseUrl: this.config.baseUrl,
@@ -141,9 +145,6 @@ export class WeixinPlatformPlugin {
       nextCursorPreview: previewCursor(nextCursor),
       summaries: rawMessages.map(summarizeInboundPayload),
     });
-    if (nextCursor) {
-      this.accountStore.saveSyncCursor(this.config.accountId, nextCursor);
-    }
     const events = [];
     for (const message of rawMessages) {
       const event = this.normalizeInboundEvent(message);
@@ -152,7 +153,11 @@ export class WeixinPlatformPlugin {
       }
       const senderId = event.metadata?.weixin?.senderId;
       if (typeof senderId === 'string' && senderId) {
-        await this.ensureTypingTicket(senderId);
+        try {
+          await this.ensureTypingTicket(senderId);
+        } catch {
+          // Typing indicators are optional; message delivery should continue.
+        }
       }
       events.push(event);
     }
@@ -171,6 +176,12 @@ export class WeixinPlatformPlugin {
       events,
       raw: response,
     };
+  }
+
+  async commitSyncCursor(syncCursor) {
+    const normalized = stringValue(syncCursor) ?? '';
+    this.accountStore.saveSyncCursor(this.config.accountId, normalized);
+    return normalized;
   }
 
   async sendText({ externalScopeId, content }) {
