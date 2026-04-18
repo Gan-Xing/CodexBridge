@@ -51,6 +51,30 @@ test('resolveOrCreateScopeSession reuses the same session for the same platform 
   assert.equal(openaiPlugin.calls.length, 1);
 });
 
+test('resolveOrCreateScopeSession backfills cwd onto an existing bound session', async () => {
+  const openaiPlugin = new FakeProviderPlugin('openai-native');
+  const runtime = createCodexBridgeRuntime({
+    providerPlugins: [openaiPlugin],
+    providerProfiles: [makeProviderProfile('openai-default', 'openai-native', 'OpenAI Default')],
+  });
+
+  const scopeRef = { platform: 'weixin', externalScopeId: 'wx-user-1' };
+  const created = await runtime.services.bridgeSessions.createSessionForScope(scopeRef, {
+    providerProfileId: 'openai-default',
+    cwd: null,
+  });
+  runtime.services.bridgeSessions.updateSession(created.id, { cwd: null });
+
+  const resolved = await runtime.services.bridgeSessions.resolveOrCreateScopeSession(scopeRef, {
+    providerProfileId: 'openai-default',
+    cwd: '/tmp/project',
+  });
+
+  assert.equal(resolved.id, created.id);
+  assert.equal(resolved.cwd, '/tmp/project');
+  assert.equal(runtime.repositories.bridgeSessions.get(created.id)?.cwd, '/tmp/project');
+});
+
 test('multiple platform scopes can bind to the same bridge session', async () => {
   const openaiPlugin = new FakeProviderPlugin('openai-native');
   const runtime = createCodexBridgeRuntime({

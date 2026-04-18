@@ -42,9 +42,11 @@ test('materializeQrArtifact stores data-url qr images on disk', async () => {
 test('parseWeixinServeArgs reads state-dir flag', () => {
   const parsed = parseWeixinServeArgs([
     '--state-dir', '/tmp/codexbridge-state',
+    '--cwd', '/tmp/project',
   ]);
 
   assert.equal(parsed.stateDir, '/tmp/codexbridge-state');
+  assert.equal(parsed.cwd, '/tmp/project');
 });
 
 test('acquireServeLock prevents duplicate weixin serve processes for the same state dir', async () => {

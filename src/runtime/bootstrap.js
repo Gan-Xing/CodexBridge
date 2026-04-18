@@ -14,6 +14,7 @@ export function createCodexBridgeRuntime({
   providerPlugins = [],
   providerProfiles = [],
   defaultProviderProfileId = null,
+  defaultCwd = null,
   repositories = {},
   restartBridge = null,
 } = {}) {
@@ -59,6 +60,7 @@ export function createCodexBridgeRuntime({
     providerProfiles: providerProfilesRepository,
     providerRegistry: registry,
     defaultProviderProfileId: resolvedDefaultProviderProfileId,
+    defaultCwd,
     restartBridge,
   });
 
@@ -66,6 +68,7 @@ export function createCodexBridgeRuntime({
     registry,
     config: {
       defaultProviderProfileId: resolvedDefaultProviderProfileId,
+      defaultCwd,
     },
     repositories: {
       providerProfiles: providerProfilesRepository,
