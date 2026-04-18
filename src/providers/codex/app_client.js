@@ -21,6 +21,8 @@ export class CodexAppClient extends EventEmitter {
     webSocketFactory = (url) => new WebSocket(url),
     platform = process.platform,
     logger = createNoopLogger(),
+    turnPollSleep = sleep,
+    turnPollNow = () => Date.now(),
   }) {
     super();
     this.codexCliBin = codexCliBin;
@@ -33,6 +35,8 @@ export class CodexAppClient extends EventEmitter {
     this.webSocketFactory = webSocketFactory;
     this.platform = platform;
     this.logger = logger;
+    this.turnPollSleep = turnPollSleep;
+    this.turnPollNow = turnPollNow;
 
     this.child = null;
     this.socket = null;
@@ -365,7 +369,7 @@ export class CodexAppClient extends EventEmitter {
   }
 
   async waitForTurnResult({ threadId, turnId, onProgress, timeoutMs }) {
-    const deadline = Date.now() + timeoutMs;
+    const deadline = this.turnPollNow() + timeoutMs;
     let firstTerminalWithoutOutputAt = null;
     let lastTurnSnapshotKey = null;
     let stableTerminalReadCount = 0;
@@ -388,7 +392,7 @@ export class CodexAppClient extends EventEmitter {
         progressState.commentaryText += progress.delta;
       }
       progressState.sawAssistantActivity = true;
-      progressState.lastAssistantActivityAt = Date.now();
+      progressState.lastAssistantActivityAt = this.turnPollNow();
       if (typeof onProgress === 'function') {
         void onProgress({
           text: progress.outputKind === 'final_answer'
@@ -401,17 +405,17 @@ export class CodexAppClient extends EventEmitter {
     };
     this.on('notification', onNotification);
     try {
-      while (Date.now() < deadline) {
+      while (this.turnPollNow() < deadline) {
         let thread = null;
         try {
           thread = await this.readThread(threadId, true);
         } catch (error) {
           if (isThreadMaterializationPendingError(error)) {
-            await sleep(1000);
+            await this.turnPollSleep(1000);
             continue;
           }
           if (isRequestTimeoutError(error)) {
-            await sleep(1000);
+            await this.turnPollSleep(1000);
             continue;
           }
           throw error;
@@ -431,6 +435,7 @@ export class CodexAppClient extends EventEmitter {
               status: turn.status,
             };
           }
+          const sessionState = inspectTurnCompletionFromSessionPath(thread?.path ?? null, turnId);
           const completionState = classifyTurnCompletionState(turn);
           if (completionState === 'interrupted') {
             return {
@@ -447,6 +452,30 @@ export class CodexAppClient extends EventEmitter {
           if (turn.error) {
             throw new Error(turn.error);
           }
+          if (sessionState.lastAgentMessage) {
+            return {
+              turnId,
+              threadId,
+              title: thread?.title ?? null,
+              outputText: sessionState.lastAgentMessage,
+              outputState: 'complete',
+              previewText: progressState.finalAnswerText,
+              finalSource: 'session_task_complete',
+              status: turn.status,
+            };
+          }
+          if (sessionState.hasTaskComplete) {
+            return {
+              turnId,
+              threadId,
+              title: thread?.title ?? null,
+              outputText: '',
+              outputState: progressState.finalAnswerText ? 'partial' : 'missing',
+              previewText: progressState.finalAnswerText,
+              finalSource: progressState.finalAnswerText ? 'progress_only' : 'session_task_complete_empty',
+              status: turn.status,
+            };
+          }
           if (shouldWaitForSettledOutputAfterTerminalTurn(turn, progressState)) {
             const snapshotKey = buildTurnSnapshotKey(turn);
             if (snapshotKey === lastTurnSnapshotKey) {
@@ -455,17 +484,17 @@ export class CodexAppClient extends EventEmitter {
               lastTurnSnapshotKey = snapshotKey;
               stableTerminalReadCount = 1;
             }
-            firstTerminalWithoutOutputAt ??= Date.now();
+            firstTerminalWithoutOutputAt ??= this.turnPollNow();
             if (
-              Date.now() - firstTerminalWithoutOutputAt < terminalSettleMs
+              this.turnPollNow() - firstTerminalWithoutOutputAt < terminalSettleMs
               || stableTerminalReadCount < 3
             ) {
-              await sleep(1000);
+              await this.turnPollSleep(1000);
               continue;
             }
           }
-          if (hasUnsettledAssistantActivity(turn, progressState) && Date.now() + 1000 < deadline) {
-            await sleep(1000);
+          if (hasUnsettledAssistantActivity(turn, progressState) && this.turnPollNow() + 1000 < deadline) {
+            await this.turnPollSleep(1000);
             continue;
           }
           return {
@@ -479,7 +508,7 @@ export class CodexAppClient extends EventEmitter {
             status: turn.status,
           };
         }
-        await sleep(1000);
+        await this.turnPollSleep(1000);
       }
       throw new Error(`Timed out waiting for Codex turn ${turnId}`);
     } finally {
@@ -535,6 +564,7 @@ function mapThread(raw, includeTurns) {
     threadId: String(raw.id),
     title: raw.name ? String(raw.name) : null,
     cwd: raw.cwd ? String(raw.cwd) : null,
+    path: raw.path ? String(raw.path) : null,
     updatedAt: normalizeTimestamp(raw.updatedAt),
     preview: typeof raw.preview === 'string' ? raw.preview : '',
     turns: includeTurns && Array.isArray(raw.turns) ? raw.turns.map(mapTurn) : [],
@@ -673,6 +703,51 @@ function extractAllAssistantVisibleText(turn) {
     .filter(Boolean)
     .join('\n\n')
     .trim();
+}
+
+function inspectTurnCompletionFromSessionPath(sessionPath, turnId) {
+  if (!sessionPath || !turnId || !fs.existsSync(sessionPath)) {
+    return {
+      hasTaskComplete: false,
+      lastAgentMessage: null,
+    };
+  }
+  try {
+    const lines = fs.readFileSync(sessionPath, 'utf8').split('\n');
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      const line = lines[index]?.trim();
+      if (!line) {
+        continue;
+      }
+      let entry = null;
+      try {
+        entry = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const payload = entry?.payload ?? null;
+      if (entry?.type !== 'event_msg' || payload?.type !== 'task_complete') {
+        continue;
+      }
+      if (String(payload.turn_id ?? '') !== turnId) {
+        continue;
+      }
+      const lastAgentMessage = extractTextCandidate(payload.last_agent_message)?.trim() || null;
+      return {
+        hasTaskComplete: true,
+        lastAgentMessage,
+      };
+    }
+  } catch {
+    return {
+      hasTaskComplete: false,
+      lastAgentMessage: null,
+    };
+  }
+  return {
+    hasTaskComplete: false,
+    lastAgentMessage: null,
+  };
 }
 
 function shouldWaitForSettledOutputAfterTerminalTurn(turn, progressState = {}) {
