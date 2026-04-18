@@ -24,6 +24,7 @@ interface CreateCodexBridgeRuntimeOptions {
   providerProfiles?: ProviderProfile[];
   defaultProviderProfileId?: string | null;
   defaultCwd?: string | null;
+  locale?: string | null;
   repositories?: RuntimeRepositories;
   restartBridge?: ((params: { event: any }) => Promise<void>) | null;
 }
@@ -34,10 +35,13 @@ export function createCodexBridgeRuntime({
   providerProfiles = [],
   defaultProviderProfileId = null,
   defaultCwd = null,
+  locale = null,
   repositories = {},
   restartBridge = null,
 }: CreateCodexBridgeRuntimeOptions = {}) {
-  const registry = new PluginRegistry();
+  const registry = new PluginRegistry({
+    locale,
+  });
   for (const platformPlugin of platformPlugins) {
     registry.registerPlatform(platformPlugin);
   }
@@ -58,6 +62,7 @@ export function createCodexBridgeRuntime({
   const sessionRouter = new SessionRouter({
     platformBindings: platformBindingsRepository,
     bridgeSessions: bridgeSessionsRepository,
+    locale,
   });
 
   const bridgeSessions = new BridgeSessionService({
@@ -67,8 +72,9 @@ export function createCodexBridgeRuntime({
     threadMetadata: threadMetadataRepository,
     providerRegistry: registry,
     sessionRouter,
+    locale,
   });
-  const activeTurns = new ActiveTurnRegistry();
+  const activeTurns = new ActiveTurnRegistry({ locale });
 
   const resolvedDefaultProviderProfileId = defaultProviderProfileId
     ?? providerProfiles[0]?.id
@@ -81,6 +87,7 @@ export function createCodexBridgeRuntime({
     defaultProviderProfileId: resolvedDefaultProviderProfileId,
     defaultCwd,
     restartBridge,
+    locale,
   });
 
   return {
@@ -88,6 +95,7 @@ export function createCodexBridgeRuntime({
     config: {
       defaultProviderProfileId: resolvedDefaultProviderProfileId,
       defaultCwd,
+      locale,
     },
     repositories: {
       providerProfiles: providerProfilesRepository,

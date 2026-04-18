@@ -471,7 +471,7 @@ test('WeixinPlatformPlugin sendText returns a structured failure when iLink send
   assert.equal(result.deliveredCount, 0);
   assert.equal(result.failedIndex, 0);
   assert.equal(result.failedText, 'hello from bridge');
-  assert.match(result.error, /ret=-2/);
+  assert.match(result.error, /-2/);
   assert.equal(attempts, 4);
 });
 

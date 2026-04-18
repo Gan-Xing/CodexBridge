@@ -1,4 +1,5 @@
 import type { WeixinAccountStore } from './account_store.js';
+import { createI18n, type Translator } from '../../i18n/index.js';
 
 const ILINK_APP_ID = 'bot';
 const ILINK_APP_CLIENT_VERSION = (2 << 16) | (2 << 8) | 0;
@@ -24,6 +25,7 @@ interface WeixinIlinkClientOptions {
   baseUrl: string;
   token?: string | null;
   fetchImpl?: FetchImpl;
+  locale?: string | null;
 }
 
 interface WeixinQrCodeResponse {
@@ -55,9 +57,11 @@ export class WeixinIlinkClient {
     baseUrl,
     token = null,
     fetchImpl = globalThis.fetch,
+    locale = null,
   }: WeixinIlinkClientOptions) {
+    this.i18n = createI18n(locale);
     if (typeof fetchImpl !== 'function') {
-      throw new Error('WeixinIlinkClient requires a fetch implementation');
+      throw new Error(this.i18n.t('platform.weixin.client.missingFetchImplementation'));
     }
     this.baseUrl = String(baseUrl).replace(/\/+$/u, '');
     this.token = token;
@@ -67,6 +71,7 @@ export class WeixinIlinkClient {
   baseUrl: string;
   token: string | null;
   fetch: FetchImpl;
+  i18n: Translator;
 
   async getUpdates({ syncCursor = '', timeoutMs = DEFAULT_LONG_POLL_TIMEOUT_MS }: { syncCursor?: string; timeoutMs?: number } = {}): Promise<WeixinGetUpdatesResponse> {
     try {
@@ -143,6 +148,7 @@ export class WeixinIlinkClient {
         baseUrl: baseUrlOverride,
         token: this.token,
         fetchImpl: this.fetch,
+        locale: this.i18n.locale,
       })
       : this;
     return client.get<WeixinQrStatusResponse>(`ilink/bot/get_qrcode_status?qrcode=${encodeURIComponent(qrcode)}`, {
@@ -219,7 +225,12 @@ export class WeixinIlinkClient {
         responsePreview: previewResponse(raw),
       });
       if (!response.ok) {
-        throw new Error(`iLink ${method} ${endpoint} HTTP ${response.status}: ${raw.slice(0, 200)}`);
+        throw new Error(this.i18n.t('platform.weixin.client.ilinkHttpError', {
+          method,
+          endpoint,
+          status: response.status,
+          response: raw.slice(0, 200),
+        }));
       }
       return raw ? JSON.parse(raw) as T : {} as T;
     } catch (error) {
@@ -292,6 +303,7 @@ function previewResponse(raw: string, maxLength = 200) {
 interface QrLoginOptions {
   client: WeixinIlinkClient;
   accountStore: Pick<WeixinAccountStore, 'saveAccount'>;
+  locale?: string | null;
   botType?: string;
   timeoutSeconds?: number;
   sleep?: (ms: number) => Promise<void>;
@@ -310,17 +322,19 @@ export async function qrLogin(options: QrLoginOptions | undefined = undefined): 
   const {
     client,
     accountStore,
+    locale = null,
     botType = '3',
     timeoutSeconds = 480,
     sleep = defaultSleep,
     onQrCode = null,
     onStatus = null,
   } = options ?? {};
+  const i18n = createI18n(locale);
   if (!client) {
-    throw new Error('qrLogin requires a WeixinIlinkClient instance');
+    throw new Error(i18n.t('platform.weixin.client.qrLoginRequiresClient'));
   }
   if (!accountStore) {
-    throw new Error('qrLogin requires a WeixinAccountStore');
+    throw new Error(i18n.t('platform.weixin.client.qrLoginRequiresAccountStore'));
   }
 
   let qrResponse = await client.getBotQr({ botType }) as WeixinQrCodeResponse;

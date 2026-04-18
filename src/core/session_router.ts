@@ -1,6 +1,7 @@
 import { NotFoundError } from './errors.js';
 import type { BridgeSession, PlatformScopeRef } from '../types/core.js';
 import type { PlatformBinding } from '../types/repository.js';
+import { createI18n, type Translator } from '../i18n/index.js';
 
 interface PlatformBindingsLike {
   getBinding(scopeRef: PlatformScopeRef): PlatformBinding | null;
@@ -15,6 +16,7 @@ interface BridgeSessionsLike {
 interface SessionRouterOptions {
   platformBindings: PlatformBindingsLike;
   bridgeSessions: BridgeSessionsLike;
+  locale?: string | null;
 }
 
 export class SessionRouter {
@@ -22,9 +24,12 @@ export class SessionRouter {
 
   private readonly bridgeSessions: BridgeSessionsLike;
 
-  constructor({ platformBindings, bridgeSessions }: SessionRouterOptions) {
+  private readonly i18n: Translator;
+
+  constructor({ platformBindings, bridgeSessions, locale = null }: SessionRouterOptions) {
     this.platformBindings = platformBindings;
     this.bridgeSessions = bridgeSessions;
+    this.i18n = createI18n(locale);
   }
 
   resolveBoundSession(scopeRef: PlatformScopeRef): BridgeSession | null {
@@ -38,7 +43,9 @@ export class SessionRouter {
   requireBoundSession(scopeRef: PlatformScopeRef): BridgeSession {
     const session = this.resolveBoundSession(scopeRef);
     if (!session) {
-      throw new NotFoundError(`No bridge session is bound to ${scopeRef.platform}:${scopeRef.externalScopeId}`);
+      throw new NotFoundError(this.i18n.t('service.noBridgeSessionBound', {
+        scope: `${scopeRef.platform}:${scopeRef.externalScopeId}`,
+      }));
     }
     return session;
   }
@@ -56,4 +63,3 @@ export class SessionRouter {
     return this.platformBindings.listBindingsForSession(bridgeSessionId);
   }
 }
-

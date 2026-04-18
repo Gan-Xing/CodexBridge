@@ -3,6 +3,7 @@ import { WeixinAccountStore } from './account_store.js';
 import { WeixinIlinkClient } from './client.js';
 import { loadWeixinConfig, validateWeixinConfig, type WeixinConfig } from './config.js';
 import { formatWeixinText, splitWeixinText } from './formatting.js';
+import { createI18n, type Translator } from '../../i18n/index.js';
 import type { InboundTextEvent, PlatformDeliveryRequest, PlatformPluginContract } from '../../types/platform.js';
 
 const MESSAGE_TYPE_BOT = 2;
@@ -78,6 +79,7 @@ interface WeixinPlatformPluginOptions {
   chunkIntervalMs?: number;
   sleepImpl?: (ms: number) => Promise<void>;
   nowFn?: () => number;
+  locale?: string | null;
 }
 
 export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' | 'displayName' | 'start' | 'stop' | 'normalizeInboundEvent' | 'buildTextDeliveries'> {
@@ -87,7 +89,9 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
     chunkIntervalMs = 3000,
     sleepImpl = sleep,
     nowFn = Date.now,
+    locale = null,
   }: WeixinPlatformPluginOptions = {}) {
+    this.i18n = createI18n(locale);
     this.id = 'weixin';
     this.displayName = 'WeChat';
     this.accountStore = accountStore ?? new WeixinAccountStore();
@@ -114,6 +118,7 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
   chunkIntervalMs: number;
   sleepImpl: (ms: number) => Promise<void>;
   nowFn: () => number;
+  i18n: Translator;
   messageSendQueue: Promise<void>;
   nextMessageSendAt: number;
 
@@ -121,13 +126,14 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
     if (this.running && this.client) {
       return;
     }
-    const errors = validateWeixinConfig(this.config);
+    const errors = validateWeixinConfig(this.config, this.i18n.locale);
     if (errors.length > 0) {
-      throw new Error(`WeixinPlatformPlugin.start configuration error: ${errors.join('; ')}`);
+      throw new Error(this.i18n.t('platform.weixin.plugin.startConfigError', { errors: errors.join('; ') }));
     }
     this.client = new WeixinIlinkClient({
       baseUrl: this.config.baseUrl,
       token: this.config.token,
+      locale: this.i18n.locale,
     });
     this.running = true;
   }
@@ -220,7 +226,7 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
 
   async pollOnce({ syncCursor: requestedSyncCursor = null }: { syncCursor?: string | null } = {}) {
     if (!this.client) {
-      throw new Error('WeixinPlatformPlugin.pollOnce requires start() first');
+      throw new Error(this.i18n.t('platform.weixin.plugin.pollOnceNotStarted'));
     }
     const syncCursor = stringValue(requestedSyncCursor) ?? this.loadSyncCursor();
     debugWeixin('poll_start', {
@@ -300,7 +306,7 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
         deliveredText: '',
         failedIndex: 0,
         failedText: String(content ?? '').trim(),
-        error: 'WeixinPlatformPlugin.sendText requires start() first',
+        error: this.i18n.t('platform.weixin.plugin.sendTextNotStarted'),
       };
     }
     const deliveries = this.buildTextDeliveries({
@@ -363,7 +369,13 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
           attempt,
           result,
         });
-        assertSuccessfulSendResult(result, externalScopeId, delivery.payload.msg.client_id);
+        assertSuccessfulSendResult(
+          result,
+          this.i18n.t('platform.weixin.plugin.sendFailure', {
+            externalScopeId,
+            clientId: delivery.payload.msg.client_id,
+          }),
+        );
         return { success: true, error: '' };
       } catch (error) {
         lastError = error;
@@ -377,7 +389,9 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
     }
     return {
       success: false,
-      error: lastError instanceof Error ? lastError.message : String(lastError ?? 'Unknown Weixin send failure'),
+      error: lastError instanceof Error
+        ? lastError.message
+        : this.i18n.t('runtime.error.unknownDeliveryFailure'),
     };
   }
 
@@ -405,7 +419,7 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
 
   async ensureTypingTicket(externalScopeId: string) {
     if (!this.client) {
-      throw new Error('WeixinPlatformPlugin.ensureTypingTicket requires start() first');
+      throw new Error(this.i18n.t('platform.weixin.plugin.typingTicketNotStarted'));
     }
     if (this.typingTickets.has(externalScopeId)) {
       return this.typingTickets.get(externalScopeId);
@@ -424,7 +438,7 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
 
   async sendTyping({ externalScopeId, status = 'start' as 'start' | 'stop' }: { externalScopeId: string; status?: 'start' | 'stop' }) {
     if (!this.client) {
-      throw new Error('WeixinPlatformPlugin.sendTyping requires start() first');
+      throw new Error(this.i18n.t('platform.weixin.plugin.sendTypingNotStarted'));
     }
     const delivery = this.buildTypingDelivery({ externalScopeId, status });
     if (!delivery) {
@@ -546,12 +560,12 @@ export function extractText(itemList: WeixinMessageItem[]) {
   return '';
 }
 
-function assertSuccessfulSendResult(result: { ret?: number }, externalScopeId: string, clientId: string) {
+function assertSuccessfulSendResult(result: { ret?: number }, messageTemplate: string, ) {
   const ret = Number(result?.ret ?? 0);
   if (ret === 0) {
     return;
   }
-  throw new Error(`Weixin sendmessage failed for ${externalScopeId} (${clientId}): ret=${ret}`);
+  throw new Error(`${messageTemplate}: ${ret}`);
 }
 
 function joinDeliveredTexts(chunks: string[]) {

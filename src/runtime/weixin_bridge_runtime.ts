@@ -1,5 +1,6 @@
 import { parseSlashCommand } from '../core/command_parser.js';
 import { WeixinPoller } from '../platforms/weixin/poller.js';
+import { createI18n, type Translator } from '../i18n/index.js';
 import type { InboundTextEvent } from '../types/platform.js';
 import type { ProviderTurnProgress } from '../types/provider.js';
 
@@ -81,6 +82,7 @@ interface WeixinBridgeRuntimeOptions {
   previewSoftTargetBytes?: number;
   previewHardLimitBytes?: number;
   previewIntervalMs?: number;
+  locale?: string | null;
 }
 
 export class WeixinBridgeRuntime {
@@ -96,6 +98,8 @@ export class WeixinBridgeRuntime {
 
   previewIntervalMs: number;
 
+  i18n: Translator;
+
   poller: WeixinPoller | null;
 
   backgroundTasks: Set<Promise<RuntimeResponse>>;
@@ -109,6 +113,7 @@ export class WeixinBridgeRuntime {
     previewSoftTargetBytes = 2048,
     previewHardLimitBytes = 2048,
     previewIntervalMs = 3000,
+    locale = null,
   }) {
     this.platformPlugin = platformPlugin;
     this.bridgeCoordinator = bridgeCoordinator;
@@ -116,6 +121,7 @@ export class WeixinBridgeRuntime {
     this.previewSoftTargetBytes = previewSoftTargetBytes;
     this.previewHardLimitBytes = previewHardLimitBytes;
     this.previewIntervalMs = previewIntervalMs;
+    this.i18n = createI18n(locale);
     this.poller = null;
     this.backgroundTasks = new Set();
     this.scopeChains = new Map();
@@ -384,14 +390,14 @@ export class WeixinBridgeRuntime {
     const normalizedFinal = normalizeComparableText(finalText);
     if (outputState !== 'complete') {
       const failureMessage = errorMessage
-        ? `Codex 错误：${errorMessage}`
+        ? this.i18n.t('runtime.error.codex', { error: errorMessage })
         : outputState === 'interrupted'
-          ? '本轮回复已在 Codex 侧中断，请重试或继续。'
+          ? this.i18n.t('runtime.error.interrupted')
           : outputState === 'timeout'
-            ? '本轮回复等待 Codex 超时，请重试。'
+            ? this.i18n.t('runtime.error.timeout')
             : outputState === 'stale_session'
-              ? '当前绑定的 Codex 会话已不可恢复。请使用 /open 重新绑定，或用 /new 新建。'
-              : '本轮回复未完整取回，请重试。';
+              ? this.i18n.t('runtime.error.staleSession')
+              : this.i18n.t('runtime.error.incomplete');
       const failureDelivery = await this.sendTextWithRetry({
         externalScopeId: event.externalScopeId,
         content: failureMessage,
@@ -415,7 +421,7 @@ export class WeixinBridgeRuntime {
       };
     }
     if (!normalizedFinal) {
-      throw new Error(`WeixinBridgeRuntime could not resolve final text for ${event.externalScopeId}`);
+      throw new Error(this.i18n.t('runtime.error.finalTextMissing', { scopeId: event.externalScopeId }));
     }
 
     const previewText = isComparablePrefix(streamState.streamedText, finalText) ? streamState.streamedText : '';
@@ -487,7 +493,7 @@ export class WeixinBridgeRuntime {
       deliveredText: '',
       failedIndex: 0,
       failedText: String(content ?? '').trim(),
-      error: 'Unknown Weixin delivery failure',
+      error: this.i18n.t('runtime.error.unknownDeliveryFailure'),
     };
   }
 

@@ -1,4 +1,5 @@
 import { NotFoundError } from '../core/errors.js';
+import { createI18n, type Translator } from '../i18n/index.js';
 
 interface PlatformPluginLike {
   id: string;
@@ -13,9 +14,12 @@ export class PluginRegistry {
 
   private readonly providers: Map<string, ProviderPluginLike>;
 
-  constructor() {
+  private readonly i18n: Translator;
+
+  constructor({ locale = null }: { locale?: string | null } = {}) {
     this.platforms = new Map();
     this.providers = new Map();
+    this.i18n = createI18n(locale);
   }
 
   registerPlatform(plugin: PlatformPluginLike): void {
@@ -29,7 +33,7 @@ export class PluginRegistry {
   getPlatform<T extends PlatformPluginLike>(platformId: string): T {
     const plugin = this.platforms.get(platformId);
     if (!plugin) {
-      throw new NotFoundError(`Unknown platform plugin: ${platformId}`);
+      throw new NotFoundError(this.i18n.t('runtime.plugin.platformUnknown', { id: platformId }));
     }
     return plugin as T;
   }
@@ -37,7 +41,7 @@ export class PluginRegistry {
   getProvider<T extends ProviderPluginLike>(providerKind: string): T {
     const plugin = this.providers.get(providerKind);
     if (!plugin) {
-      throw new NotFoundError(`Unknown provider plugin: ${providerKind}`);
+      throw new NotFoundError(this.i18n.t('runtime.plugin.providerUnknown', { kind: providerKind }));
     }
     return plugin as T;
   }
@@ -50,4 +54,3 @@ export class PluginRegistry {
     return [...this.providers.values()] as T[];
   }
 }
-

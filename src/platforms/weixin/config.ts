@@ -1,5 +1,6 @@
 import os from 'node:os';
 import path from 'node:path';
+import { createI18n } from '../../i18n/index.js';
 import { WeixinAccountStore, type SavedWeixinAccount } from './account_store.js';
 
 type PolicyValue = 'open' | 'allowlist' | 'disabled' | 'pairing';
@@ -81,19 +82,20 @@ export function loadWeixinConfig({
   };
 }
 
-export function validateWeixinConfig(config: WeixinConfig) {
+export function validateWeixinConfig(config: WeixinConfig, locale: unknown = null) {
+  const i18n = createI18n(locale);
   const errors: string[] = [];
   if (!config.accountId) {
-    errors.push('WEIXIN_ACCOUNT_ID is required');
+    errors.push(i18n.t('platform.weixin.config.accountIdRequired'));
   }
   if (!config.token) {
-    errors.push('WEIXIN_TOKEN is required or must be restorable from the saved account file');
+    errors.push(i18n.t('platform.weixin.config.tokenRequired'));
   }
   if (!config.baseUrl) {
-    errors.push('WEIXIN_BASE_URL is required');
+    errors.push(i18n.t('platform.weixin.config.baseUrlRequired'));
   }
   if (!config.cdnBaseUrl) {
-    errors.push('WEIXIN_CDN_BASE_URL is required');
+    errors.push(i18n.t('platform.weixin.config.cdnBaseUrlRequired'));
   }
   return errors;
 }

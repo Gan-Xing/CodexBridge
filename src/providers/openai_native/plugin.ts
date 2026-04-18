@@ -8,6 +8,9 @@ import type {
   ProviderTurnProgress,
   ProviderTurnResult,
 } from '../../types/provider.js';
+import { createI18n } from '../../i18n/index.js';
+
+const i18n = createI18n();
 
 export class OpenAINativeProviderPlugin {
   kind: string;
@@ -24,7 +27,7 @@ export class OpenAINativeProviderPlugin {
     cwd?: string | null;
     title?: string | null;
   }): Promise<ProviderThreadStartResult> {
-    throw new Error('OpenAINativeProviderPlugin.startThread is not implemented yet');
+    throw new Error(i18n.t('provider.openai.startThreadUnimplemented'));
   }
 
   async readThread(_params: {
@@ -32,7 +35,7 @@ export class OpenAINativeProviderPlugin {
     threadId: string;
     includeTurns?: boolean;
   }): Promise<ProviderThreadSummary | null> {
-    throw new Error('OpenAINativeProviderPlugin.readThread is not implemented yet');
+    throw new Error(i18n.t('provider.openai.readThreadUnimplemented'));
   }
 
   async listThreads(_params: {
@@ -41,7 +44,7 @@ export class OpenAINativeProviderPlugin {
     cursor?: string | null;
     searchTerm?: string | null;
   }): Promise<ProviderThreadListResult> {
-    throw new Error('OpenAINativeProviderPlugin.listThreads is not implemented yet');
+    throw new Error(i18n.t('provider.openai.listThreadsUnimplemented'));
   }
 
   async startTurn(_params: {
@@ -53,7 +56,7 @@ export class OpenAINativeProviderPlugin {
     onProgress?: ((progress: ProviderTurnProgress) => Promise<void> | void) | null;
     onTurnStarted?: ((meta: Record<string, unknown>) => Promise<void> | void) | null;
   }): Promise<ProviderTurnResult> {
-    throw new Error('OpenAINativeProviderPlugin.startTurn is not implemented yet');
+    throw new Error(i18n.t('provider.openai.startTurnUnimplemented'));
   }
 
   async interruptTurn(_params: {
@@ -61,6 +64,6 @@ export class OpenAINativeProviderPlugin {
     threadId: string;
     turnId: string;
   }): Promise<void> {
-    throw new Error('OpenAINativeProviderPlugin.interruptTurn is not implemented yet');
+    throw new Error(i18n.t('provider.openai.interruptTurnUnimplemented'));
   }
 }

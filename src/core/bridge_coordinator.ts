@@ -1,9 +1,17 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { formatPlatformScopeKey } from './contracts.js';
 import { parseSlashCommand } from './command_parser.js';
 import { NotFoundError } from './errors.js';
+import {
+  createI18n,
+  formatRelativeTimeLocalized,
+  normalizeLocale,
+  type SupportedLocale,
+  type Translator,
+} from '../i18n/index.js';
 
 const THREAD_PAGE_SIZE = 5;
 const THREAD_PREVIEW_LIMIT = 72;
@@ -27,6 +35,10 @@ type StartTurnOptions = {
   }) => Promise<void> | void;
 };
 
+type RecoveryFailure = Error & {
+  reasonCode?: string;
+};
+
 type CommandHelpSpec = {
   name: string;
   aliases: readonly string[];
@@ -46,6 +58,9 @@ export class BridgeCoordinator {
   restartBridge: any;
   now: any;
   threadBrowserStates: Map<any, any>;
+  localeOverridesByScope: Map<string, SupportedLocale>;
+  localeContext: AsyncLocalStorage<SupportedLocale>;
+  i18n: Translator;
 
   constructor({
     bridgeSessions,
@@ -56,6 +71,7 @@ export class BridgeCoordinator {
     defaultCwd = null,
     restartBridge = null,
     now = () => Date.now(),
+    locale = null,
   }) {
     this.bridgeSessions = bridgeSessions;
     this.activeTurns = activeTurns;
@@ -66,9 +82,57 @@ export class BridgeCoordinator {
     this.restartBridge = restartBridge;
     this.now = now;
     this.threadBrowserStates = new Map();
+    this.localeOverridesByScope = new Map();
+    this.localeContext = new AsyncLocalStorage();
+    this.i18n = createI18n(locale);
+  }
+
+  t(key, params = {}) {
+    return this.currentI18n.t(key, params);
+  }
+
+  get currentI18n() {
+    const locale = this.localeContext.getStore();
+    if (!locale) {
+      return this.i18n;
+    }
+    return createI18n(locale);
+  }
+
+  resolveLocaleForEvent(scopeRef, event) {
+    const session = this.bridgeSessions.resolveScopeSession(scopeRef);
+    if (session) {
+      const settings = this.bridgeSessions.getSessionSettings(session.id);
+      if (settings?.locale) {
+        return normalizeLocale(settings.locale);
+      }
+    }
+    const scopeLocale = this.localeOverridesByScope.get(formatPlatformScopeKey(scopeRef.platform, scopeRef.externalScopeId));
+    if (scopeLocale) {
+      return scopeLocale;
+    }
+    if (typeof event?.locale === 'string' && event.locale.trim()) {
+      return normalizeLocale(event.locale);
+    }
+    return this.i18n.locale;
+  }
+
+  resolveScopeLocale(scopeRef, event = null) {
+    return this.resolveLocaleForEvent(scopeRef, event);
+  }
+
+  setScopeLocale(scopeRef, locale) {
+    const normalized = normalizeLocale(locale);
+    this.localeOverridesByScope.set(formatPlatformScopeKey(scopeRef.platform, scopeRef.externalScopeId), normalized);
   }
 
   async handleInboundEvent(event, options = {}) {
+    const scopeRef = toScopeRef(event);
+    const locale = this.resolveLocaleForEvent(scopeRef, event);
+    return this.localeContext.run(locale, () => this.handleInboundEventWithLocale(event, options));
+  }
+
+  async handleInboundEventWithLocale(event, options = {}) {
     const command = parseSlashCommand(event.text);
     if (command) {
       return this.handleCommand(event, command);
@@ -85,9 +149,13 @@ export class BridgeCoordinator {
     this.activeTurns?.beginScopeTurn(scopeRef);
     let session = null;
     try {
+      const locale = this.resolveScopeLocale(scopeRef, event);
       session = await this.bridgeSessions.resolveOrCreateScopeSession(scopeRef, {
         providerProfileId: this.resolveDefaultProviderProfileId(),
         cwd: this.resolveEventCwd(event),
+        initialSettings: {
+          locale,
+        },
         providerStartOptions: {
           sourcePlatform: event.platform,
         },
@@ -109,7 +177,7 @@ export class BridgeCoordinator {
       };
       return response;
     } catch (error) {
-      const failure = classifyTurnFailure(error);
+      const failure = classifyTurnFailure(error, this.currentI18n);
       if (!failure) {
         throw error;
       }
@@ -162,6 +230,8 @@ export class BridgeCoordinator {
         return this.handlePeekCommand(event, command.args);
       case 'provider':
         return this.handleProviderCommand(event, command.args);
+      case 'lang':
+        return this.handleLangCommand(event, command.args);
       case 'restart':
         return this.handleRestartCommand(event);
       case 'reconnect':
@@ -170,8 +240,8 @@ export class BridgeCoordinator {
         return this.handlePermissionsCommand(event, command.args);
       default:
         return messageResponse([
-          `不支持的命令：/${command.name}`,
-          '用 /helps 查看可用命令。',
+          this.t('coordinator.command.unsupported', { name: command.name }),
+          this.t('coordinator.command.useHelps'),
         ], this.buildScopedSessionMeta(event));
     }
   }
@@ -179,16 +249,16 @@ export class BridgeCoordinator {
   async handleHelpsCommand(event, args) {
     const requested = normalizeHelpTarget(args[0]);
     if (!requested) {
-      return textResponse(renderCommandCatalog(), this.buildScopedSessionMeta(event));
+      return textResponse(renderCommandCatalog(this.currentI18n), this.buildScopedSessionMeta(event));
     }
-    const spec = resolveCommandHelpSpec(requested);
+    const spec = resolveCommandHelpSpec(requested, this.currentI18n);
     if (!spec) {
       return messageResponse([
-        `未知命令：/${requested}`,
-        '用 /helps 查看可用命令。',
+        this.t('coordinator.command.unknown', { name: requested }),
+        this.t('coordinator.command.useHelps'),
       ], this.buildScopedSessionMeta(event));
     }
-    return textResponse(renderCommandHelp(spec), this.buildScopedSessionMeta(event));
+    return textResponse(renderCommandHelp(spec, this.currentI18n), this.buildScopedSessionMeta(event));
   }
 
   async handleStatusCommand(event) {
@@ -196,30 +266,30 @@ export class BridgeCoordinator {
     const session = this.bridgeSessions.resolveScopeSession(scopeRef);
     if (!session) {
       return messageResponse([
-        `当前 scope 尚未绑定 bridge session：${event.platform}:${event.externalScopeId}`,
-        `默认 Provider 配置：${this.resolveDefaultProviderProfileId()}`,
-        `默认工作目录：${this.defaultCwd ?? '（未设置）'}`,
+        this.t('coordinator.status.unboundScope', { scope: `${event.platform}:${event.externalScopeId}` }),
+        this.t('coordinator.status.defaultProvider', { id: this.resolveDefaultProviderProfileId() }),
+        this.t('coordinator.status.defaultCwd', { cwd: this.defaultCwd ?? this.t('common.notSet') }),
       ]);
     }
     const providerProfile = this.requireProviderProfile(session.providerProfileId);
     const settings = this.bridgeSessions.getSessionSettings(session.id);
     const activeTurn = this.activeTurns?.resolveScopeTurn(scopeRef) ?? null;
     return messageResponse([
-      `Scope：${event.platform}:${event.externalScopeId}`,
-      `Bridge 会话：${session.id}`,
-      `Provider 配置：${providerProfile.id}`,
-      `Provider 类型：${providerProfile.providerKind}`,
-      `Codex 线程：${session.codexThreadId}`,
-      `工作目录：${session.cwd ?? this.defaultCwd ?? '（未设置）'}`,
-      `模型：${settings?.model ?? '（默认）'}`,
-      `推理强度：${settings?.reasoningEffort ?? '（默认）'}`,
-      `服务层级：${settings?.serviceTier ?? '（默认）'}`,
-      `权限预设：${formatAccessPreset(resolveAccessPreset(settings))}`,
-      `审批策略：${resolveApprovalPolicy(settings)}`,
-      `沙箱模式：${resolveSandboxMode(settings)}`,
-      `当前 Turn：${formatActiveTurnValue(activeTurn)}`,
-      `Turn 状态：${formatActiveTurnState(activeTurn)}`,
-      ...(activeTurn ? ['Turn 控制：/stop'] : []),
+      this.t('coordinator.status.scope', { scope: `${event.platform}:${event.externalScopeId}` }),
+      this.t('coordinator.status.bridgeSession', { id: session.id }),
+      this.t('coordinator.status.providerProfile', { id: providerProfile.id }),
+      this.t('coordinator.status.providerKind', { kind: providerProfile.providerKind }),
+      this.t('coordinator.status.codexThread', { id: session.codexThreadId }),
+      this.t('coordinator.status.workingDirectory', { cwd: session.cwd ?? this.defaultCwd ?? this.t('common.notSet') }),
+      this.t('coordinator.status.model', { value: settings?.model ?? this.t('common.default') }),
+      this.t('coordinator.status.reasoningEffort', { value: settings?.reasoningEffort ?? this.t('common.default') }),
+      this.t('coordinator.status.serviceTier', { value: settings?.serviceTier ?? this.t('common.default') }),
+      this.t('coordinator.status.accessPreset', { value: formatAccessPreset(resolveAccessPreset(settings)) }),
+      this.t('coordinator.status.approvalPolicy', { value: resolveApprovalPolicy(settings) }),
+      this.t('coordinator.status.sandboxMode', { value: resolveSandboxMode(settings) }),
+      this.t('coordinator.status.currentTurn', { value: formatActiveTurnValue(activeTurn, this.currentI18n) }),
+      this.t('coordinator.status.turnState', { value: formatActiveTurnState(activeTurn, this.currentI18n) }),
+      ...(activeTurn ? [this.t('coordinator.status.turnControl')] : []),
     ], buildSessionMeta(session));
   }
 
@@ -234,15 +304,18 @@ export class BridgeCoordinator {
     const nextSession = await this.bridgeSessions.createSessionForScope(scopeRef, {
       providerProfileId,
       cwd: args.join(' ').trim() || existing?.cwd || this.resolveEventCwd(event),
+      initialSettings: {
+        locale: this.resolveScopeLocale(scopeRef, event),
+      },
       providerStartOptions: {
         sourcePlatform: event.platform,
         trigger: 'new-command',
       },
     });
     return messageResponse([
-      '已创建新的 Bridge 会话。',
-      `Provider 配置：${nextSession.providerProfileId}`,
-      `Codex 线程：${nextSession.codexThreadId}`,
+      this.t('coordinator.new.created'),
+      this.t('coordinator.status.providerProfile', { id: nextSession.providerProfileId }),
+      this.t('coordinator.status.codexThread', { id: nextSession.codexThreadId }),
     ], buildSessionMeta(nextSession));
   }
 
@@ -263,8 +336,8 @@ export class BridgeCoordinator {
     const searchTerm = args.join(' ').trim();
     if (!searchTerm) {
       return messageResponse([
-        '用法：/search <关键词>',
-        '帮助：/search -h',
+        this.t('coordinator.search.usage'),
+        this.t('coordinator.search.help'),
       ], this.buildScopedSessionMeta(event));
     }
     const scopeRef = toScopeRef(event);
@@ -282,10 +355,10 @@ export class BridgeCoordinator {
   async handleNextThreadsCommand(event) {
     const state = this.getThreadBrowserState(event);
     if (!state) {
-      return messageResponse(['请先运行 /threads 或 /search，建立当前页后再翻页。']);
+      return messageResponse([this.t('coordinator.threads.needContext')]);
     }
     if (!state.nextCursor) {
-      return messageResponse(['已经是最后一页了。'], this.buildScopedSessionMeta(event));
+      return messageResponse([this.t('coordinator.threads.lastPage')], this.buildScopedSessionMeta(event));
     }
     return this.renderThreadsPage(event, {
       providerProfileId: state.providerProfileId,
@@ -299,10 +372,10 @@ export class BridgeCoordinator {
   async handlePrevThreadsCommand(event) {
     const state = this.getThreadBrowserState(event);
     if (!state) {
-      return messageResponse(['请先运行 /threads 或 /search，建立当前页后再翻页。']);
+      return messageResponse([this.t('coordinator.threads.needContext')]);
     }
     if (state.previousCursors.length === 0) {
-      return messageResponse(['已经是第一页了。'], this.buildScopedSessionMeta(event));
+      return messageResponse([this.t('coordinator.threads.firstPage')], this.buildScopedSessionMeta(event));
     }
     const previousCursors = state.previousCursors.slice(0, -1);
     const cursor = state.previousCursors.at(-1) ?? null;
@@ -323,8 +396,8 @@ export class BridgeCoordinator {
     const requested = args[0]?.trim() ?? '';
     if (!requested) {
       return messageResponse([
-        '用法：/open <序号|codex_thread_id>',
-        '帮助：/open -h',
+        this.t('coordinator.open.usage'),
+        this.t('coordinator.open.help'),
       ], this.buildScopedSessionMeta(event));
     }
     const scopeRef = toScopeRef(event);
@@ -333,14 +406,22 @@ export class BridgeCoordinator {
       return messageResponse([resolvedThread.message], this.buildScopedSessionMeta(event));
     }
     const providerProfile = this.requireProviderProfile(resolvedThread.providerProfileId);
-    const session = await this.bridgeSessions.bindScopeToProviderThread(scopeRef, {
-      providerProfileId: providerProfile.id,
-      codexThreadId: resolvedThread.threadId,
-    });
+    const session = await this.bridgeSessions.bindScopeToProviderThread(
+      scopeRef,
+      {
+        providerProfileId: providerProfile.id,
+        codexThreadId: resolvedThread.threadId,
+      },
+      {
+        initialSettings: {
+          locale: this.resolveScopeLocale(scopeRef, event),
+        },
+      },
+    );
     return messageResponse([
-      `已打开 Codex 线程 ${session.codexThreadId}。`,
-      `Provider 配置：${providerProfile.id}`,
-      `Bridge 会话：${session.id}`,
+      this.t('coordinator.open.opened', { threadId: session.codexThreadId }),
+      this.t('coordinator.status.providerProfile', { id: providerProfile.id }),
+      this.t('coordinator.status.bridgeSession', { id: session.id }),
     ], buildSessionMeta(session));
   }
 
@@ -353,8 +434,8 @@ export class BridgeCoordinator {
     const nextName = args.slice(1).join(' ').trim();
     if (!target || !nextName) {
       return messageResponse([
-        '用法：/rename <序号|codex_thread_id> <新名字>',
-        '帮助：/rename -h',
+        this.t('coordinator.rename.usage'),
+        this.t('coordinator.rename.help'),
       ], this.buildScopedSessionMeta(event));
     }
     const resolvedThread = this.resolveRequestedThread(event, target);
@@ -364,10 +445,10 @@ export class BridgeCoordinator {
     this.bridgeSessions.renameProviderThread(resolvedThread.providerProfileId, resolvedThread.threadId, nextName);
     this.patchThreadBrowserTitle(event, resolvedThread.providerProfileId, resolvedThread.threadId, nextName);
     return textResponse([
-      '已更新线程显示名。',
-      `名称：${nextName}`,
-      `线程：${resolvedThread.threadId}`,
-      '操作：/threads  /open 1  /peek 1',
+      this.t('coordinator.rename.updated'),
+      this.t('coordinator.rename.name', { name: nextName }),
+      this.t('coordinator.rename.thread', { threadId: resolvedThread.threadId }),
+      this.t('coordinator.rename.actions'),
     ].join('\n'), this.buildScopedSessionMeta(event));
   }
 
@@ -375,8 +456,8 @@ export class BridgeCoordinator {
     const target = args[0]?.trim() ?? '';
     if (!target) {
       return messageResponse([
-        '用法：/peek <序号|codex_thread_id>',
-        '帮助：/peek -h',
+        this.t('coordinator.peek.usage'),
+        this.t('coordinator.peek.help'),
       ], this.buildScopedSessionMeta(event));
     }
     const resolvedThread = this.resolveRequestedThread(event, target);
@@ -389,9 +470,9 @@ export class BridgeCoordinator {
       { includeTurns: true },
     );
     if (!thread) {
-      return messageResponse([`线程不存在：${resolvedThread.threadId}`], this.buildScopedSessionMeta(event));
+      return messageResponse([this.t('coordinator.peek.notFound', { threadId: resolvedThread.threadId })], this.buildScopedSessionMeta(event));
     }
-    return textResponse(renderThreadPeek(thread), this.buildScopedSessionMeta(event));
+    return textResponse(renderThreadPeek(thread, this.currentI18n), this.buildScopedSessionMeta(event));
   }
 
   async handleProviderCommand(event, args) {
@@ -400,15 +481,15 @@ export class BridgeCoordinator {
       const current = this.bridgeSessions.resolveScopeSession(scopeRef);
       const profiles = this.providerProfiles.list().map((profile) => `- ${profile.id} (${profile.providerKind})`);
       return messageResponse([
-        `当前 Provider 配置：${current?.providerProfileId ?? this.resolveDefaultProviderProfileId()}`,
-        '可用的 Provider 配置：',
+        this.t('coordinator.provider.current', { id: current?.providerProfileId ?? this.resolveDefaultProviderProfileId() }),
+        this.t('coordinator.provider.available'),
         ...profiles,
       ], current ? buildSessionMeta(current) : undefined);
     }
     const requested = args.join(' ').trim();
     const profile = this.resolveProviderProfile(requested);
     if (!profile) {
-      return messageResponse([`未知的 Provider 配置：${requested}`]);
+      return messageResponse([this.t('coordinator.provider.unknown', { id: requested })]);
     }
     const activeResponse = this.rejectIfActiveTurnForCommand(event, 'provider');
     if (activeResponse) {
@@ -416,16 +497,51 @@ export class BridgeCoordinator {
     }
     const switched = await this.bridgeSessions.switchScopeProvider(scopeRef, {
       nextProviderProfileId: profile.id,
+      initialSettings: {
+        locale: this.resolveScopeLocale(scopeRef, event),
+      },
       providerStartOptions: {
         sourcePlatform: event.platform,
         trigger: 'provider-command',
       },
     });
     return messageResponse([
-      `已切换到 Provider 配置：${profile.id}`,
-      `新的 Bridge 会话：${switched.id}`,
-      `Codex 线程：${switched.codexThreadId}`,
+      this.t('coordinator.provider.switched', { id: profile.id }),
+      this.t('coordinator.provider.newSession', { id: switched.id }),
+      this.t('coordinator.status.codexThread', { id: switched.codexThreadId }),
     ], buildSessionMeta(switched));
+  }
+
+  async handleLangCommand(event, args) {
+    const scopeRef = toScopeRef(event);
+    const requested = args[0]?.trim() ?? '';
+    if (!requested) {
+      const current = this.resolveScopeLocale(scopeRef, event);
+      const localeName = current === 'zh-CN' ? '中文' : 'English';
+      return messageResponse([
+        this.t('coordinator.lang.current', { value: localeName }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const requestedLocale = parseExplicitLocale(requested);
+    if (!requestedLocale) {
+      return messageResponse([
+        this.t('coordinator.lang.invalid', { value: requested }),
+        this.t('coordinator.lang.usage'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const previousSession = this.bridgeSessions.resolveScopeSession(scopeRef);
+    this.setScopeLocale(scopeRef, requestedLocale);
+    if (previousSession) {
+      this.bridgeSessions.upsertSessionSettings(previousSession.id, {
+        locale: requestedLocale,
+      });
+    }
+    return textResponse(
+      createI18n(requestedLocale).t('coordinator.lang.set', {
+        value: requestedLocale,
+      }),
+      this.buildScopedSessionMeta(event),
+    );
   }
 
   async handleRestartCommand(event) {
@@ -434,13 +550,13 @@ export class BridgeCoordinator {
       return activeResponse;
     }
     if (typeof this.restartBridge !== 'function') {
-      return messageResponse(['当前宿主环境不支持 /restart。']);
+      return messageResponse([this.t('coordinator.restart.unsupported')]);
     }
     const scopeRef = toScopeRef(event);
     const current = this.bridgeSessions.resolveScopeSession(scopeRef);
     const response = messageResponse([
-      '桥接重启已排队。',
-      '重启后直接继续发消息即可。',
+      this.t('coordinator.restart.queued'),
+      this.t('coordinator.restart.continue'),
     ], current ? buildSessionMeta(current) : undefined);
     response.meta = {
       ...(response.meta ?? {}),
@@ -462,20 +578,20 @@ export class BridgeCoordinator {
     const providerProfile = this.requireProviderProfile(providerProfileId);
     const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
     if (typeof providerPlugin.reconnectProfile !== 'function') {
-      return messageResponse(['当前 provider 不支持 /reconnect。'], session ? buildSessionMeta(session) : undefined);
+      return messageResponse([this.t('coordinator.reconnect.unsupported')], session ? buildSessionMeta(session) : undefined);
     }
     try {
       const result = await providerPlugin.reconnectProfile({ providerProfile });
       const identity = formatAccountIdentity(result?.accountIdentity ?? null);
       const lines = [
-        '当前 Codex 会话已刷新。',
-        ...(identity ? [`账号：${identity}`] : []),
-        '直接继续发消息即可。',
+        this.t('coordinator.reconnect.refreshed'),
+        ...(identity ? [this.t('coordinator.reconnect.account', { value: identity })] : []),
+        this.t('coordinator.reconnect.continue'),
       ];
       return messageResponse(lines, session ? buildSessionMeta(session) : undefined);
     } catch (error) {
       return messageResponse([
-        `刷新 Codex 会话失败：${formatUserError(error)}`,
+        this.t('coordinator.reconnect.failed', { error: formatUserError(error) }),
       ], session ? buildSessionMeta(session) : undefined);
     }
   }
@@ -485,12 +601,12 @@ export class BridgeCoordinator {
     const session = this.bridgeSessions.resolveScopeSession(scopeRef);
     if (!session) {
       return messageResponse([
-        '当前还没有绑定会话。',
-        '先直接发一条正常消息，或使用 /new 创建会话后再设置权限。',
+        this.t('coordinator.permissions.noSession'),
+        this.t('coordinator.permissions.setupHint'),
       ]);
     }
     if (args.length === 0) {
-      return messageResponse(renderPermissionsLines(this.bridgeSessions.getSessionSettings(session.id)), buildSessionMeta(session));
+      return messageResponse(renderPermissionsLines(this.bridgeSessions.getSessionSettings(session.id), this.currentI18n), buildSessionMeta(session));
     }
     const activeResponse = this.rejectIfActiveTurnForCommand(event, 'permissions');
     if (activeResponse) {
@@ -499,8 +615,8 @@ export class BridgeCoordinator {
     const preset = normalizeAccessPreset(args[0]);
     if (!preset) {
       return messageResponse([
-        '用法：/permissions [read-only|default|full-access]',
-        '帮助：/permissions -h',
+        this.t('coordinator.permissions.usage'),
+        this.t('coordinator.permissions.help'),
       ], buildSessionMeta(session));
     }
     const access = resolveAccessModeForPreset(preset);
@@ -510,10 +626,10 @@ export class BridgeCoordinator {
       sandboxMode: access.sandboxMode,
     });
     return messageResponse([
-      `已切换权限预设：${formatAccessPreset(preset)}`,
-      `审批策略：${access.approvalPolicy}`,
-      `沙箱模式：${access.sandboxMode}`,
-      '下一轮生效。',
+      this.t('coordinator.permissions.updated', { value: formatAccessPreset(preset) }),
+      this.t('coordinator.status.approvalPolicy', { value: access.approvalPolicy }),
+      this.t('coordinator.status.sandboxMode', { value: access.sandboxMode }),
+      this.t('coordinator.permissions.nextTurn'),
     ], buildSessionMeta(session));
   }
 
@@ -521,24 +637,24 @@ export class BridgeCoordinator {
     const scopeRef = toScopeRef(event);
     const active = this.activeTurns?.resolveScopeTurn(scopeRef) ?? null;
     if (!active) {
-      return messageResponse(['当前没有进行中的回复。'], this.buildScopedSessionMeta(event));
+      return messageResponse([this.t('coordinator.stop.none')], this.buildScopedSessionMeta(event));
     }
     if (active.interruptRequested) {
-      return messageResponse(['已经请求过中断了，正在等待当前回复停止。'], buildActiveTurnMeta(active));
+      return messageResponse([this.t('coordinator.stop.alreadyRequested')], buildActiveTurnMeta(active));
     }
     this.activeTurns?.requestInterrupt(scopeRef);
     if (!active.turnId) {
-      return messageResponse(['已请求中断。当前回复仍在启动，拿到 turn id 后会自动中断。'], buildActiveTurnMeta(active));
+      return messageResponse([this.t('coordinator.stop.starting')], buildActiveTurnMeta(active));
     }
     try {
       await this.dispatchInterruptForActiveTurn(active);
-      return messageResponse(['已请求中断当前回复。'], buildActiveTurnMeta(active));
+      return messageResponse([this.t('coordinator.stop.requested')], buildActiveTurnMeta(active));
     } catch (error) {
       this.activeTurns?.updateScopeTurn(scopeRef, {
         interruptRequested: false,
       });
       return messageResponse([
-        `中断失败：${formatUserError(error)}`,
+        this.t('coordinator.stop.failed', { error: formatUserError(error) }),
       ], buildActiveTurnMeta(active));
     }
   }
@@ -561,18 +677,18 @@ export class BridgeCoordinator {
     if (result.items.length === 0) {
       if (searchTerm) {
         return textResponse([
-          `线程列表 | ${providerProfile.id}`,
-          `搜索：${searchTerm}`,
+          this.t('coordinator.threadList.title', { providerProfileId: providerProfile.id }),
+          this.t('coordinator.threadList.search', { term: searchTerm }),
           '',
-          '没有找到匹配的线程。',
-          '操作：/threads 重新查看全部线程',
+          this.t('coordinator.threadList.noMatch'),
+          this.t('coordinator.threadList.viewAll'),
         ].join('\n'), current ? buildSessionMeta(current) : undefined);
       }
       return textResponse([
-        `线程列表 | ${providerProfile.id}`,
+        this.t('coordinator.threadList.title', { providerProfileId: providerProfile.id }),
         '',
-        '当前 provider 还没有可用线程。',
-        '先直接发一条消息，或用 /new 新建会话。',
+        this.t('coordinator.threadList.empty'),
+        this.t('coordinator.threadList.emptyAction'),
       ].join('\n'), current ? buildSessionMeta(current) : undefined);
     }
 
@@ -587,6 +703,7 @@ export class BridgeCoordinator {
       updatedAt: this.now(),
     });
     return textResponse(renderThreadsPageMessage({
+      i18n: this.currentI18n,
       providerProfile,
       currentSession: current,
       items: result.items,
@@ -604,10 +721,10 @@ export class BridgeCoordinator {
 
   buildActiveTurnBlockedResponse(event, activeTurn) {
     return messageResponse([
-      '当前已有一轮回复在进行中。',
+      this.t('coordinator.blocked.active'),
       activeTurn.interruptRequested
-        ? '已请求中断，请等待当前回复停止。'
-        : '请先等待，或使用 /stop 中断。',
+        ? this.t('coordinator.blocked.interruptRequested')
+        : this.t('coordinator.blocked.waitOrStop'),
     ], buildActiveTurnMeta(activeTurn) ?? this.buildScopedSessionMeta(event));
   }
 
@@ -617,7 +734,7 @@ export class BridgeCoordinator {
       return null;
     }
     return messageResponse([
-      renderCommandBlockedMessage(commandName, activeTurn.interruptRequested),
+      renderCommandBlockedMessage(commandName, activeTurn.interruptRequested, this.currentI18n),
     ], buildActiveTurnMeta(activeTurn) ?? this.buildScopedSessionMeta(event));
   }
 
@@ -645,27 +762,27 @@ export class BridgeCoordinator {
   resolveRequestedThread(event, requested) {
     const value = String(requested ?? '').trim();
     if (!value) {
-      return {
-        ok: false,
-        message: '请提供线程序号或 thread id。',
-      };
-    }
-    if (/^\d+$/u.test(value)) {
-      const state = this.getThreadBrowserState(event);
-      if (!state) {
         return {
           ok: false,
-          message: '当前没有可用的线程列表上下文。先运行 /threads 或 /search。',
+          message: this.t('coordinator.thread.requestTarget'),
         };
       }
+      if (/^\d+$/u.test(value)) {
+      const state = this.getThreadBrowserState(event);
+        if (!state) {
+          return {
+            ok: false,
+            message: this.t('coordinator.thread.noContext'),
+          };
+        }
       const index = Number(value);
       const item = state.items[index - 1] ?? null;
-      if (!item) {
-        return {
-          ok: false,
-          message: `当前页没有第 ${index} 项。`,
-        };
-      }
+        if (!item) {
+          return {
+            ok: false,
+            message: this.t('coordinator.thread.noSuchIndex', { index }),
+          };
+        }
       return {
         ok: true,
         providerProfileId: state.providerProfileId,
@@ -688,7 +805,7 @@ export class BridgeCoordinator {
     }
     const first = this.providerProfiles.list()[0] ?? null;
     if (!first) {
-      throw new NotFoundError('No provider profiles are configured');
+      throw new NotFoundError(this.t('coordinator.provider.noneConfigured'));
     }
     return first.id;
   }
@@ -696,7 +813,7 @@ export class BridgeCoordinator {
   requireProviderProfile(providerProfileId) {
     const profile = this.providerProfiles.get(providerProfileId);
     if (!profile) {
-      throw new NotFoundError(`未知的 Provider 配置：${providerProfileId}`);
+      throw new NotFoundError(this.t('coordinator.provider.unknownProfile', { id: providerProfileId }));
     }
     return profile;
   }
@@ -775,7 +892,7 @@ export class BridgeCoordinator {
 
   async dispatchInterruptForActiveTurn(activeTurn) {
     if (!activeTurn?.providerProfileId || !activeTurn?.threadId || !activeTurn?.turnId) {
-      throw new Error('当前回复尚未拿到可中断的 turn id。');
+      throw new Error(this.t('coordinator.turn.noInterruptId'));
     }
     if (activeTurn.interruptDispatched) {
       return;
@@ -783,7 +900,7 @@ export class BridgeCoordinator {
     const providerProfile = this.requireProviderProfile(activeTurn.providerProfileId);
     const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
     if (typeof providerPlugin.interruptTurn !== 'function') {
-      throw new Error(`当前 provider 不支持中断：${providerProfile.providerKind}`);
+      throw new Error(this.t('coordinator.turn.providerNoInterrupt', { kind: providerProfile.providerKind }));
     }
     this.activeTurns?.noteInterruptDispatched(activeTurn.scopeRef, true);
     try {
@@ -818,7 +935,7 @@ export class BridgeCoordinator {
     const providerProfile = this.requireProviderProfile(session.providerProfileId);
     const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
     if (typeof providerPlugin.resumeThread !== 'function') {
-      throw enrichSessionRecoveryError(originalError, session, 'provider has no resumeThread support');
+      throw enrichSessionRecoveryError(originalError, session, 'provider has no resumeThread support', this.currentI18n);
     }
     let lastError = originalError;
     for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -833,7 +950,7 @@ export class BridgeCoordinator {
         await sleep(500);
       }
     }
-    throw enrichSessionRecoveryError(lastError, session, 'resumeThread failed');
+    throw enrichSessionRecoveryError(lastError, session, 'resumeThread failed', this.currentI18n);
   }
 }
 
@@ -863,20 +980,20 @@ function buildActiveTurnMeta(activeTurn) {
   };
 }
 
-function renderCommandBlockedMessage(commandName, interruptRequested) {
+function renderCommandBlockedMessage(commandName, interruptRequested, i18n: Translator) {
   const action = {
-    new: '新建会话',
-    open: '切换线程',
-    rename: '重命名线程',
-    provider: '切换 provider',
-    reconnect: '刷新当前 Codex 会话',
-    restart: '重启桥接',
-    permissions: '切换权限预设',
-  }[commandName] ?? '执行这个操作';
+    new: i18n.t('coordinator.action.new'),
+    open: i18n.t('coordinator.action.open'),
+    rename: i18n.t('coordinator.action.rename'),
+    provider: i18n.t('coordinator.action.provider'),
+    reconnect: i18n.t('coordinator.action.reconnect'),
+    restart: i18n.t('coordinator.action.restart'),
+    permissions: i18n.t('coordinator.action.permissions'),
+  }[commandName] ?? i18n.t('coordinator.action.generic');
   if (interruptRequested) {
-    return `已请求中断，请等待当前回复停止后再${action}。`;
+    return i18n.t('coordinator.blocked.waitThenAction', { action });
   }
-  return `当前有回复在进行中，暂时不能${action}。请先等待，或使用 /stop 中断。`;
+  return i18n.t('coordinator.blocked.cannotAction', { action });
 }
 
 function normalizeCwd(value) {
@@ -884,21 +1001,21 @@ function normalizeCwd(value) {
   return normalized || null;
 }
 
-function formatActiveTurnValue(activeTurn) {
+function formatActiveTurnValue(activeTurn, i18n: Translator) {
   if (!activeTurn) {
-    return '无';
+    return i18n.t('common.none');
   }
-  return activeTurn.turnId ?? '（启动中）';
+  return activeTurn.turnId ?? i18n.t('common.starting');
 }
 
-function formatActiveTurnState(activeTurn) {
+function formatActiveTurnState(activeTurn, i18n: Translator) {
   if (!activeTurn) {
-    return '空闲';
+    return i18n.t('coordinator.turnState.idle');
   }
   if (activeTurn.interruptRequested) {
-    return '已请求中断';
+    return i18n.t('coordinator.turnState.interruptRequested');
   }
-  return activeTurn.turnId ? '运行中' : '启动中';
+  return activeTurn.turnId ? i18n.t('coordinator.turnState.running') : i18n.t('coordinator.turnState.starting');
 }
 
 function messageResponse(lines, session = undefined): CoordinatorResponse {
@@ -918,6 +1035,7 @@ function buildThreadBrowserKey(event) {
 }
 
 function renderThreadsPageMessage({
+  i18n,
   providerProfile,
   currentSession,
   items,
@@ -927,27 +1045,28 @@ function renderThreadsPageMessage({
   hasNextPage,
 }) {
   const currentTitle = currentSession && currentSession.providerProfileId === providerProfile.id
-    ? currentSession.title ?? '未命名线程'
-    : '无';
+    ? currentSession.title ?? i18n.t('coordinator.thread.untitled')
+    : i18n.t('common.none');
   const lines = [
-    `线程列表 | ${providerProfile.id}`,
-    `当前绑定：${currentTitle}`,
-    `第 ${pageNumber} 页`,
+    i18n.t('coordinator.threadList.title', { providerProfileId: providerProfile.id }),
+    i18n.t('coordinator.threadList.currentBinding', { title: currentTitle }),
+    i18n.t('coordinator.threadList.page', { pageNumber }),
   ];
   if (searchTerm) {
-    lines.push(`搜索：${searchTerm}`);
+    lines.push(i18n.t('coordinator.threadList.search', { term: searchTerm }));
   }
   lines.push('');
   for (const [index, item] of items.entries()) {
     const marker = currentSession?.providerProfileId === providerProfile.id && currentSession.codexThreadId === item.threadId
       ? '*'
       : ' ';
-    lines.push(`${marker} ${index + 1}. ${formatThreadTitle(item.title, item.preview)}`);
-    lines.push(`   预览：${normalizeThreadPreview(item.preview)}`);
-    lines.push(`   更新：${formatRelativeTime(item.updatedAt)}`);
+    lines.push(`${marker} ${index + 1}. ${formatThreadTitle(item.title, item.preview, i18n)}`);
+    lines.push(`   ${i18n.t('coordinator.threadList.preview', { preview: normalizeThreadPreview(item.preview, i18n) })}`);
+    lines.push(`   ${i18n.t('coordinator.threadList.updatedAt', { value: formatRelativeTime(item.updatedAt, i18n) })}`);
     lines.push('');
   }
   lines.push(buildThreadsFooter({
+    i18n,
     hasPreviousPage,
     hasNextPage,
     exampleIndex: Math.min(2, Math.max(1, items.length)),
@@ -955,34 +1074,48 @@ function renderThreadsPageMessage({
   return lines.join('\n').trim();
 }
 
-function buildThreadsFooter({ hasPreviousPage, hasNextPage, exampleIndex }) {
+function buildThreadsFooter({ i18n, hasPreviousPage, hasNextPage, exampleIndex }: {
+  i18n: Translator;
+  hasPreviousPage: boolean;
+  hasNextPage: boolean;
+  exampleIndex: number;
+}) {
   const index = Number(exampleIndex || 1);
-  const commands = [`/open ${index}`, `/peek ${index}`, `/rename ${index} 新名字`, '/search 关键词', '/threads'];
+  const commands = [
+    `/open ${index}`,
+    `/peek ${index}`,
+    `/rename ${index} ${i18n.t('common.example.newName')}`,
+    `/search ${i18n.t('common.example.keyword')}`,
+    '/threads',
+  ];
   if (hasPreviousPage) {
     commands.push('/prev');
   }
   if (hasNextPage) {
     commands.push('/next');
   }
-  return `操作：${commands.join('  ')}`;
+  return i18n.t('coordinator.threadList.actions', { commands: commands.join('  ') });
 }
 
-function renderThreadPeek(thread) {
+function renderThreadPeek(thread, i18n: Translator) {
   const turns = extractRecentThreadTurns(thread.turns);
   const lines = [
-    `线程预览：${formatThreadTitle(thread.title, thread.preview)}`,
-    `线程：${thread.threadId}`,
-    `预览：${normalizeThreadPreview(thread.preview)}`,
+    i18n.t('coordinator.threadPeek.title', { title: formatThreadTitle(thread.title, thread.preview, i18n) }),
+    i18n.t('coordinator.threadPeek.thread', { threadId: thread.threadId }),
+    i18n.t('coordinator.threadPeek.preview', { preview: normalizeThreadPreview(thread.preview, i18n) }),
   ];
   if (turns.length === 0) {
-    lines.push('', '最近还没有可展示的对话内容。');
+    lines.push('', i18n.t('coordinator.threadPeek.noTurns'));
     return lines.join('\n');
   }
-  lines.push('', `最近 ${turns.length} 轮：`);
+  lines.push('', i18n.t('coordinator.threadPeek.recentTurns', { count: turns.length }));
   for (const [index, turn] of turns.entries()) {
     lines.push('');
-    lines.push(`${index + 1}. 你：${truncateText(turn.userText || '(空)', 220)}`);
-    lines.push(`${formatAssistantTurnLabel(turn.status)}：${truncateText(turn.assistantText || '(空)', 260)}`);
+    lines.push(i18n.t('coordinator.threadPeek.user', {
+      index: index + 1,
+      text: truncateText(turn.userText || i18n.t('common.empty'), 220),
+    }));
+    lines.push(formatAssistantTurnLine(turn.status, truncateText(turn.assistantText || i18n.t('common.empty'), 260), i18n));
   }
   return lines.join('\n');
 }
@@ -1035,20 +1168,20 @@ function classifyPreviewTurnStatus(status, assistantText) {
   return assistantText ? 'partial' : 'missing';
 }
 
-function formatAssistantTurnLabel(status) {
+function formatAssistantTurnLine(status, text, i18n: Translator) {
   switch (status) {
     case 'interrupted':
-      return 'Codex（已中断）';
+      return i18n.t('coordinator.threadPeek.assistant.interrupted', { text });
     case 'failed':
-      return 'Codex（失败）';
+      return i18n.t('coordinator.threadPeek.assistant.failed', { text });
     case 'partial':
-      return 'Codex（部分输出）';
+      return i18n.t('coordinator.threadPeek.assistant.partial', { text });
     default:
-      return 'Codex';
+      return i18n.t('coordinator.threadPeek.assistant.complete', { text });
   }
 }
 
-function formatThreadTitle(title, preview) {
+function formatThreadTitle(title, preview, i18n: Translator) {
   const resolved = compactWhitespace(title || '');
   if (resolved) {
     return truncateText(resolved, 48);
@@ -1057,12 +1190,12 @@ function formatThreadTitle(title, preview) {
   if (fallback) {
     return truncateText(fallback, 48);
   }
-  return '未命名线程';
+  return i18n.t('coordinator.thread.untitled');
 }
 
-function normalizeThreadPreview(preview) {
+function normalizeThreadPreview(preview, i18n: Translator) {
   const normalized = compactWhitespace(preview || '');
-  return normalized ? truncateText(normalized, THREAD_PREVIEW_LIMIT) : '(空)';
+  return normalized ? truncateText(normalized, THREAD_PREVIEW_LIMIT) : i18n.t('coordinator.thread.emptyPreview');
 }
 
 function compactWhitespace(value) {
@@ -1077,41 +1210,21 @@ function truncateText(value, limit) {
   return normalized.length > limit ? `${normalized.slice(0, limit - 1)}…` : normalized;
 }
 
-function formatRelativeTime(value, now = Date.now()) {
-  const updatedAt = normalizeEpochMs(value);
-  if (!Number.isFinite(updatedAt) || updatedAt <= 0) {
-    return '未知';
-  }
-  const diffMs = Math.max(0, now - updatedAt);
-  const diffSeconds = Math.floor(diffMs / 1000);
-  if (diffSeconds < 60) {
-    return '刚刚';
-  }
-  const diffMinutes = Math.floor(diffSeconds / 60);
-  if (diffMinutes < 60) {
-    return `${diffMinutes} 分钟前`;
-  }
-  const diffHours = Math.floor(diffMinutes / 60);
-  if (diffHours < 48) {
-    return `${diffHours} 小时前`;
-  }
-  const diffDays = Math.floor(diffHours / 24);
-  if (diffDays < 30) {
-    return `${diffDays} 天前`;
-  }
-  return new Date(updatedAt).toISOString().slice(0, 10);
-}
-
-function normalizeEpochMs(value) {
-  const numeric = Number(value || 0);
-  if (!Number.isFinite(numeric) || numeric <= 0) {
-    return 0;
-  }
-  return numeric < 10_000_000_000 ? numeric * 1000 : numeric;
+function formatRelativeTime(value, i18n: Translator, now = Date.now()) {
+  return formatRelativeTimeLocalized(value, i18n.locale, now);
 }
 
 function isHelpFlag(value) {
   return HELP_FLAG_SET.has(normalizeHelpFlag(value));
+}
+
+function parseExplicitLocale(value) {
+  const normalized = normalizeLocale(value);
+  const raw = String(value ?? '').trim().toLowerCase();
+  if (!raw || !['zh', 'zh-cn', 'zh-hans', 'en', 'en-us'].includes(raw)) {
+    return null;
+  }
+  return normalized;
 }
 
 function normalizeCommandName(value) {
@@ -1127,53 +1240,55 @@ function normalizeHelpTarget(value) {
   return isHelpFlag(normalized) ? 'helps' : normalized;
 }
 
-function resolveCommandHelpSpec(name) {
+function resolveCommandHelpSpec(name, i18n: Translator) {
   const normalized = normalizeHelpTarget(name);
   if (!normalized) {
     return null;
   }
-  const canonical = COMMAND_HELP_ALIAS_MAP.get(normalized) ?? null;
-  return canonical ? COMMAND_HELP_SPECS[canonical] ?? null : null;
+  const specs = getCommandHelpSpecs(i18n);
+  const canonical = buildCommandCanonicalNameMap(specs, HIDDEN_COMMAND_ALIASES).get(normalized) ?? null;
+  return canonical ? specs[canonical] ?? null : null;
 }
 
-function renderCommandCatalog() {
+function renderCommandCatalog(i18n: Translator) {
+  const specs = getCommandHelpSpecs(i18n);
   const lines = [
-    '斜杠命令',
+    i18n.t('coordinator.help.catalogTitle'),
     '',
   ];
   for (const commandName of COMMAND_HELP_ORDER) {
-    const spec = COMMAND_HELP_SPECS[commandName];
+    const spec = specs[commandName];
     const aliasLabel = spec.aliases.length > 0 ? ` (${spec.aliases.map((alias) => `/${alias}`).join(', ')})` : '';
     lines.push(`/${spec.name}${aliasLabel} ${spec.summary}`);
   }
   lines.push('');
-  lines.push('帮助：/helps <命令>');
-  lines.push('示例：/helps threads  或  /threads -h');
-  lines.push('说明：这不是严格的 shell CLI，而是借用 CLI 的帮助习惯做聊天命令。');
+  lines.push(i18n.t('coordinator.help.helpLabel'));
+  lines.push(i18n.t('coordinator.help.exampleLabel'));
+  lines.push(i18n.t('coordinator.help.noteLabel'));
   return lines.join('\n');
 }
 
-function renderCommandHelp(spec) {
+function renderCommandHelp(spec, i18n: Translator) {
   const lines = [
-    `命令：/${spec.name}`,
-    `说明：${spec.summary}`,
+    i18n.t('coordinator.help.commandLabel', { name: spec.name }),
+    i18n.t('coordinator.help.summaryLabel', { summary: spec.summary }),
   ];
   if (spec.aliases.length > 0) {
-    lines.push(`别名：${spec.aliases.map((alias) => `/${alias}`).join(' ')}`);
+    lines.push(i18n.t('coordinator.help.aliasesLabel', { aliases: spec.aliases.map((alias) => `/${alias}`).join(' ') }));
   }
   lines.push('');
-  lines.push('用法：');
+  lines.push(i18n.t('coordinator.help.usageLabel'));
   for (const usage of spec.usage) {
     lines.push(usage);
   }
   lines.push('');
-  lines.push('示例：');
+  lines.push(i18n.t('coordinator.help.examplesLabel'));
   for (const example of spec.examples) {
     lines.push(example);
   }
   if (spec.notes.length > 0) {
     lines.push('');
-    lines.push('说明：');
+    lines.push(i18n.t('coordinator.help.notesLabel'));
     for (const note of spec.notes) {
       lines.push(note);
     }
@@ -1181,14 +1296,15 @@ function renderCommandHelp(spec) {
   return lines.join('\n');
 }
 
-const COMMAND_HELP_SPECS = Object.freeze({
+function getCommandHelpSpecs(i18n: Translator) {
+  return Object.freeze({
   helps: freezeCommandHelp({
     name: 'helps',
     aliases: ['help', 'h'],
-    summary: '查看所有斜杠命令，或查看某个命令的帮助',
+    summary: i18n.t('coordinator.help.summary.helps'),
     usage: [
       '/helps',
-      '/helps <命令>',
+      i18n.t('coordinator.help.usage.command'),
       '/helps -h',
     ],
     examples: [
@@ -1197,13 +1313,13 @@ const COMMAND_HELP_SPECS = Object.freeze({
       '/help open',
     ],
     notes: [
-      '所有斜杠命令都支持 -h / --help / -helps。',
+      i18n.t('coordinator.help.note.helps'),
     ],
   }),
   status: freezeCommandHelp({
     name: 'status',
     aliases: ['where', 'st'],
-    summary: '查看当前 scope 绑定、provider、权限设置，以及 active turn 状态',
+    summary: i18n.t('coordinator.help.summary.status'),
     usage: [
       '/status',
       '/where',
@@ -1218,7 +1334,7 @@ const COMMAND_HELP_SPECS = Object.freeze({
   stop: freezeCommandHelp({
     name: 'stop',
     aliases: ['sp'],
-    summary: '请求中断当前正在执行的回复',
+    summary: i18n.t('coordinator.help.summary.stop'),
     usage: [
       '/stop',
       '/sp',
@@ -1229,13 +1345,13 @@ const COMMAND_HELP_SPECS = Object.freeze({
       '/sp',
     ],
     notes: [
-      '如果当前没有进行中的回复，会直接提示无可中断目标。',
+      i18n.t('coordinator.help.note.stop'),
     ],
   }),
   new: freezeCommandHelp({
     name: 'new',
     aliases: ['n'],
-    summary: '创建一个新的 bridge session，可选指定 cwd',
+    summary: i18n.t('coordinator.help.summary.new'),
     usage: [
       '/new',
       '/new /home/ubuntu/dev/CodexBridge',
@@ -1246,13 +1362,13 @@ const COMMAND_HELP_SPECS = Object.freeze({
       '/new /home/ubuntu/dev/dailywork',
     ],
     notes: [
-      '不改 provider，只是在当前 scope 上切到一个新线程。',
+      i18n.t('coordinator.help.note.new'),
     ],
   }),
   provider: freezeCommandHelp({
     name: 'provider',
     aliases: ['pd'],
-    summary: '查看可用 provider，或切换当前 scope 的 provider profile',
+    summary: i18n.t('coordinator.help.summary.provider'),
     usage: [
       '/provider',
       '/provider <profileId>',
@@ -1263,13 +1379,13 @@ const COMMAND_HELP_SPECS = Object.freeze({
       '/provider openai-default',
     ],
     notes: [
-      '切换 provider 会为当前 scope 创建新的 bridge session。',
+      i18n.t('coordinator.help.note.provider'),
     ],
   }),
   threads: freezeCommandHelp({
     name: 'threads',
     aliases: ['th'],
-    summary: '查看当前 provider 的线程列表首页',
+    summary: i18n.t('coordinator.help.summary.threads'),
     usage: [
       '/threads',
       '/threads -h',
@@ -1281,29 +1397,29 @@ const COMMAND_HELP_SPECS = Object.freeze({
       '/peek 2',
     ],
     notes: [
-      '微信里推荐先 /threads，再用序号操作，不必复制 thread id。',
+      i18n.t('coordinator.help.note.threads'),
     ],
   }),
   search: freezeCommandHelp({
     name: 'search',
     aliases: ['se'],
-    summary: '按关键词搜索线程标题或 preview，并显示第一页',
+    summary: i18n.t('coordinator.help.summary.search'),
     usage: [
-      '/search <关键词>',
+      i18n.t('coordinator.help.usage.search'),
       '/search -h',
     ],
     examples: [
       '/search bridge',
-      '/search 微信',
+      `/search ${i18n.t('common.example.keyword')}`,
     ],
     notes: [
-      '搜索结果也支持 /open 1、/peek 1、/rename 1。',
+      i18n.t('coordinator.help.note.search'),
     ],
   }),
   next: freezeCommandHelp({
     name: 'next',
     aliases: ['nx'],
-    summary: '翻到当前线程列表的下一页',
+    summary: i18n.t('coordinator.help.summary.next'),
     usage: [
       '/next',
       '/next -h',
@@ -1313,13 +1429,13 @@ const COMMAND_HELP_SPECS = Object.freeze({
       '/next',
     ],
     notes: [
-      '先运行 /threads 或 /search，建立当前页上下文后才能翻页。',
+      i18n.t('coordinator.help.note.nextPrev'),
     ],
   }),
   prev: freezeCommandHelp({
     name: 'prev',
     aliases: ['pv'],
-    summary: '翻到当前线程列表的上一页',
+    summary: i18n.t('coordinator.help.summary.prev'),
     usage: [
       '/prev',
       '/prev -h',
@@ -1330,15 +1446,15 @@ const COMMAND_HELP_SPECS = Object.freeze({
       '/prev',
     ],
     notes: [
-      '先运行 /threads 或 /search，建立当前页上下文后才能翻页。',
+      i18n.t('coordinator.help.note.nextPrev'),
     ],
   }),
   open: freezeCommandHelp({
     name: 'open',
     aliases: ['o'],
-    summary: '把当前 scope 绑定到指定线程，可用序号或 thread id',
+    summary: i18n.t('coordinator.help.summary.open'),
     usage: [
-      '/open <序号|codex_thread_id>',
+      i18n.t('coordinator.help.usage.open'),
       '/open -h',
     ],
     examples: [
@@ -1346,15 +1462,15 @@ const COMMAND_HELP_SPECS = Object.freeze({
       '/open 019d95ad-7166-7ee3-89a3-3bbb50e0fd64',
     ],
     notes: [
-      '序号来自当前页的 /threads 或 /search 结果。',
+      i18n.t('coordinator.help.note.open'),
     ],
   }),
   peek: freezeCommandHelp({
     name: 'peek',
     aliases: ['pk'],
-    summary: '查看某个线程最近几轮的对话摘要',
+    summary: i18n.t('coordinator.help.summary.peek'),
     usage: [
-      '/peek <序号|codex_thread_id>',
+      i18n.t('coordinator.help.usage.peek'),
       '/peek -h',
     ],
     examples: [
@@ -1362,29 +1478,29 @@ const COMMAND_HELP_SPECS = Object.freeze({
       '/peek 019d95ad-7166-7ee3-89a3-3bbb50e0fd64',
     ],
     notes: [
-      '适合先判断是不是你要打开的线程。',
+      i18n.t('coordinator.help.note.peek'),
     ],
   }),
   rename: freezeCommandHelp({
     name: 'rename',
     aliases: ['rn'],
-    summary: '给线程设置本地显示名，不改 provider 原始 thread id',
+    summary: i18n.t('coordinator.help.summary.rename'),
     usage: [
-      '/rename <序号|codex_thread_id> <新名字>',
+      i18n.t('coordinator.help.usage.rename'),
       '/rename -h',
     ],
     examples: [
-      '/rename 2 微信桥接排障',
+      `/rename 2 ${i18n.t('common.example.aliasName')}`,
       '/rename 019d95ad-7166-7ee3-89a3-3bbb50e0fd64 CodexBridge',
     ],
     notes: [
-      '重命名是 bridge 本地 alias，会在 /threads 中优先显示。',
+      i18n.t('coordinator.help.note.rename'),
     ],
   }),
   permissions: freezeCommandHelp({
     name: 'permissions',
     aliases: ['perm'],
-    summary: '查看或切换下一轮的权限预设',
+    summary: i18n.t('coordinator.help.summary.permissions'),
     usage: [
       '/permissions',
       '/permissions <read-only|default|full-access>',
@@ -1395,13 +1511,13 @@ const COMMAND_HELP_SPECS = Object.freeze({
       '/permissions full-access',
     ],
     notes: [
-      '权限变更在下一轮消息生效。',
+      i18n.t('coordinator.help.note.permissions'),
     ],
   }),
   reconnect: freezeCommandHelp({
     name: 'reconnect',
     aliases: ['rc'],
-    summary: '刷新当前 provider 的 Codex 会话',
+    summary: i18n.t('coordinator.help.summary.reconnect'),
     usage: [
       '/reconnect',
       '/reconnect -h',
@@ -1410,13 +1526,13 @@ const COMMAND_HELP_SPECS = Object.freeze({
       '/reconnect',
     ],
     notes: [
-      '适合遇到鉴权或 session 异常时使用。',
+      i18n.t('coordinator.help.note.reconnect'),
     ],
   }),
   restart: freezeCommandHelp({
     name: 'restart',
     aliases: ['rs'],
-    summary: '重启桥接服务',
+    summary: i18n.t('coordinator.help.summary.restart'),
     usage: [
       '/restart',
       '/restart -h',
@@ -1425,10 +1541,29 @@ const COMMAND_HELP_SPECS = Object.freeze({
       '/restart',
     ],
     notes: [
-      '当前 host 不支持时会直接返回不可用。',
+      i18n.t('coordinator.help.note.restart'),
     ],
   }),
-});
+  lang: freezeCommandHelp({
+    name: 'lang',
+    aliases: [],
+    summary: i18n.t('coordinator.help.summary.lang'),
+    usage: [
+      '/lang',
+      '/lang <zh-CN|en>',
+      '/lang -h',
+    ],
+    examples: [
+      '/lang',
+      '/lang zh',
+      '/lang en',
+    ],
+    notes: [
+      i18n.t('coordinator.help.note.lang'),
+    ],
+  }),
+  });
+}
 
 const COMMAND_HELP_ORDER = Object.freeze([
   'helps',
@@ -1446,14 +1581,33 @@ const COMMAND_HELP_ORDER = Object.freeze([
   'permissions',
   'reconnect',
   'restart',
+  'lang',
 ]);
 
 const HIDDEN_COMMAND_ALIASES = Object.freeze({
   interrupt: 'stop',
 });
 
-const COMMAND_CANONICAL_NAME_MAP = buildCommandCanonicalNameMap(COMMAND_HELP_SPECS, HIDDEN_COMMAND_ALIASES);
-const COMMAND_HELP_ALIAS_MAP = COMMAND_CANONICAL_NAME_MAP;
+const COMMAND_ALIAS_DEFINITIONS = Object.freeze({
+  helps: ['help', 'h'],
+  status: ['where', 'st'],
+  stop: ['sp'],
+  new: ['n'],
+  provider: ['pd'],
+  threads: ['th'],
+  search: ['se'],
+  next: ['nx'],
+  prev: ['pv'],
+  open: ['o'],
+  peek: ['pk'],
+  rename: ['rn'],
+  permissions: ['perm'],
+  reconnect: ['rc'],
+  restart: ['rs'],
+  lang: [],
+});
+
+const COMMAND_CANONICAL_NAME_MAP = buildCommandCanonicalNameMapFromAliases(COMMAND_ALIAS_DEFINITIONS, HIDDEN_COMMAND_ALIASES);
 
 function buildCommandCanonicalNameMap(
   specs: Record<string, CommandHelpSpec>,
@@ -1464,6 +1618,23 @@ function buildCommandCanonicalNameMap(
     map.set(spec.name, spec.name);
     for (const alias of spec.aliases) {
       map.set(alias, spec.name);
+    }
+  }
+  for (const [alias, canonical] of Object.entries(hiddenAliases)) {
+    map.set(alias, canonical);
+  }
+  return map;
+}
+
+function buildCommandCanonicalNameMapFromAliases(
+  aliases: Record<string, readonly string[]>,
+  hiddenAliases: Record<string, string> = {},
+) {
+  const map = new Map();
+  for (const [canonical, aliasList] of Object.entries(aliases)) {
+    map.set(canonical, canonical);
+    for (const alias of aliasList) {
+      map.set(alias, canonical);
     }
   }
   for (const [alias, canonical] of Object.entries(hiddenAliases)) {
@@ -1500,12 +1671,18 @@ function isResumeRetryableError(error) {
     || /empty session file/i.test(message);
 }
 
-function classifyTurnFailure(error) {
+function classifyTurnFailure(error, i18n: Translator) {
   const message = error instanceof Error ? error.message : String(error);
+  if ((error as RecoveryFailure)?.reasonCode === 'stale-session-recovery') {
+    return {
+      outputState: 'stale_session',
+      errorMessage: readRecentCodexRuntimeError(undefined, i18n) || message,
+    };
+  }
   if (/Timed out waiting for Codex turn/i.test(message)) {
     return {
       outputState: 'timeout',
-      errorMessage: readRecentCodexRuntimeError() || message,
+      errorMessage: readRecentCodexRuntimeError(undefined, i18n) || message,
     };
   }
   if (/without auto-rebinding/i.test(message)) {
@@ -1526,11 +1703,17 @@ function sleep(ms) {
   });
 }
 
-function enrichSessionRecoveryError(error, session, reason) {
+function enrichSessionRecoveryError(error, session, reason, i18n = createI18n()) {
   const message = error instanceof Error ? error.message : String(error);
-  return new Error(
-    `Bridge session stayed on existing thread ${session.codexThreadId} without auto-rebinding (${reason}): ${message}`,
-  );
+  const wrapped = new Error(
+    i18n.t('coordinator.thread.recoveryError', {
+      threadId: session.codexThreadId,
+      reason,
+      message,
+    }),
+  ) as RecoveryFailure;
+  wrapped.reasonCode = 'stale-session-recovery';
+  return wrapped;
 }
 
 function formatUserError(error) {
@@ -1548,7 +1731,7 @@ function formatAccountIdentity(identity) {
     || '';
 }
 
-function readRecentCodexRuntimeError(logPath = path.join(os.homedir(), '.codex', 'log', 'codex-tui.log')) {
+function readRecentCodexRuntimeError(logPath = path.join(os.homedir(), '.codex', 'log', 'codex-tui.log'), i18n = createI18n()) {
   try {
     const raw = fs.readFileSync(logPath, 'utf8');
     const lines = raw.trimEnd().split('\n').slice(-400);
@@ -1559,10 +1742,10 @@ function readRecentCodexRuntimeError(logPath = path.join(os.homedir(), '.codex',
       }
       const next = lines[index + 1] ?? '';
       if (/refresh_token_reused/i.test(line) || /refresh_token_reused/i.test(next)) {
-        return 'Codex 鉴权刷新失败：refresh token 已被复用，请刷新当前会话。';
+        return i18n.t('coordinator.codexAuth.refreshFailed');
       }
       if (/401 Unauthorized/i.test(line) || /401 Unauthorized/i.test(next)) {
-        return 'Codex 鉴权失败：401 Unauthorized。';
+        return i18n.t('coordinator.codexAuth.unauthorized');
       }
       const match = line.match(/ERROR\s+[^:]+:\s*(.+)$/);
       if (match?.[1]) {
@@ -1632,22 +1815,22 @@ function formatAccessPreset(preset) {
   return 'default';
 }
 
-function renderPermissionsLines(settings) {
+function renderPermissionsLines(settings, i18n: Translator) {
   return [
-    `当前权限预设：${formatAccessPreset(resolveAccessPreset(settings))}`,
-    `审批策略：${resolveApprovalPolicy(settings)}`,
-    `沙箱模式：${resolveSandboxMode(settings)}`,
+    i18n.t('coordinator.permissions.current', { value: formatAccessPreset(resolveAccessPreset(settings)) }),
+    i18n.t('coordinator.status.approvalPolicy', { value: resolveApprovalPolicy(settings) }),
+    i18n.t('coordinator.status.sandboxMode', { value: resolveSandboxMode(settings) }),
     '',
-    '可选命令：',
+    i18n.t('coordinator.permissions.availableCommands'),
     '- /permissions read-only',
     '- /permissions default',
     '- /permissions full-access',
     '',
-    '说明：',
-    '- read-only：按需审批 + 只读',
-    '- default：按需审批 + 工作区可写',
-    '- full-access：不审批 + 完全访问',
+    i18n.t('coordinator.permissions.notes'),
+    i18n.t('coordinator.permissions.readOnlyDesc'),
+    i18n.t('coordinator.permissions.defaultDesc'),
+    i18n.t('coordinator.permissions.fullAccessDesc'),
     '',
-    '变更将在下一轮生效。',
+    i18n.t('coordinator.permissions.applyNextTurn'),
   ];
 }

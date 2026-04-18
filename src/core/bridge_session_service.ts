@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { ConfigurationError, NotFoundError } from './errors.js';
+import { createI18n, type Translator } from '../i18n/index.js';
 import type { BridgeSession, PlatformScopeRef, SessionSettings, ThreadMetadata } from '../types/core.js';
 import type {
   BridgeSessionRepository,
@@ -57,6 +58,7 @@ interface BridgeSessionServiceOptions {
   providerRegistry: ProviderRegistryLike;
   sessionRouter: SessionRouterLike;
   now?: () => number;
+  locale?: string | null;
 }
 
 export class BridgeSessionService {
@@ -74,6 +76,8 @@ export class BridgeSessionService {
 
   private readonly now: () => number;
 
+  private readonly i18n: Translator;
+
   constructor({
     providerProfiles,
     bridgeSessions,
@@ -82,6 +86,7 @@ export class BridgeSessionService {
     providerRegistry,
     sessionRouter,
     now = () => Date.now(),
+    locale = null,
   }: BridgeSessionServiceOptions) {
     this.providerProfiles = providerProfiles;
     this.bridgeSessions = bridgeSessions;
@@ -90,6 +95,7 @@ export class BridgeSessionService {
     this.providerRegistry = providerRegistry;
     this.sessionRouter = sessionRouter;
     this.now = now;
+    this.i18n = createI18n(locale);
   }
 
   resolveScopeSession(scopeRef: PlatformScopeRef): BridgeSession | null {
@@ -122,7 +128,7 @@ export class BridgeSessionService {
     } = options;
     const providerProfile = this.providerProfiles.get(providerProfileId);
     if (!providerProfile) {
-      throw new NotFoundError(`Unknown provider profile: ${providerProfileId}`);
+      throw new NotFoundError(this.i18n.t('service.unknownProviderProfile', { id: providerProfileId }));
     }
     const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
     const thread = await providerPlugin.startThread({
@@ -161,7 +167,7 @@ export class BridgeSessionService {
   bindScopeToExistingSession(scopeRef: PlatformScopeRef, bridgeSessionId: string): BridgeSession {
     const session = this.bridgeSessions.get(bridgeSessionId);
     if (!session) {
-      throw new NotFoundError(`Unknown bridge session: ${bridgeSessionId}`);
+      throw new NotFoundError(this.i18n.t('service.unknownBridgeSession', { id: bridgeSessionId }));
     }
     this.sessionRouter.bindScope(scopeRef, bridgeSessionId, this.now());
     return session;
@@ -170,7 +176,7 @@ export class BridgeSessionService {
   updateSession(bridgeSessionId: string, updates: Partial<BridgeSession>): BridgeSession {
     const current = this.bridgeSessions.get(bridgeSessionId);
     if (!current) {
-      throw new NotFoundError(`Unknown bridge session: ${bridgeSessionId}`);
+      throw new NotFoundError(this.i18n.t('service.unknownBridgeSession', { id: bridgeSessionId }));
     }
     const next: BridgeSession = {
       ...current,
@@ -194,6 +200,7 @@ export class BridgeSessionService {
   async bindScopeToProviderThread(
     scopeRef: PlatformScopeRef,
     { providerProfileId, codexThreadId }: { providerProfileId: string; codexThreadId: string },
+    { initialSettings = {} }: { initialSettings?: Partial<SessionSettings> } = {},
   ): Promise<BridgeSession> {
     const existing = this.findSessionByProviderThread(providerProfileId, codexThreadId);
     if (existing) {
@@ -202,7 +209,7 @@ export class BridgeSessionService {
     }
     const providerProfile = this.providerProfiles.get(providerProfileId);
     if (!providerProfile) {
-      throw new NotFoundError(`Unknown provider profile: ${providerProfileId}`);
+      throw new NotFoundError(this.i18n.t('service.unknownProviderProfile', { id: providerProfileId }));
     }
     const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
     const thread = await providerPlugin.readThread({
@@ -211,7 +218,10 @@ export class BridgeSessionService {
       includeTurns: false,
     });
     if (!thread) {
-      throw new NotFoundError(`Unknown provider thread: ${providerProfileId}/${codexThreadId}`);
+      throw new NotFoundError(this.i18n.t('service.unknownProviderThread', {
+        providerProfileId,
+        threadId: codexThreadId,
+      }));
     }
     const now = this.now();
     const session: BridgeSession = {
@@ -237,8 +247,9 @@ export class BridgeSessionService {
       accessPreset: null,
       approvalPolicy: null,
       sandboxMode: null,
-      locale: null,
+      locale: initialSettings.locale ?? null,
       metadata: {},
+      ...initialSettings,
       updatedAt: now,
     });
     return session;
@@ -254,7 +265,7 @@ export class BridgeSessionService {
   ) {
     const providerProfile = this.providerProfiles.get(providerProfileId);
     if (!providerProfile) {
-      throw new NotFoundError(`Unknown provider profile: ${providerProfileId}`);
+      throw new NotFoundError(this.i18n.t('service.unknownProviderProfile', { id: providerProfileId }));
     }
     const localSessions = this.listSessionsForProviderProfile(providerProfile.id);
     const localByThreadId = new Map(localSessions.map((session) => [session.codexThreadId, session]));
@@ -343,7 +354,7 @@ export class BridgeSessionService {
   ) {
     const providerProfile = this.providerProfiles.get(providerProfileId);
     if (!providerProfile) {
-      throw new NotFoundError(`Unknown provider profile: ${providerProfileId}`);
+      throw new NotFoundError(this.i18n.t('service.unknownProviderProfile', { id: providerProfileId }));
     }
     const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
     const thread = await providerPlugin.readThread({
@@ -392,11 +403,13 @@ export class BridgeSessionService {
   upsertSessionSettings(bridgeSessionId: string, updates: Partial<SessionSettings>): SessionSettings {
     const session = this.bridgeSessions.get(bridgeSessionId);
     if (!session) {
-      throw new NotFoundError(`Unknown bridge session: ${bridgeSessionId}`);
+      throw new NotFoundError(this.i18n.t('service.unknownBridgeSession', { id: bridgeSessionId }));
     }
     const current = this.sessionSettings.get(bridgeSessionId);
     if (!current) {
-      throw new ConfigurationError(`Session settings are missing for session: ${bridgeSessionId}`);
+      throw new ConfigurationError(this.i18n.t('service.sessionSettingsMissing', {
+        id: bridgeSessionId,
+      }));
     }
     const next: SessionSettings = {
       ...current,

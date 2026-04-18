@@ -164,7 +164,7 @@ function makeProviderProfile(id, providerKind, displayName) {
   };
 }
 
-function makeRuntime({ defaultCwd = null, restartBridge = null } = {}) {
+function makeRuntime({ defaultCwd = null, restartBridge = null, locale = null } = {}) {
   const openai = new FakeProviderPlugin('openai-native', { replyPrefix: 'openai' });
   const minimax = new FakeProviderPlugin('minimax-via-cliproxy', { replyPrefix: 'minimax' });
   const runtime = createCodexBridgeRuntime({
@@ -175,6 +175,7 @@ function makeRuntime({ defaultCwd = null, restartBridge = null } = {}) {
     ],
     defaultProviderProfileId: 'openai-default',
     defaultCwd,
+    locale,
     restartBridge,
   });
   return { runtime, openai, minimax };
@@ -348,6 +349,20 @@ test('/status reports when no bridge session is bound yet', async () => {
   assert.match(result.messages[2]?.text ?? '', /默认工作目录：（未设置）/);
 });
 
+test('/status uses English output when locale is set to en', async () => {
+  const { runtime } = makeRuntime({ locale: 'en' });
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-status-en-1',
+    text: '/status',
+  });
+
+  assert.match(result.messages[0]?.text ?? '', /No bridge session is currently bound to this scope/);
+  assert.match(result.messages[1]?.text ?? '', /Default provider profile: openai-default/);
+  assert.match(result.messages[2]?.text ?? '', /Default working directory: \(not set\)/);
+});
+
 test('/status includes active-turn state when a session is idle', async () => {
   const { runtime } = makeRuntime();
 
@@ -386,8 +401,70 @@ test('/helps lists all supported slash commands and help entrypoints', async () 
   assert.match(text, /\/next \(\/nx\) 翻到当前线程列表的下一页/);
   assert.match(text, /\/prev \(\/pv\) 翻到当前线程列表的上一页/);
   assert.match(text, /\/rename \(\/rn\) 给线程设置本地显示名/);
+  assert.match(text, /\/lang 查看\/切换当前会话的语言/);
   assert.match(text, /帮助：\/helps <命令>/);
   assert.match(text, /示例：\/helps threads  或  \/threads -h/);
+});
+
+test('/helps renders English help text when locale is set to en', async () => {
+  const { runtime } = makeRuntime({ locale: 'en' });
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-help-en-1',
+    text: '/helps',
+  });
+
+  const text = result.messages[0]?.text ?? '';
+  assert.match(text, /Slash Commands/);
+  assert.match(text, /\/helps \(\/help, \/h\) Show all slash commands/);
+  assert.match(text, /Help: \/helps <command>/);
+  assert.match(text, /\/lang Show or switch the current language used for text replies/);
+});
+
+test('/lang displays current language when no locale argument is provided', async () => {
+  const { runtime } = makeRuntime({ locale: 'en' });
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-lang-1',
+    text: '/lang',
+  });
+
+  assert.equal(result.messages[0]?.text ?? '', 'Current language: English');
+});
+
+test('/lang persists command locale for scope and overrides env', async () => {
+  const { runtime } = makeRuntime({ locale: 'en' });
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-lang-2',
+    text: '/lang zh',
+  });
+
+  const status = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-lang-2',
+    text: '/status',
+  });
+
+  assert.match(status.messages[0]?.text ?? '', /当前 scope 尚未绑定 bridge session/);
+  assert.match(status.messages[1]?.text ?? '', /默认 Provider 配置：openai-default/);
+  assert.match(status.messages[2]?.text ?? '', /默认工作目录：/);
+});
+
+test('/lang rejects invalid language values', async () => {
+  const { runtime } = makeRuntime();
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-lang-3',
+    text: '/lang jp',
+  });
+
+  assert.equal(result.messages[0]?.text ?? '', '不支持的语言：jp');
+  assert.equal(result.messages[1]?.text ?? '', '用法：/lang <zh-CN|en>');
 });
 
 test('/helps threads renders usage, examples, and notes for a specific command', async () => {

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { WeixinBridgeRuntime } from '../../src/runtime/weixin_bridge_runtime.js';
+import { createI18n } from '../../src/i18n/index.js';
 
 interface RuntimeHarnessOptions {
   coordinator: any;
@@ -517,7 +518,18 @@ test('WeixinBridgeRuntime throws when provider marks the final complete but retu
     },
   });
 
-  await assert.rejects(runtime.runOnce(), /could not resolve final text/);
+  const zhMsg = createI18n().t('runtime.error.finalTextMissing', { scopeId: 'wxid_1' });
+  const enMsg = createI18n('en').t('runtime.error.finalTextMissing', { scopeId: 'wxid_1' });
+  try {
+    await runtime.runOnce();
+    assert.fail('expected runtime to reject');
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    assert.ok(
+      message.includes(zhMsg) || message.includes(enMsg),
+      `Expected missing-final-text message, got: ${message}`,
+    );
+  }
 });
 
 

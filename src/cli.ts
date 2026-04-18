@@ -12,6 +12,7 @@ import { createFileJsonRepositories } from './store/file_json/create_file_json_r
 import { loadCodexProfilesFromEnv } from './providers/codex/config.js';
 import { CodexProviderPlugin } from './providers/codex/plugin.js';
 import { WeixinBridgeRuntime } from './runtime/weixin_bridge_runtime.js';
+import { createI18n } from './i18n/index.js';
 
 interface WeixinLoginArgs {
   baseUrl: string | null;
@@ -56,6 +57,7 @@ async function main(argv: string[] = process.argv.slice(2)) {
 }
 
 async function runWeixinLogin(args: string[]) {
+  const i18n = createI18n();
   const options = parseWeixinLoginArgs(args);
   const stateDir = path.resolve(options.stateDir ?? defaultCodexBridgeStateDir());
   const accountsDir = path.join(stateDir, 'weixin', 'accounts');
@@ -77,7 +79,7 @@ async function runWeixinLogin(args: string[]) {
         qrcodeImageContent,
       });
       qrFilePath = output.filePath ?? null;
-      process.stdout.write(`二维码已生成\n`);
+      process.stdout.write(`${i18n.t('cli.login.qrGenerated')}\n`);
       process.stdout.write(`qrcode: ${qrcode}\n`);
       if (output.filePath) {
         process.stdout.write(`file: ${output.filePath}\n`);
@@ -88,7 +90,7 @@ async function runWeixinLogin(args: string[]) {
       if (!output.filePath && !output.sourceUrl && qrcodeImageContent) {
         process.stdout.write(`content: ${truncate(qrcodeImageContent, 400)}\n`);
       }
-      process.stdout.write(`请用微信扫描上面的二维码。\n`);
+      process.stdout.write(`${i18n.t('cli.login.scanPrompt')}\n`);
     },
     onStatus: async ({ status }) => {
       process.stdout.write(`status: ${status}\n`);
@@ -96,12 +98,12 @@ async function runWeixinLogin(args: string[]) {
   });
 
   if (!credentials) {
-    process.stderr.write(`扫码登录超时，未拿到凭据。\n`);
+    process.stderr.write(`${i18n.t('cli.login.timeout')}\n`);
     process.exitCode = 1;
     return;
   }
 
-  process.stdout.write(`登录成功\n`);
+  process.stdout.write(`${i18n.t('cli.login.success')}\n`);
   process.stdout.write(`account_id: ${credentials.account_id}\n`);
   process.stdout.write(`user_id: ${credentials.user_id || ''}\n`);
   process.stdout.write(`base_url: ${credentials.base_url}\n`);
@@ -112,6 +114,7 @@ async function runWeixinLogin(args: string[]) {
 }
 
 async function runWeixinServe(args: string[]) {
+  const i18n = createI18n();
   const options = parseWeixinServeArgs(args);
   const stateDir = path.resolve(options.stateDir ?? defaultCodexBridgeStateDir());
   const defaultCwd = path.resolve(options.cwd ?? process.env.CODEXBRIDGE_DEFAULT_CWD ?? process.cwd());
@@ -130,6 +133,7 @@ async function runWeixinServe(args: string[]) {
     providerProfiles: codexProfiles.profiles,
     defaultProviderProfileId: codexProfiles.defaultProviderProfileId,
     defaultCwd,
+    locale: i18n.locale,
     repositories,
     restartBridge: async ({ event }) => {
       await queueWeixinBridgeRestart({
@@ -145,13 +149,14 @@ async function runWeixinServe(args: string[]) {
     onError: (async (error: unknown) => {
       process.stderr.write(`[weixin] ${formatError(error)}\n`);
     }) as any,
+    locale: i18n.locale,
   } as any);
 
-  process.stdout.write(`启动 WeChat bridge\n`);
+  process.stdout.write(`${i18n.t('cli.serve.starting')}\n`);
   process.stdout.write(`state_dir: ${stateDir}\n`);
   process.stdout.write(`default_provider_profile: ${runtime.config.defaultProviderProfileId}\n`);
   process.stdout.write(`serve_lock: ${serveLock.lockPath}\n`);
-  process.stdout.write(`default_cwd: ${runtime.config.defaultCwd ?? '(none)'}\n`);
+  process.stdout.write(`${i18n.t('cli.serve.defaultCwd', { value: runtime.config.defaultCwd ?? i18n.t('common.none') })}\n`);
 
   let stopped = false;
   process.once('exit', () => {
@@ -162,7 +167,7 @@ async function runWeixinServe(args: string[]) {
       return;
     }
     stopped = true;
-    process.stdout.write(`收到 ${signal}，正在停止 WeChat bridge...\n`);
+    process.stdout.write(`${i18n.t('cli.serve.stopping', { signal })}\n`);
     try {
       await bridgeRuntime.stop();
     } finally {
@@ -319,9 +324,10 @@ async function acquireServeLock(lockPath: string): Promise<ServeLock> {
 
   const existing = readServeLock(lockPath);
   if (existing?.pid && isProcessAlive(existing.pid)) {
-    throw new Error(
-      `WeChat bridge is already running for ${lockPath} (pid ${existing.pid}). Stop the existing process before starting another.`,
-    );
+    throw new Error(createI18n().t('cli.lock.alreadyRunning', {
+      lockPath,
+      pid: existing.pid,
+    }));
   }
 
   await fsp.rm(lockPath, { force: true });
@@ -395,11 +401,12 @@ async function queueWeixinBridgeRestart({
   stateDir?: string;
   externalScopeId?: string | null;
 } = {}) {
+  const i18n = createI18n();
   if (externalScopeId) {
     await enqueuePendingRestartNotification({
       stateDir,
       externalScopeId,
-      content: '桥接已重启完成。\n现在可以继续发消息了。',
+      content: i18n.t('cli.serve.restartCompleted'),
     });
   }
   const scriptPath = path.resolve(process.cwd(), 'scripts/service/restart-systemd-user.sh');
@@ -509,9 +516,9 @@ function writePendingRestartNotifications(filePath: string, items: PendingRestar
 
 function printUsage() {
   process.stdout.write([
-    'Usage:',
-    '  npm run weixin:login -- [--base-url URL] [--state-dir DIR] [--bot-type N] [--timeout-sec N]',
-    '  npm run weixin:serve -- [--state-dir DIR] [--cwd DIR]',
+    createI18n().t('cli.usage.title'),
+    createI18n().t('cli.usage.login'),
+    createI18n().t('cli.usage.serve'),
   ].join('\n'));
 }
 

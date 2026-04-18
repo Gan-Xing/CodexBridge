@@ -1,4 +1,5 @@
 import { formatPlatformScopeKey } from './contracts.js';
+import { createI18n, type Translator } from '../i18n/index.js';
 import type { PlatformScopeRef } from '../types/core.js';
 
 interface ActiveTurnRecord {
@@ -22,6 +23,7 @@ interface BeginScopeTurnOptions {
 
 interface ActiveTurnRegistryOptions {
   now?: () => number;
+  locale?: string | null;
 }
 
 export class ActiveTurnRegistry {
@@ -29,9 +31,12 @@ export class ActiveTurnRegistry {
 
   private readonly scopeTurns: Map<string, ActiveTurnRecord>;
 
-  constructor({ now = () => Date.now() }: ActiveTurnRegistryOptions = {}) {
+  private readonly i18n: Translator;
+
+  constructor({ now = () => Date.now(), locale = null }: ActiveTurnRegistryOptions = {}) {
     this.now = now;
     this.scopeTurns = new Map();
+    this.i18n = createI18n(locale);
   }
 
   resolveScopeTurn(scopeRef: PlatformScopeRef): ActiveTurnRecord | null {
@@ -41,7 +46,7 @@ export class ActiveTurnRegistry {
   beginScopeTurn(scopeRef: PlatformScopeRef, initial: BeginScopeTurnOptions = {}): ActiveTurnRecord {
     const scopeKey = buildScopeKey(scopeRef);
     if (this.scopeTurns.has(scopeKey)) {
-      throw new Error(`Active turn already exists for ${scopeKey}`);
+      throw new Error(this.i18n.t('service.activeTurn.alreadyExists', { scope: scopeKey }));
     }
     const now = this.now();
     const record: ActiveTurnRecord = {

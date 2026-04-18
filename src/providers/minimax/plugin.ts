@@ -8,6 +8,9 @@ import type {
   ProviderTurnProgress,
   ProviderTurnResult,
 } from '../../types/provider.js';
+import { createI18n } from '../../i18n/index.js';
+
+const i18n = createI18n();
 
 export class MiniMaxViaCLIProxyProviderPlugin {
   kind: string;
@@ -24,7 +27,7 @@ export class MiniMaxViaCLIProxyProviderPlugin {
     cwd?: string | null;
     title?: string | null;
   }): Promise<ProviderThreadStartResult> {
-    throw new Error('MiniMaxViaCLIProxyProviderPlugin.startThread is not implemented yet');
+    throw new Error(i18n.t('provider.minimax.startThreadUnimplemented'));
   }
 
   async readThread(_params: {
@@ -32,7 +35,7 @@ export class MiniMaxViaCLIProxyProviderPlugin {
     threadId: string;
     includeTurns?: boolean;
   }): Promise<ProviderThreadSummary | null> {
-    throw new Error('MiniMaxViaCLIProxyProviderPlugin.readThread is not implemented yet');
+    throw new Error(i18n.t('provider.minimax.readThreadUnimplemented'));
   }
 
   async listThreads(_params: {
@@ -41,7 +44,7 @@ export class MiniMaxViaCLIProxyProviderPlugin {
     cursor?: string | null;
     searchTerm?: string | null;
   }): Promise<ProviderThreadListResult> {
-    throw new Error('MiniMaxViaCLIProxyProviderPlugin.listThreads is not implemented yet');
+    throw new Error(i18n.t('provider.minimax.listThreadsUnimplemented'));
   }
 
   async startTurn(_params: {
@@ -53,7 +56,7 @@ export class MiniMaxViaCLIProxyProviderPlugin {
     onProgress?: ((progress: ProviderTurnProgress) => Promise<void> | void) | null;
     onTurnStarted?: ((meta: Record<string, unknown>) => Promise<void> | void) | null;
   }): Promise<ProviderTurnResult> {
-    throw new Error('MiniMaxViaCLIProxyProviderPlugin.startTurn is not implemented yet');
+    throw new Error(i18n.t('provider.minimax.startTurnUnimplemented'));
   }
 
   async interruptTurn(_params: {
@@ -61,6 +64,6 @@ export class MiniMaxViaCLIProxyProviderPlugin {
     threadId: string;
     turnId: string;
   }): Promise<void> {
-    throw new Error('MiniMaxViaCLIProxyProviderPlugin.interruptTurn is not implemented yet');
+    throw new Error(i18n.t('provider.minimax.interruptTurnUnimplemented'));
   }
 }
