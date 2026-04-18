@@ -21,6 +21,7 @@ function makeProfile(overrides = {}) {
 
 test('CodexProviderPlugin uses per-profile clients and forwards default model into startThread/startTurn', async () => {
   const calls = [];
+  let seenDeveloperInstructions = null;
   const plugin = new CodexProviderPlugin({
     clientFactory: (profile) => ({
       async start() {
@@ -47,6 +48,7 @@ test('CodexProviderPlugin uses per-profile clients and forwards default model in
         return [{ threadId: `${profile.id}-thread-1` }];
       },
       async startTurn(params) {
+        seenDeveloperInstructions = params.developerInstructions;
         calls.push(['startTurn', profile.id, params.model]);
         return {
           outputText: 'done',
@@ -94,6 +96,7 @@ test('CodexProviderPlugin uses per-profile clients and forwards default model in
   assert.equal(turn.outputText, 'done');
   assert.ok(calls.some((entry) => entry[0] === 'startThread' && entry[2] === 'gpt-5.4'));
   assert.ok(calls.some((entry) => entry[0] === 'startTurn' && entry[2] === 'gpt-5.4'));
+  assert.match(seenDeveloperInstructions ?? '', /do not rely on prior thread memory/i);
 });
 
 test('CodexProviderPlugin resolves default model metadata from listModels when profile defaults are empty', async () => {
