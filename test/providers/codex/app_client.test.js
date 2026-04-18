@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 import { CodexAppClient } from '../../../src/providers/codex/app_client.js';
 
@@ -448,6 +451,139 @@ test('CodexAppClient waits for assistant output after a terminal turn initially 
 
   assert.equal(result.outputText, 'done');
   assert.equal(readCount, 2);
+});
+
+test('CodexAppClient falls back to the session log task_complete message when thread output is still empty', async () => {
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+  });
+  const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-session-log-'));
+  const sessionPath = path.join(sessionDir, 'rollout.jsonl');
+  fs.writeFileSync(sessionPath, `${JSON.stringify({
+    timestamp: new Date().toISOString(),
+    type: 'event_msg',
+    payload: {
+      type: 'task_complete',
+      turn_id: 'turn-1',
+      last_agent_message: '`611 /tmp/file`',
+    },
+  })}\n`, 'utf8');
+
+  client.request = async (method) => {
+    if (method === 'turn/start') {
+      return { turn: { id: 'turn-1' } };
+    }
+    if (method === 'thread/read') {
+      return {
+        thread: {
+          id: 'thread-1',
+          name: 'Thread 1',
+          path: sessionPath,
+          turns: [{
+            id: 'turn-1',
+            status: 'completed',
+            items: [
+              {
+                type: 'userMessage',
+                text: 'hello',
+              },
+              {
+                type: 'agentMessage',
+                phase: 'commentary',
+                text: 'running command',
+              },
+            ],
+          }],
+        },
+      };
+    }
+    return {};
+  };
+
+  const result = await client.startTurn({
+    threadId: 'thread-1',
+    inputText: 'hello',
+    model: 'gpt-5.4',
+    effort: null,
+    collaborationMode: 'default',
+    timeoutMs: 2500,
+  });
+
+  assert.equal(result.outputText, '`611 /tmp/file`');
+  assert.equal(result.outputState, 'complete');
+  assert.equal(result.finalSource, 'session_task_complete');
+});
+
+test('CodexAppClient keeps waiting for task_complete when turn status is completed early', async () => {
+  const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-session-log-'));
+  const sessionPath = path.join(sessionDir, 'rollout.jsonl');
+  fs.writeFileSync(sessionPath, '', 'utf8');
+
+  let nowMs = 0;
+  let readCount = 0;
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+    turnPollNow: () => nowMs,
+    turnPollSleep: async () => {
+      nowMs += 15_000;
+    },
+  });
+
+  client.request = async (method) => {
+    if (method === 'turn/start') {
+      return { turn: { id: 'turn-1' } };
+    }
+    if (method === 'thread/read') {
+      readCount += 1;
+      if (readCount === 4) {
+        fs.writeFileSync(sessionPath, `${JSON.stringify({
+          timestamp: new Date().toISOString(),
+          type: 'event_msg',
+          payload: {
+            type: 'task_complete',
+            turn_id: 'turn-1',
+            last_agent_message: '1395 data files',
+          },
+        })}\n`, 'utf8');
+      }
+      return {
+        thread: {
+          id: 'thread-1',
+          name: 'Thread 1',
+          path: sessionPath,
+          turns: [{
+            id: 'turn-1',
+            status: 'completed',
+            items: [
+              {
+                type: 'userMessage',
+                text: 'hello',
+              },
+              {
+                type: 'agentMessage',
+                phase: 'commentary',
+                text: 'still working',
+              },
+            ],
+          }],
+        },
+      };
+    }
+    return {};
+  };
+
+  const result = await client.startTurn({
+    threadId: 'thread-1',
+    inputText: 'hello',
+    model: 'gpt-5.4',
+    effort: null,
+    collaborationMode: 'default',
+    timeoutMs: 120_000,
+  });
+
+  assert.equal(result.outputText, '1395 data files');
+  assert.equal(result.outputState, 'complete');
+  assert.equal(readCount, 4);
 });
 
 test('CodexAppClient forwards final-answer progress notifications before the final answer lands in thread history', async () => {
