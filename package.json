@@ -5,12 +5,20 @@
   "type": "module",
   "description": "Codex-centered bridge for multiple chat platforms and model providers.",
   "scripts": {
-    "start": "node src/index.js",
-    "weixin:login": "node src/cli.js weixin login",
-    "weixin:serve": "node src/cli.js weixin serve",
-    "test": "node --test"
+    "build": "tsc -p tsconfig.json",
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck:js": "tsc -p tsconfig.checkjs.json",
+    "weixin:login": "tsx src/cli.ts weixin login",
+    "weixin:serve": "tsx src/cli.ts weixin serve",
+    "test": "node --import tsx --test"
   },
   "engines": {
     "node": ">=24"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.3"
   }
 }
