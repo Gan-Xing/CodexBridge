@@ -83,11 +83,13 @@ async function runWeixinLogin(args) {
 async function runWeixinServe(args) {
   const options = parseWeixinServeArgs(args);
   const stateDir = path.resolve(options.stateDir ?? defaultCodexBridgeStateDir());
+  const accountsDir = path.join(stateDir, 'weixin', 'accounts');
+  const accountStore = new WeixinAccountStore({ rootDir: accountsDir });
   const repositories = createFileJsonRepositories(path.join(stateDir, 'runtime'));
   const codexProfiles = loadCodexProfilesFromEnv();
   const runtime = createCodexBridgeRuntime({
     platformPlugins: [
-      new WeixinPlatformPlugin(),
+      new WeixinPlatformPlugin({ accountStore }),
     ],
     providerPlugins: [
       new CodexProviderPlugin(),
