@@ -56,9 +56,16 @@ Recommended entrypoints:
 /helps threads
 /stop
 /sp
+/provider
+/pd
 /threads
 /th
 /search bridge
+/se bridge
+/next
+/nx
+/prev
+/pv
 /open 2
 /o 2
 /peek 2

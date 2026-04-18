@@ -1215,7 +1215,7 @@ const COMMAND_HELP_SPECS = Object.freeze({
   }),
   provider: freezeCommandHelp({
     name: 'provider',
-    aliases: [],
+    aliases: ['pd'],
     summary: '查看可用 provider，或切换当前 scope 的 provider profile',
     usage: [
       '/provider',
@@ -1250,7 +1250,7 @@ const COMMAND_HELP_SPECS = Object.freeze({
   }),
   search: freezeCommandHelp({
     name: 'search',
-    aliases: [],
+    aliases: ['se'],
     summary: '按关键词搜索线程标题或 preview，并显示第一页',
     usage: [
       '/search <关键词>',
@@ -1266,7 +1266,7 @@ const COMMAND_HELP_SPECS = Object.freeze({
   }),
   next: freezeCommandHelp({
     name: 'next',
-    aliases: [],
+    aliases: ['nx'],
     summary: '翻到当前线程列表的下一页',
     usage: [
       '/next',
@@ -1282,7 +1282,7 @@ const COMMAND_HELP_SPECS = Object.freeze({
   }),
   prev: freezeCommandHelp({
     name: 'prev',
-    aliases: [],
+    aliases: ['pv'],
     summary: '翻到当前线程列表的上一页',
     usage: [
       '/prev',

@@ -10,7 +10,7 @@ It borrows the most useful CLI help conventions while staying chat-friendly:
 - `/helps` shows the full command catalog
 - `/helps <command>` shows one command in detail
 - every slash command supports `-h`, `--help`, `-help`, and `-helps`
-- selected high-frequency commands also support short aliases such as `/h`, `/st`, `/sp`, `/th`, `/o`, `/pk`, `/rn`, `/perm`, `/rc`, and `/rs`
+- every slash command also supports a short alias such as `/h`, `/st`, `/sp`, `/n`, `/pd`, `/th`, `/se`, `/nx`, `/pv`, `/o`, `/pk`, `/rn`, `/perm`, `/rc`, and `/rs`
 - thread browsing is index-first on WeChat, so `/open 2` is preferred over copying raw thread ids
 
 ## Fast Start
@@ -21,8 +21,16 @@ It borrows the most useful CLI help conventions while staying chat-friendly:
 /st
 /stop
 /sp
+/provider
+/pd
 /threads
 /th
+/search bridge
+/se bridge
+/next
+/nx
+/prev
+/pv
 /open 2
 /o 2
 /peek 2
@@ -85,7 +93,7 @@ Examples:
 /n
 ```
 
-### `/provider`
+### `/provider` and `/pd`
 
 List provider profiles or switch the current scope to another provider profile.
 
@@ -93,7 +101,9 @@ Examples:
 
 ```text
 /provider
+/pd
 /provider openai-default
+/pd openai-default
 ```
 
 ### `/threads` and `/th`
@@ -116,7 +126,7 @@ Examples:
 /th
 ```
 
-### `/search <term>`
+### `/search <term>` and `/se <term>`
 
 Search thread titles and previews, then show the first page of results.
 
@@ -124,10 +134,12 @@ Examples:
 
 ```text
 /search bridge
+/se bridge
 /search 微信
+/se 微信
 ```
 
-### `/next` and `/prev`
+### `/next`, `/prev`, `/nx`, and `/pv`
 
 Move through the current thread browser page set.
 You must run `/threads` or `/search` first so the current page context exists.
@@ -137,7 +149,9 @@ Examples:
 ```text
 /threads
 /next
+/nx
 /prev
+/pv
 ```
 
 ### `/open <index|threadId>` and `/o <index|threadId>`

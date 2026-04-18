@@ -361,7 +361,11 @@ test('/helps lists all supported slash commands and help entrypoints', async () 
   assert.match(text, /Slash 命令/);
   assert.match(text, /\/helps \(\/help, \/h\) 查看所有斜杠命令/);
   assert.match(text, /\/stop \(\/sp\) 请求中断当前正在执行的回复/);
+  assert.match(text, /\/provider \(\/pd\) 查看可用 provider/);
   assert.match(text, /\/threads \(\/th\) 查看当前 provider 的线程列表首页/);
+  assert.match(text, /\/search \(\/se\) 按关键词搜索线程标题或 preview/);
+  assert.match(text, /\/next \(\/nx\) 翻到当前线程列表的下一页/);
+  assert.match(text, /\/prev \(\/pv\) 翻到当前线程列表的上一页/);
   assert.match(text, /\/rename \(\/rn\) 给线程设置本地显示名/);
   assert.match(text, /帮助：\/helps <命令>/);
   assert.match(text, /示例：\/helps threads  或  \/threads -h/);
@@ -417,6 +421,20 @@ test('slash command short aliases resolve to the same help and action targets', 
     text: '/perm',
   });
   assert.match(commandResult.messages[0]?.text ?? '', /当前还没有绑定会话/);
+
+  const providerResult = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-1',
+    text: '/pd',
+  });
+  assert.match(providerResult.messages[0]?.text ?? '', /Current provider profile: openai-default/);
+
+  const searchResult = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-1',
+    text: '/se bridge',
+  });
+  assert.match(searchResult.messages[0]?.text ?? '', /没有找到匹配的线程|Threads \|/);
 });
 
 test('slash commands support -help, -helps, and --help variants', async () => {
