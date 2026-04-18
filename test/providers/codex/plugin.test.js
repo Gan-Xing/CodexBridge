@@ -96,7 +96,7 @@ test('CodexProviderPlugin uses per-profile clients and forwards default model in
   assert.equal(turn.outputText, 'done');
   assert.ok(calls.some((entry) => entry[0] === 'startThread' && entry[2] === 'gpt-5.4'));
   assert.ok(calls.some((entry) => entry[0] === 'startTurn' && entry[2] === 'gpt-5.4'));
-  assert.match(seenDeveloperInstructions ?? '', /do not rely on prior thread memory/i);
+  assert.equal(seenDeveloperInstructions, '');
 });
 
 test('CodexProviderPlugin resolves default model metadata from listModels when profile defaults are empty', async () => {
@@ -374,4 +374,72 @@ test('CodexProviderPlugin reconnectProfile replaces the existing client instance
     ['client-2', 'start'],
   ]);
   assert.equal(turn.outputText, 'client-2-done');
+});
+
+test('CodexProviderPlugin forwards developer instructions from environment when configured', async () => {
+  const previous = process.env.CODEXBRIDGE_CODEX_DEVELOPER_INSTRUCTIONS;
+  process.env.CODEXBRIDGE_CODEX_DEVELOPER_INSTRUCTIONS = 'Always inspect the workspace.';
+
+  try {
+    let seenDeveloperInstructions = null;
+    const plugin = new CodexProviderPlugin({
+      clientFactory: () => ({
+        async start() {},
+        async startThread() {
+          return { threadId: 'thread-1', cwd: null, title: null };
+        },
+        async readThread(threadId) {
+          return { threadId, title: null, cwd: null };
+        },
+        async listThreads() {
+          return [];
+        },
+        async startTurn(params) {
+          seenDeveloperInstructions = params.developerInstructions;
+          return {
+            outputText: 'done',
+            outputState: 'complete',
+            threadId: params.threadId,
+            title: null,
+          };
+        },
+        async interruptTurn() {},
+        async listModels() {
+          return [{ model: 'gpt-5.4', isDefault: true }];
+        },
+        async resumeThread() {
+          return {};
+        },
+      }),
+    });
+
+    await plugin.startTurn({
+      providerProfile: makeProfile(),
+      bridgeSession: {
+        id: 'session-1',
+        codexThreadId: 'thread-1',
+        cwd: '/tmp/work',
+        title: null,
+      },
+      sessionSettings: {
+        model: null,
+        reasoningEffort: null,
+        serviceTier: null,
+      },
+      event: {
+        platform: 'weixin',
+        externalScopeId: 'wxid_1',
+        text: 'hello',
+      },
+      inputText: 'hello',
+    });
+
+    assert.equal(seenDeveloperInstructions, 'Always inspect the workspace.');
+  } finally {
+    if (previous === undefined) {
+      delete process.env.CODEXBRIDGE_CODEX_DEVELOPER_INSTRUCTIONS;
+    } else {
+      process.env.CODEXBRIDGE_CODEX_DEVELOPER_INSTRUCTIONS = previous;
+    }
+  }
 });
