@@ -17,6 +17,7 @@ export class BridgeCoordinator {
     providerProfiles,
     providerRegistry,
     defaultProviderProfileId,
+    defaultCwd = null,
     restartBridge = null,
     now = () => Date.now(),
   }) {
@@ -25,6 +26,7 @@ export class BridgeCoordinator {
     this.providerProfiles = providerProfiles;
     this.providerRegistry = providerRegistry;
     this.defaultProviderProfileId = defaultProviderProfileId;
+    this.defaultCwd = normalizeCwd(defaultCwd);
     this.restartBridge = restartBridge;
     this.now = now;
     this.threadBrowserStates = new Map();
@@ -49,7 +51,7 @@ export class BridgeCoordinator {
     try {
       session = await this.bridgeSessions.resolveOrCreateScopeSession(scopeRef, {
         providerProfileId: this.resolveDefaultProviderProfileId(),
-        cwd: event.cwd ?? null,
+        cwd: this.resolveEventCwd(event),
         providerStartOptions: {
           sourcePlatform: event.platform,
         },
@@ -160,6 +162,7 @@ export class BridgeCoordinator {
       return messageResponse([
         `No bridge session is bound to ${event.platform}:${event.externalScopeId}.`,
         `Default provider profile: ${this.resolveDefaultProviderProfileId()}`,
+        `Default working directory: ${this.defaultCwd ?? '(none)'}`,
       ]);
     }
     const providerProfile = this.requireProviderProfile(session.providerProfileId);
@@ -171,6 +174,7 @@ export class BridgeCoordinator {
       `Provider profile: ${providerProfile.id}`,
       `Provider kind: ${providerProfile.providerKind}`,
       `Codex thread: ${session.codexThreadId}`,
+      `Working directory: ${session.cwd ?? this.defaultCwd ?? '(none)'}`,
       `Model: ${settings?.model ?? '(default)'}`,
       `Reasoning effort: ${settings?.reasoningEffort ?? '(default)'}`,
       `Service tier: ${settings?.serviceTier ?? '(default)'}`,
@@ -193,7 +197,7 @@ export class BridgeCoordinator {
     const providerProfileId = existing?.providerProfileId ?? this.resolveDefaultProviderProfileId();
     const nextSession = await this.bridgeSessions.createSessionForScope(scopeRef, {
       providerProfileId,
-      cwd: args.join(' ').trim() || existing?.cwd || event.cwd || null,
+      cwd: args.join(' ').trim() || existing?.cwd || this.resolveEventCwd(event),
       providerStartOptions: {
         sourcePlatform: event.platform,
         trigger: 'new-command',
@@ -670,6 +674,10 @@ export class BridgeCoordinator {
     ) ?? null;
   }
 
+  resolveEventCwd(event) {
+    return normalizeCwd(event.cwd) ?? this.defaultCwd ?? null;
+  }
+
   async startTurnWithRecovery(scopeRef, session, event, options = {}) {
     try {
       return await this.startTurnOnSession(session, event, options);
@@ -724,7 +732,7 @@ export class BridgeCoordinator {
         providerTitle: result.title ?? null,
         fallbackTitle: session.title,
       }),
-      cwd: session.cwd ?? event.cwd ?? null,
+      cwd: normalizeCwd(session.cwd) ?? this.resolveEventCwd(event),
     });
     return { result, session: nextSession };
   }
@@ -833,6 +841,11 @@ function renderCommandBlockedMessage(commandName, interruptRequested) {
     return `已请求中断，请等待当前回复停止后再${action}。`;
   }
   return `当前有回复在进行中，暂时不能${action}。请先等待，或使用 /stop（兼容 /interrupt）中断。`;
+}
+
+function normalizeCwd(value) {
+  const normalized = typeof value === 'string' ? value.trim() : '';
+  return normalized || null;
 }
 
 function formatActiveTurnValue(activeTurn) {

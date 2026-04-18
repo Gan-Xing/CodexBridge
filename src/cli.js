@@ -83,6 +83,7 @@ async function runWeixinLogin(args) {
 async function runWeixinServe(args) {
   const options = parseWeixinServeArgs(args);
   const stateDir = path.resolve(options.stateDir ?? defaultCodexBridgeStateDir());
+  const defaultCwd = path.resolve(options.cwd ?? process.env.CODEXBRIDGE_DEFAULT_CWD ?? process.cwd());
   const accountsDir = path.join(stateDir, 'weixin', 'accounts');
   const accountStore = new WeixinAccountStore({ rootDir: accountsDir });
   const repositories = createFileJsonRepositories(path.join(stateDir, 'runtime'));
@@ -96,6 +97,7 @@ async function runWeixinServe(args) {
     ],
     providerProfiles: codexProfiles.profiles,
     defaultProviderProfileId: codexProfiles.defaultProviderProfileId,
+    defaultCwd,
     repositories,
     restartBridge: async () => {
       await queueWeixinBridgeRestart();
@@ -113,6 +115,7 @@ async function runWeixinServe(args) {
   process.stdout.write(`启动 WeChat bridge\n`);
   process.stdout.write(`state_dir: ${stateDir}\n`);
   process.stdout.write(`default_provider_profile: ${runtime.config.defaultProviderProfileId}\n`);
+  process.stdout.write(`default_cwd: ${runtime.config.defaultCwd ?? '(none)'}\n`);
 
   let stopped = false;
   const stop = async (signal) => {
@@ -174,12 +177,18 @@ function parseWeixinLoginArgs(args) {
 function parseWeixinServeArgs(args) {
   const options = {
     stateDir: null,
+    cwd: null,
   };
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     const next = args[index + 1];
     if (arg === '--state-dir' && next) {
       options.stateDir = next;
+      index += 1;
+      continue;
+    }
+    if (arg === '--cwd' && next) {
+      options.cwd = next;
       index += 1;
     }
   }
@@ -277,7 +286,7 @@ function printUsage() {
   process.stdout.write([
     'Usage:',
     '  node src/cli.js weixin login [--base-url URL] [--state-dir DIR] [--bot-type N] [--timeout-sec N]',
-    '  node src/cli.js weixin serve [--state-dir DIR]',
+    '  node src/cli.js weixin serve [--state-dir DIR] [--cwd DIR]',
   ].join('\n'));
 }
 

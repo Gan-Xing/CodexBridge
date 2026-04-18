@@ -145,7 +145,7 @@ function makeProviderProfile(id, providerKind, displayName) {
   };
 }
 
-function makeRuntime({ restartBridge = null } = {}) {
+function makeRuntime({ defaultCwd = null, restartBridge = null } = {}) {
   const openai = new FakeProviderPlugin('openai-native', { replyPrefix: 'openai' });
   const minimax = new FakeProviderPlugin('minimax-via-cliproxy', { replyPrefix: 'minimax' });
   const runtime = createCodexBridgeRuntime({
@@ -155,6 +155,7 @@ function makeRuntime({ restartBridge = null } = {}) {
       makeProviderProfile('minimax-default', 'minimax-via-cliproxy', 'MiniMax Default'),
     ],
     defaultProviderProfileId: 'openai-default',
+    defaultCwd,
     restartBridge,
   });
   return { runtime, openai, minimax };
@@ -186,6 +187,20 @@ test('bridge coordinator creates a default-provider session for normal text and 
   assert.equal(result.session?.providerProfileId, 'openai-default');
   assert.equal(openai.startThreadCalls.length, 1);
   assert.equal(openai.startTurnCalls.length, 1);
+});
+
+test('bridge coordinator uses the runtime default cwd for new sessions', async () => {
+  const { runtime, openai } = makeRuntime({ defaultCwd: '/tmp/project' });
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-cwd-1',
+    text: 'hello codexbridge',
+  });
+
+  assert.equal(result.session?.providerProfileId, 'openai-default');
+  assert.equal(openai.startThreadCalls[0]?.cwd, '/tmp/project');
+  assert.equal(openai.startTurnCalls[0]?.bridgeSession.cwd, '/tmp/project');
 });
 
 test('bridge coordinator resumes the same scope session when the bound thread is stale', async () => {
@@ -311,6 +326,7 @@ test('/status reports when no bridge session is bound yet', async () => {
 
   assert.match(result.messages[0]?.text ?? '', /No bridge session is bound/);
   assert.match(result.messages[1]?.text ?? '', /Default provider profile: openai-default/);
+  assert.match(result.messages[2]?.text ?? '', /Default working directory: \(none\)/);
 });
 
 test('/status includes active-turn state when a session is idle', async () => {
@@ -328,8 +344,8 @@ test('/status includes active-turn state when a session is idle', async () => {
     text: '/status',
   });
 
-  assert.equal(result.messages[11]?.text ?? '', 'Active turn: none');
-  assert.equal(result.messages[12]?.text ?? '', 'Turn state: idle');
+  assert.equal(result.messages[12]?.text ?? '', 'Active turn: none');
+  assert.equal(result.messages[13]?.text ?? '', 'Turn state: idle');
 });
 
 test('/helps lists all supported slash commands and help entrypoints', async () => {
@@ -568,9 +584,9 @@ test('/status shows running active-turn details and control hint', async () => {
     text: '/status',
   });
 
-  assert.match(status.messages[11]?.text ?? '', /Active turn: .*turn-1/);
-  assert.equal(status.messages[12]?.text ?? '', 'Turn state: running');
-  assert.equal(status.messages[13]?.text ?? '', 'Turn control: /stop (/interrupt)');
+  assert.match(status.messages[12]?.text ?? '', /Active turn: .*turn-1/);
+  assert.equal(status.messages[13]?.text ?? '', 'Turn state: running');
+  assert.equal(status.messages[14]?.text ?? '', 'Turn control: /stop (/interrupt)');
 
   releaseTurn();
   await firstTurn;
@@ -729,9 +745,9 @@ test('command-specific blocked messages switch to wait-for-stop wording after in
     text: '/status',
   });
 
-  assert.match(status.messages[11]?.text ?? '', /Active turn: .*turn-1/);
-  assert.equal(status.messages[12]?.text ?? '', 'Turn state: interrupt requested');
-  assert.equal(status.messages[13]?.text ?? '', 'Turn control: /stop (/interrupt)');
+  assert.match(status.messages[12]?.text ?? '', /Active turn: .*turn-1/);
+  assert.equal(status.messages[13]?.text ?? '', 'Turn state: interrupt requested');
+  assert.equal(status.messages[14]?.text ?? '', 'Turn control: /stop (/interrupt)');
 
   releaseTurn();
   await firstTurn;
@@ -903,6 +919,7 @@ test('/open binds the scope to an existing provider thread', async () => {
   });
 
   assert.match(status.messages[4]?.text ?? '', new RegExp(`Codex thread: ${original.session?.codexThreadId}`));
+  assert.match(status.messages[5]?.text ?? '', /Working directory:/);
 });
 
 test('/open accepts the current-page index in addition to raw thread ids', async () => {
