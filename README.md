@@ -13,6 +13,7 @@ CodexBridge is a Codex-centered gateway for connecting multiple chat platforms t
 
 - [Core architecture](./docs/architecture/codexbridge-core-architecture.md)
 - [WeChat + Codex Phase 1 TODO](./docs/todo/wechat-openai-phase1.md)
+- [TypeScript migration TODO](./docs/todo/codexbridge-typescript-migration.md)
 - [WeChat slash command reference](./docs/usage/weixin-slash-commands.md)
 
 ## Repository Layout
@@ -150,4 +151,4 @@ Optional flags:
 - `--bot-type`
 - `--timeout-sec`
 
-The login command fetches a QR code, saves the QR image under `~/.codexbridge/weixin/login/`, prints the file path, and waits until the scan is confirmed. Credentials are then stored under `~/.codexbridge/weixin/accounts/`.
+The login command fetches a QR code, saves the QR image under `~/.codexbridge/weixin/login/`, prints the file path, and waits until the scan is confirmed. Credentials are then stored under `~/.codexbridge/weixin/accounts/`. Runtime scripts now execute `tsx src/cli.ts` and `tsx src/index.ts` directly.
