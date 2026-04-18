@@ -61,9 +61,12 @@ Run the WeChat bridge loop:
 npm run weixin:serve
 ```
 
+By default the bridge uses the directory where `weixin:serve` is launched as the shared working directory for new sessions. You can override it with `--cwd` or `CODEXBRIDGE_DEFAULT_CWD`, and you can still rebind a specific chat with `/new /absolute/path/to/project`.
+
 Optional flags:
 
 - `--base-url`
+- `--cwd`
 - `--state-dir`
 - `--bot-type`
 - `--timeout-sec`

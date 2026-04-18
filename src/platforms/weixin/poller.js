@@ -20,6 +20,7 @@ export class WeixinPoller {
         for (const event of result.events) {
           await this.onEvent(event);
         }
+        await this.plugin.commitSyncCursor?.(result.syncCursor);
       } catch (error) {
         await this.onError(error);
         await this.sleep(2000);

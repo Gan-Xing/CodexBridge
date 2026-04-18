@@ -20,6 +20,8 @@ export class CodexAppClient {
     webSocketFactory = (url) => new WebSocket(url),
     platform = process.platform,
     logger = createNoopLogger(),
+    turnPollSleep = sleep,
+    turnPollNow = () => Date.now(),
   }) {
     this.codexCliBin = codexCliBin;
     this.launchCommand = launchCommand;
@@ -31,6 +33,8 @@ export class CodexAppClient {
     this.webSocketFactory = webSocketFactory;
     this.platform = platform;
     this.logger = logger;
+    this.turnPollSleep = turnPollSleep;
+    this.turnPollNow = turnPollNow;
 
     this.child = null;
     this.socket = null;
@@ -146,6 +150,7 @@ export class CodexAppClient {
     sandboxMode = 'workspace-write',
     approvalPolicy = 'on-request',
     collaborationMode = 'default',
+    developerInstructions = '',
     timeoutMs = 15 * 60 * 1000,
   }) {
     const result = await this.request('turn/start', {
@@ -168,6 +173,7 @@ export class CodexAppClient {
         collaborationMode,
         model,
         effort,
+        developerInstructions,
       }),
     });
     const turn = result?.turn;
@@ -322,21 +328,23 @@ export class CodexAppClient {
   }
 
   async waitForTurnResult({ threadId, turnId, timeoutMs }) {
-    const deadline = Date.now() + timeoutMs;
+    const deadline = this.turnPollNow() + timeoutMs;
     let firstTerminalWithoutOutputAt = null;
-    while (Date.now() < deadline) {
+    let lastTerminalSnapshot = null;
+    let lastTerminalSnapshotAt = 0;
+    while (this.turnPollNow() < deadline) {
       let thread = null;
       try {
         thread = await this.readThread(threadId, true);
       } catch (error) {
         if (isThreadMaterializationPendingError(error)) {
-          await sleep(1000);
+          await this.turnPollSleep(1000);
           continue;
         }
         throw error;
       }
       const turn = thread?.turns?.find((entry) => entry.id === turnId) ?? null;
-      if (turn && isTurnTerminal(turn.status)) {
+      if (turn) {
         const outputText = extractTurnOutputText(turn);
         if (outputText) {
           return {
@@ -350,12 +358,38 @@ export class CodexAppClient {
         if (turn.error) {
           throw new Error(turn.error);
         }
-        if (turnContainsOnlyUserVisibleItems(turn)) {
-          firstTerminalWithoutOutputAt ??= Date.now();
-          if (Date.now() - firstTerminalWithoutOutputAt < 10_000) {
-            await sleep(1000);
-            continue;
-          }
+        const sessionState = inspectTurnCompletionFromSessionPath(thread?.path ?? null, turnId);
+        if (sessionState.lastAgentMessage) {
+          return {
+            turnId,
+            threadId,
+            title: thread?.title ?? null,
+            outputText: sessionState.lastAgentMessage,
+            status: turn.status,
+          };
+        }
+        if (sessionState.hasTaskComplete) {
+          return {
+            turnId,
+            threadId,
+            title: thread?.title ?? null,
+            outputText: '',
+            status: turn.status,
+          };
+        }
+      }
+      if (turn && isTurnTerminal(turn.status) && !thread?.path) {
+        firstTerminalWithoutOutputAt ??= this.turnPollNow();
+        const terminalSnapshot = summarizeTurn(turn);
+        if (terminalSnapshot !== lastTerminalSnapshot) {
+          lastTerminalSnapshot = terminalSnapshot;
+          lastTerminalSnapshotAt = this.turnPollNow();
+        }
+        const withinGraceWindow = this.turnPollNow() - firstTerminalWithoutOutputAt < 30_000;
+        const recentlyChanged = this.turnPollNow() - lastTerminalSnapshotAt < 5_000;
+        if (withinGraceWindow || recentlyChanged) {
+          await this.turnPollSleep(1000);
+          continue;
         }
         return {
           turnId,
@@ -365,19 +399,19 @@ export class CodexAppClient {
           status: turn.status,
         };
       }
-      await sleep(1000);
+      await this.turnPollSleep(1000);
     }
     throw new Error(`Timed out waiting for Codex turn ${turnId}`);
   }
 }
 
-function serializeCollaborationMode({ collaborationMode, model, effort }) {
+function serializeCollaborationMode({ collaborationMode, model, effort, developerInstructions = '' }) {
   if (!collaborationMode) {
     return null;
   }
   const settings = {
     model,
-    developer_instructions: '',
+    developer_instructions: developerInstructions,
   };
   if (effort) {
     settings.reasoning_effort = effort;
@@ -418,6 +452,7 @@ function mapThread(raw, includeTurns) {
     threadId: String(raw.id),
     title: raw.name ? String(raw.name) : null,
     cwd: raw.cwd ? String(raw.cwd) : null,
+    path: raw.path ? String(raw.path) : null,
     updatedAt: Number(raw.updatedAt || 0),
     turns: includeTurns && Array.isArray(raw.turns) ? raw.turns.map(mapTurn) : [],
   };
@@ -515,12 +550,60 @@ function extractTurnOutputText(turn) {
     .trim();
 }
 
-function turnContainsOnlyUserVisibleItems(turn) {
-  const visibleItems = turn.items.filter((item) => item.text);
-  return visibleItems.length > 0 && visibleItems.every((item) => {
-    const type = String(item.type ?? '').toLowerCase();
-    const phase = String(item.phase ?? '').toLowerCase();
-    return type.includes('user') && !phase.startsWith('final');
+function inspectTurnCompletionFromSessionPath(sessionPath, turnId) {
+  if (!sessionPath || !turnId || !fs.existsSync(sessionPath)) {
+    return {
+      hasTaskComplete: false,
+      lastAgentMessage: null,
+    };
+  }
+  try {
+    const lines = fs.readFileSync(sessionPath, 'utf8').split('\n');
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      const line = lines[index]?.trim();
+      if (!line) {
+        continue;
+      }
+      let entry = null;
+      try {
+        entry = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const payload = entry?.payload ?? null;
+      if (entry?.type !== 'event_msg' || payload?.type !== 'task_complete') {
+        continue;
+      }
+      if (String(payload.turn_id ?? '') !== turnId) {
+        continue;
+      }
+      const lastAgentMessage = extractTextCandidate(payload.last_agent_message)?.trim() || null;
+      return {
+        hasTaskComplete: true,
+        lastAgentMessage,
+      };
+    }
+  } catch {
+    return {
+      hasTaskComplete: false,
+      lastAgentMessage: null,
+    };
+  }
+  return {
+    hasTaskComplete: false,
+    lastAgentMessage: null,
+  };
+}
+
+function summarizeTurn(turn) {
+  return JSON.stringify({
+    status: turn.status ?? null,
+    error: turn.error ?? null,
+    items: turn.items.map((item) => ({
+      type: item.type ?? null,
+      phase: item.phase ?? null,
+      text: item.text ?? null,
+    })),
   });
 }
 

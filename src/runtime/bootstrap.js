@@ -12,6 +12,7 @@ export function createCodexBridgeRuntime({
   providerPlugins = [],
   providerProfiles = [],
   defaultProviderProfileId = null,
+  defaultCwd = null,
   repositories = {},
 } = {}) {
   const registry = new PluginRegistry();
@@ -52,12 +53,14 @@ export function createCodexBridgeRuntime({
     providerProfiles: providerProfilesRepository,
     providerRegistry: registry,
     defaultProviderProfileId: resolvedDefaultProviderProfileId,
+    defaultCwd,
   });
 
   return {
     registry,
     config: {
       defaultProviderProfileId: resolvedDefaultProviderProfileId,
+      defaultCwd,
     },
     repositories: {
       providerProfiles: providerProfilesRepository,

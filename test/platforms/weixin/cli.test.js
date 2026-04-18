@@ -3,7 +3,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { materializeQrArtifact, parseWeixinLoginArgs, parseWeixinServeArgs } from '../../../src/cli.js';
+import {
+  acquireServeLock,
+  materializeQrArtifact,
+  parseWeixinLoginArgs,
+  parseWeixinServeArgs,
+} from '../../../src/cli.js';
 
 test('parseWeixinLoginArgs reads supported CLI flags', () => {
   const parsed = parseWeixinLoginArgs([
@@ -37,7 +42,40 @@ test('materializeQrArtifact stores data-url qr images on disk', async () => {
 test('parseWeixinServeArgs reads state-dir flag', () => {
   const parsed = parseWeixinServeArgs([
     '--state-dir', '/tmp/codexbridge-state',
+    '--cwd', '/tmp/project',
   ]);
 
   assert.equal(parsed.stateDir, '/tmp/codexbridge-state');
+  assert.equal(parsed.cwd, '/tmp/project');
+});
+
+test('acquireServeLock prevents duplicate weixin serve processes for the same state dir', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-weixin-lock-'));
+  const lockPath = path.join(tmpDir, 'runtime', 'weixin-serve.lock');
+  const first = await acquireServeLock(lockPath);
+
+  await assert.rejects(
+    () => acquireServeLock(lockPath),
+    /already running/i,
+  );
+
+  await first.release();
+});
+
+test('acquireServeLock recovers a stale lock file', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-weixin-lock-'));
+  const lockPath = path.join(tmpDir, 'runtime', 'weixin-serve.lock');
+  fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+  fs.writeFileSync(lockPath, JSON.stringify({
+    pid: 999999,
+    startedAt: new Date().toISOString(),
+    cwd: '/tmp/stale',
+  }));
+
+  const lock = await acquireServeLock(lockPath);
+  const payload = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+
+  assert.equal(payload.pid, process.pid);
+
+  await lock.release();
 });

@@ -64,7 +64,7 @@ function makeProviderProfile(id, providerKind, displayName) {
   };
 }
 
-function makeRuntime() {
+function makeRuntime({ defaultCwd = null } = {}) {
   const openai = new FakeProviderPlugin('openai-native', { replyPrefix: 'openai' });
   const minimax = new FakeProviderPlugin('minimax-via-cliproxy', { replyPrefix: 'minimax' });
   const runtime = createCodexBridgeRuntime({
@@ -74,6 +74,7 @@ function makeRuntime() {
       makeProviderProfile('minimax-default', 'minimax-via-cliproxy', 'MiniMax Default'),
     ],
     defaultProviderProfileId: 'openai-default',
+    defaultCwd,
   });
   return { runtime, openai, minimax };
 }
@@ -92,6 +93,20 @@ test('bridge coordinator creates a default-provider session for normal text and 
   assert.equal(result.session?.providerProfileId, 'openai-default');
   assert.equal(openai.startThreadCalls.length, 1);
   assert.equal(openai.startTurnCalls.length, 1);
+});
+
+test('bridge coordinator uses the runtime default cwd for new sessions', async () => {
+  const { runtime, openai } = makeRuntime({ defaultCwd: '/tmp/project' });
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-1',
+    text: 'hello codexbridge',
+  });
+
+  assert.equal(result.session?.providerProfileId, 'openai-default');
+  assert.equal(openai.startThreadCalls[0]?.cwd, '/tmp/project');
+  assert.equal(openai.startTurnCalls[0]?.bridgeSession.cwd, '/tmp/project');
 });
 
 test('bridge coordinator recreates a scope session when the bound thread is stale', async () => {
@@ -116,7 +131,7 @@ test('bridge coordinator recreates a scope session when the bound thread is stal
 });
 
 test('/status reports when no bridge session is bound yet', async () => {
-  const { runtime } = makeRuntime();
+  const { runtime } = makeRuntime({ defaultCwd: '/tmp/project' });
 
   const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
     platform: 'weixin',
@@ -126,6 +141,7 @@ test('/status reports when no bridge session is bound yet', async () => {
 
   assert.match(result.messages[0]?.text ?? '', /No bridge session is bound/);
   assert.match(result.messages[1]?.text ?? '', /Default provider profile: openai-default/);
+  assert.match(result.messages[2]?.text ?? '', /Default working directory: \/tmp\/project/);
 });
 
 test('/new creates a fresh session on the current provider profile', async () => {
@@ -233,4 +249,5 @@ test('/open binds the scope to an existing provider thread', async () => {
   });
 
   assert.match(status.messages[4]?.text ?? '', new RegExp(`Codex thread: ${original.session?.codexThreadId}`));
+  assert.match(status.messages[5]?.text ?? '', /Working directory:/);
 });

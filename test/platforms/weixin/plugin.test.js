@@ -186,7 +186,7 @@ test('WeixinPlatformPlugin builds typing payloads when a typing ticket is known'
   });
 });
 
-test('WeixinPlatformPlugin pollOnce normalizes incoming messages and persists sync cursor', async () => {
+test('WeixinPlatformPlugin pollOnce normalizes incoming messages and defers sync cursor persistence', async () => {
   const rootDir = makeTempAccountsDir();
   const accountStore = new WeixinAccountStore({ rootDir });
   const plugin = new WeixinPlatformPlugin({
@@ -230,8 +230,54 @@ test('WeixinPlatformPlugin pollOnce normalizes incoming messages and persists sy
   assert.equal(result.events.length, 1);
   assert.equal(result.events[0]?.text, 'hello');
   assert.equal(plugin.typingTickets.get('wxid_sender'), 'typing-1');
+  assert.equal(accountStore.loadSyncCursor('bot-account'), '');
+  await plugin.commitSyncCursor(result.syncCursor);
   assert.equal(accountStore.loadSyncCursor('bot-account'), 'cursor-2');
   assert.equal(accountStore.getContextToken('bot-account', 'wxid_sender'), 'ctx-2');
+});
+
+test('WeixinPlatformPlugin pollOnce keeps events when typing ticket refresh fails', async () => {
+  const rootDir = makeTempAccountsDir();
+  const accountStore = new WeixinAccountStore({ rootDir });
+  const plugin = new WeixinPlatformPlugin({
+    accountStore,
+    config: {
+      enabled: true,
+      accountId: 'bot-account',
+      token: 'token',
+      baseUrl: 'https://ilinkai.weixin.qq.com',
+      cdnBaseUrl: 'https://novac2c.cdn.weixin.qq.com/c2c',
+      dmPolicy: 'open',
+      groupPolicy: 'disabled',
+      allowFrom: [],
+      groupAllowFrom: [],
+      stateDir: path.dirname(path.dirname(rootDir)),
+      accountsDir: rootDir,
+      maxMessageLength: 4000,
+    },
+  });
+  plugin.client = {
+    async getUpdates() {
+      return {
+        get_updates_buf: 'cursor-2',
+        msgs: [{
+          from_user_id: 'wxid_sender',
+          to_user_id: 'bot-account',
+          msg_type: 0,
+          item_list: [{ type: 1, text_item: { text: 'hello' } }],
+        }],
+      };
+    },
+    async getConfig() {
+      throw new Error('typing unavailable');
+    },
+  };
+
+  const result = await plugin.pollOnce();
+
+  assert.equal(result.events.length, 1);
+  assert.equal(result.events[0]?.text, 'hello');
+  assert.equal(plugin.typingTickets.size, 0);
 });
 
 test('WeixinPlatformPlugin sendText and sendTyping call the underlying iLink client', async () => {

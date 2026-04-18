@@ -7,11 +7,13 @@ export class BridgeCoordinator {
     providerProfiles,
     providerRegistry,
     defaultProviderProfileId,
+    defaultCwd = null,
   }) {
     this.bridgeSessions = bridgeSessions;
     this.providerProfiles = providerProfiles;
     this.providerRegistry = providerRegistry;
     this.defaultProviderProfileId = defaultProviderProfileId;
+    this.defaultCwd = normalizeCwd(defaultCwd);
   }
 
   async handleInboundEvent(event) {
@@ -26,7 +28,7 @@ export class BridgeCoordinator {
     const scopeRef = toScopeRef(event);
     const session = await this.bridgeSessions.resolveOrCreateScopeSession(scopeRef, {
       providerProfileId: this.resolveDefaultProviderProfileId(),
-      cwd: event.cwd ?? null,
+      cwd: this.resolveEventCwd(event),
       providerStartOptions: {
         sourcePlatform: event.platform,
       },
@@ -60,6 +62,7 @@ export class BridgeCoordinator {
       return messageResponse([
         `No bridge session is bound to ${event.platform}:${event.externalScopeId}.`,
         `Default provider profile: ${this.resolveDefaultProviderProfileId()}`,
+        `Default working directory: ${this.defaultCwd ?? '(none)'}`,
       ]);
     }
     const providerProfile = this.requireProviderProfile(session.providerProfileId);
@@ -70,6 +73,7 @@ export class BridgeCoordinator {
       `Provider profile: ${providerProfile.id}`,
       `Provider kind: ${providerProfile.providerKind}`,
       `Codex thread: ${session.codexThreadId}`,
+      `Working directory: ${session.cwd ?? this.defaultCwd ?? '(none)'}`,
       `Model: ${settings?.model ?? '(default)'}`,
       `Reasoning effort: ${settings?.reasoningEffort ?? '(default)'}`,
       `Service tier: ${settings?.serviceTier ?? '(default)'}`,
@@ -82,7 +86,7 @@ export class BridgeCoordinator {
     const providerProfileId = existing?.providerProfileId ?? this.resolveDefaultProviderProfileId();
     const nextSession = await this.bridgeSessions.createSessionForScope(scopeRef, {
       providerProfileId,
-      cwd: args.join(' ').trim() || existing?.cwd || event.cwd || null,
+      cwd: args.join(' ').trim() || existing?.cwd || this.resolveEventCwd(event),
       providerStartOptions: {
         sourcePlatform: event.platform,
         trigger: 'new-command',
@@ -197,6 +201,10 @@ export class BridgeCoordinator {
     ) ?? null;
   }
 
+  resolveEventCwd(event) {
+    return normalizeCwd(event.cwd) ?? this.defaultCwd ?? null;
+  }
+
   async startTurnWithRecovery(scopeRef, session, event) {
     try {
       return await this.startTurnOnSession(session, event);
@@ -223,7 +231,7 @@ export class BridgeCoordinator {
     const nextSession = this.bridgeSessions.updateSession(session.id, {
       codexThreadId: result.threadId ?? session.codexThreadId,
       title: result.title ?? session.title,
-      cwd: session.cwd ?? event.cwd ?? null,
+      cwd: normalizeCwd(session.cwd) ?? this.resolveEventCwd(event),
     });
     return { result, session: nextSession };
   }
@@ -232,7 +240,7 @@ export class BridgeCoordinator {
     const sessionSettings = this.bridgeSessions.getSessionSettings(session.id);
     return this.bridgeSessions.createSessionForScope(scopeRef, {
       providerProfileId: session.providerProfileId,
-      cwd: session.cwd ?? event.cwd ?? null,
+      cwd: normalizeCwd(session.cwd) ?? this.resolveEventCwd(event),
       title: session.title ?? null,
       initialSettings: {
         model: sessionSettings?.model ?? null,
@@ -275,4 +283,9 @@ function messageResponse(lines, session = undefined) {
 function isStaleThreadError(error) {
   const message = error instanceof Error ? error.message : String(error);
   return /thread not found/i.test(message);
+}
+
+function normalizeCwd(value) {
+  const normalized = typeof value === 'string' ? value.trim() : '';
+  return normalized || null;
 }

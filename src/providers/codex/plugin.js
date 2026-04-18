@@ -1,5 +1,11 @@
 import { CodexAppClient, createNoopLogger } from './app_client.js';
 
+const BRIDGE_DEVELOPER_INSTRUCTIONS = [
+  'You are replying through CodexBridge into an external chat.',
+  'Always include a short plain-text final answer for the user.',
+  'When the user asks about files, repository state, command output, counts, or other mutable local state, inspect the current workspace and do not rely on prior thread memory.',
+].join(' ');
+
 export class CodexProviderPlugin {
   constructor({
     clientFactory = (profile) => new CodexAppClient({
@@ -49,6 +55,7 @@ export class CodexProviderPlugin {
       effort,
       serviceTier: sessionSettings?.serviceTier ?? null,
       collaborationMode: 'default',
+      developerInstructions: BRIDGE_DEVELOPER_INSTRUCTIONS,
     });
     return {
       outputText: result.outputText,

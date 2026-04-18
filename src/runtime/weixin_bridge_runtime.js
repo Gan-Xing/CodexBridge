@@ -1,5 +1,8 @@
 import { WeixinPoller } from '../platforms/weixin/poller.js';
 
+const EMPTY_TURN_FALLBACK =
+  'The turn finished without a plain-text reply. It may have stalled on approvals, tool output, or a hidden error. Please retry or ask for a direct text answer.';
+
 export class WeixinBridgeRuntime {
   constructor({
     platformPlugin,
@@ -37,6 +40,7 @@ export class WeixinBridgeRuntime {
     for (const event of result.events) {
       await this.handleInboundEvent(event);
     }
+    await this.platformPlugin.commitSyncCursor?.(result.syncCursor);
     return result;
   }
 
@@ -49,13 +53,11 @@ export class WeixinBridgeRuntime {
       .map((message) => message.text)
       .filter(Boolean)
       .join('\n\n')
-      .trim();
-    if (content) {
-      await this.platformPlugin.sendText({
-        externalScopeId: event.externalScopeId,
-        content,
-      });
-    }
+      .trim() || EMPTY_TURN_FALLBACK;
+    await this.platformPlugin.sendText({
+      externalScopeId: event.externalScopeId,
+      content,
+    });
     return response;
   }
 }

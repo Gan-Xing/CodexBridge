@@ -29,6 +29,10 @@ export class BridgeSessionService {
   async resolveOrCreateScopeSession(scopeRef, options) {
     const existing = this.resolveScopeSession(scopeRef);
     if (existing) {
+      const resolvedCwd = normalizeCwd(options?.cwd);
+      if (!existing.cwd && resolvedCwd) {
+        return this.updateSession(existing.id, { cwd: resolvedCwd });
+      }
       return existing;
     }
     return this.createSessionForScope(scopeRef, options);
@@ -237,4 +241,9 @@ export class BridgeSessionService {
     this.sessionSettings.save(next);
     return next;
   }
+}
+
+function normalizeCwd(value) {
+  const normalized = typeof value === 'string' ? value.trim() : '';
+  return normalized || null;
 }
