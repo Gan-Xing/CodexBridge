@@ -183,7 +183,7 @@ export class BridgeCoordinator {
       `Sandbox mode: ${resolveSandboxMode(settings)}`,
       `Active turn: ${formatActiveTurnValue(activeTurn)}`,
       `Turn state: ${formatActiveTurnState(activeTurn)}`,
-      ...(activeTurn ? [`Turn control: /stop (/interrupt)`] : []),
+      ...(activeTurn ? ['Turn control: /stop'] : []),
     ], buildSessionMeta(session));
   }
 
@@ -571,7 +571,7 @@ export class BridgeCoordinator {
       '当前已有一轮回复在进行中。',
       activeTurn.interruptRequested
         ? '已请求中断，请等待当前回复停止。'
-        : '请先等待，或使用 /stop（兼容 /interrupt）中断。',
+        : '请先等待，或使用 /stop 中断。',
     ], buildActiveTurnMeta(activeTurn) ?? this.buildScopedSessionMeta(event));
   }
 
@@ -840,7 +840,7 @@ function renderCommandBlockedMessage(commandName, interruptRequested) {
   if (interruptRequested) {
     return `已请求中断，请等待当前回复停止后再${action}。`;
   }
-  return `当前有回复在进行中，暂时不能${action}。请先等待，或使用 /stop（兼容 /interrupt）中断。`;
+  return `当前有回复在进行中，暂时不能${action}。请先等待，或使用 /stop 中断。`;
 }
 
 function normalizeCwd(value) {
@@ -1079,7 +1079,8 @@ function isHelpFlag(value) {
 }
 
 function normalizeCommandName(value) {
-  return String(value ?? '').trim().toLowerCase();
+  const normalized = String(value ?? '').trim().toLowerCase();
+  return COMMAND_CANONICAL_NAME_MAP.get(normalized) ?? normalized;
 }
 
 function normalizeHelpTarget(value) {
@@ -1147,7 +1148,7 @@ function renderCommandHelp(spec) {
 const COMMAND_HELP_SPECS = Object.freeze({
   helps: freezeCommandHelp({
     name: 'helps',
-    aliases: ['help'],
+    aliases: ['help', 'h'],
     summary: '查看所有斜杠命令，或查看某个命令的帮助',
     usage: [
       '/helps',
@@ -1165,7 +1166,7 @@ const COMMAND_HELP_SPECS = Object.freeze({
   }),
   status: freezeCommandHelp({
     name: 'status',
-    aliases: ['where'],
+    aliases: ['where', 'st'],
     summary: '查看当前 scope 绑定、provider、权限设置，以及 active turn 状态',
     usage: [
       '/status',
@@ -1180,16 +1181,16 @@ const COMMAND_HELP_SPECS = Object.freeze({
   }),
   stop: freezeCommandHelp({
     name: 'stop',
-    aliases: ['interrupt'],
+    aliases: ['sp'],
     summary: '请求中断当前正在执行的回复',
     usage: [
       '/stop',
-      '/interrupt',
+      '/sp',
       '/stop -h',
     ],
     examples: [
       '/stop',
-      '/interrupt',
+      '/sp',
     ],
     notes: [
       '如果当前没有进行中的回复，会直接提示无可中断目标。',
@@ -1197,7 +1198,7 @@ const COMMAND_HELP_SPECS = Object.freeze({
   }),
   new: freezeCommandHelp({
     name: 'new',
-    aliases: [],
+    aliases: ['n'],
     summary: '创建一个新的 bridge session，可选指定 cwd',
     usage: [
       '/new',
@@ -1231,7 +1232,7 @@ const COMMAND_HELP_SPECS = Object.freeze({
   }),
   threads: freezeCommandHelp({
     name: 'threads',
-    aliases: [],
+    aliases: ['th'],
     summary: '查看当前 provider 的线程列表首页',
     usage: [
       '/threads',
@@ -1298,7 +1299,7 @@ const COMMAND_HELP_SPECS = Object.freeze({
   }),
   open: freezeCommandHelp({
     name: 'open',
-    aliases: [],
+    aliases: ['o'],
     summary: '把当前 scope 绑定到指定线程，可用序号或 thread id',
     usage: [
       '/open <序号|codex_thread_id>',
@@ -1314,7 +1315,7 @@ const COMMAND_HELP_SPECS = Object.freeze({
   }),
   peek: freezeCommandHelp({
     name: 'peek',
-    aliases: [],
+    aliases: ['pk'],
     summary: '查看某个线程最近几轮的对话摘要',
     usage: [
       '/peek <序号|codex_thread_id>',
@@ -1330,7 +1331,7 @@ const COMMAND_HELP_SPECS = Object.freeze({
   }),
   rename: freezeCommandHelp({
     name: 'rename',
-    aliases: [],
+    aliases: ['rn'],
     summary: '给线程设置本地显示名，不改 provider 原始 thread id',
     usage: [
       '/rename <序号|codex_thread_id> <新名字>',
@@ -1346,7 +1347,7 @@ const COMMAND_HELP_SPECS = Object.freeze({
   }),
   permissions: freezeCommandHelp({
     name: 'permissions',
-    aliases: [],
+    aliases: ['perm'],
     summary: '查看或切换下一轮的权限预设',
     usage: [
       '/permissions',
@@ -1363,7 +1364,7 @@ const COMMAND_HELP_SPECS = Object.freeze({
   }),
   reconnect: freezeCommandHelp({
     name: 'reconnect',
-    aliases: [],
+    aliases: ['rc'],
     summary: '刷新当前 provider 的 Codex 会话',
     usage: [
       '/reconnect',
@@ -1378,7 +1379,7 @@ const COMMAND_HELP_SPECS = Object.freeze({
   }),
   restart: freezeCommandHelp({
     name: 'restart',
-    aliases: [],
+    aliases: ['rs'],
     summary: '重启桥接服务',
     usage: [
       '/restart',
@@ -1411,15 +1412,23 @@ const COMMAND_HELP_ORDER = Object.freeze([
   'restart',
 ]);
 
-const COMMAND_HELP_ALIAS_MAP = buildCommandHelpAliasMap(COMMAND_HELP_SPECS);
+const HIDDEN_COMMAND_ALIASES = Object.freeze({
+  interrupt: 'stop',
+});
 
-function buildCommandHelpAliasMap(specs) {
+const COMMAND_CANONICAL_NAME_MAP = buildCommandCanonicalNameMap(COMMAND_HELP_SPECS, HIDDEN_COMMAND_ALIASES);
+const COMMAND_HELP_ALIAS_MAP = COMMAND_CANONICAL_NAME_MAP;
+
+function buildCommandCanonicalNameMap(specs, hiddenAliases = {}) {
   const map = new Map();
   for (const spec of Object.values(specs)) {
     map.set(spec.name, spec.name);
     for (const alias of spec.aliases) {
       map.set(alias, spec.name);
     }
+  }
+  for (const [alias, canonical] of Object.entries(hiddenAliases)) {
+    map.set(alias, canonical);
   }
   return map;
 }

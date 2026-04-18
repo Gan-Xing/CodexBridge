@@ -88,7 +88,8 @@ Acceptance:
 - [x] Implement `/permissions`
 - [x] Implement `/reconnect`
 - [x] Implement `/restart`
-- [x] Implement `/stop` (`/interrupt` compatibility alias)
+- [x] Implement `/stop`
+- [x] Add WeChat-friendly short aliases for high-frequency slash commands
 
 Acceptance:
 

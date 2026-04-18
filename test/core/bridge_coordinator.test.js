@@ -359,9 +359,10 @@ test('/helps lists all supported slash commands and help entrypoints', async () 
 
   const text = result.messages[0]?.text ?? '';
   assert.match(text, /Slash 命令/);
-  assert.match(text, /\/stop \(\/interrupt\) 请求中断当前正在执行的回复/);
-  assert.match(text, /\/threads 查看当前 provider 的线程列表首页/);
-  assert.match(text, /\/rename 给线程设置本地显示名/);
+  assert.match(text, /\/helps \(\/help, \/h\) 查看所有斜杠命令/);
+  assert.match(text, /\/stop \(\/sp\) 请求中断当前正在执行的回复/);
+  assert.match(text, /\/threads \(\/th\) 查看当前 provider 的线程列表首页/);
+  assert.match(text, /\/rename \(\/rn\) 给线程设置本地显示名/);
   assert.match(text, /帮助：\/helps <命令>/);
   assert.match(text, /示例：\/helps threads  或  \/threads -h/);
 });
@@ -397,6 +398,25 @@ test('slash commands support first-argument help flags like -h', async () => {
   assert.match(text, /命令：\/threads/);
   assert.match(text, /\/threads -h/);
   assert.match(text, /\/peek 2/);
+});
+
+test('slash command short aliases resolve to the same help and action targets', async () => {
+  const { runtime } = makeRuntime();
+
+  const helpResult = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-1',
+    text: '/h th',
+  });
+  assert.match(helpResult.messages[0]?.text ?? '', /命令：\/threads/);
+  assert.match(helpResult.messages[0]?.text ?? '', /别名：\/th/);
+
+  const commandResult = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-1',
+    text: '/perm',
+  });
+  assert.match(commandResult.messages[0]?.text ?? '', /当前还没有绑定会话/);
 });
 
 test('slash commands support -help, -helps, and --help variants', async () => {
@@ -494,7 +514,7 @@ test('/stop interrupts the active turn once the provider has issued a turn id', 
   assert.equal(firstResult.meta?.codexTurn?.outputState, 'interrupted');
 });
 
-test('/interrupt remains a compatibility alias and can queue an interrupt before turn startup completes', async () => {
+test('/interrupt remains a hidden compatibility alias and can queue an interrupt before turn startup completes', async () => {
   const { runtime, openai } = makeRuntime();
   const scopeRef = {
     platform: 'weixin',
@@ -586,7 +606,7 @@ test('/status shows running active-turn details and control hint', async () => {
 
   assert.match(status.messages[12]?.text ?? '', /Active turn: .*turn-1/);
   assert.equal(status.messages[13]?.text ?? '', 'Turn state: running');
-  assert.equal(status.messages[14]?.text ?? '', 'Turn control: /stop (/interrupt)');
+  assert.equal(status.messages[14]?.text ?? '', 'Turn control: /stop');
 
   releaseTurn();
   await firstTurn;
@@ -630,7 +650,7 @@ test('bridge coordinator blocks new conversation turns while another turn is alr
   });
 
   assert.equal(blocked.messages[0]?.text ?? '', '当前已有一轮回复在进行中。');
-  assert.equal(blocked.messages[1]?.text ?? '', '请先等待，或使用 /stop（兼容 /interrupt）中断。');
+  assert.equal(blocked.messages[1]?.text ?? '', '请先等待，或使用 /stop 中断。');
 
   releaseTurn();
   await firstTurn;
@@ -669,13 +689,13 @@ test('bridge coordinator shows command-specific blocked messages while a turn is
   await waitForCondition(() => runtime.services.activeTurns.resolveScopeTurn(scopeRef));
 
   const checks = [
-    ['/new', '当前有回复在进行中，暂时不能新建会话。请先等待，或使用 /stop（兼容 /interrupt）中断。'],
-    ['/open thread-1', '当前有回复在进行中，暂时不能切换线程。请先等待，或使用 /stop（兼容 /interrupt）中断。'],
-    ['/rename thread-1 新名字', '当前有回复在进行中，暂时不能重命名线程。请先等待，或使用 /stop（兼容 /interrupt）中断。'],
-    ['/provider minimax-default', '当前有回复在进行中，暂时不能切换 provider。请先等待，或使用 /stop（兼容 /interrupt）中断。'],
-    ['/permissions full-access', '当前有回复在进行中，暂时不能切换权限预设。请先等待，或使用 /stop（兼容 /interrupt）中断。'],
-    ['/reconnect', '当前有回复在进行中，暂时不能刷新当前 Codex 会话。请先等待，或使用 /stop（兼容 /interrupt）中断。'],
-    ['/restart', '当前有回复在进行中，暂时不能重启桥接。请先等待，或使用 /stop（兼容 /interrupt）中断。'],
+    ['/new', '当前有回复在进行中，暂时不能新建会话。请先等待，或使用 /stop 中断。'],
+    ['/open thread-1', '当前有回复在进行中，暂时不能切换线程。请先等待，或使用 /stop 中断。'],
+    ['/rename thread-1 新名字', '当前有回复在进行中，暂时不能重命名线程。请先等待，或使用 /stop 中断。'],
+    ['/provider minimax-default', '当前有回复在进行中，暂时不能切换 provider。请先等待，或使用 /stop 中断。'],
+    ['/permissions full-access', '当前有回复在进行中，暂时不能切换权限预设。请先等待，或使用 /stop 中断。'],
+    ['/reconnect', '当前有回复在进行中，暂时不能刷新当前 Codex 会话。请先等待，或使用 /stop 中断。'],
+    ['/restart', '当前有回复在进行中，暂时不能重启桥接。请先等待，或使用 /stop 中断。'],
   ];
 
   for (const [text, expected] of checks) {
@@ -747,7 +767,7 @@ test('command-specific blocked messages switch to wait-for-stop wording after in
 
   assert.match(status.messages[12]?.text ?? '', /Active turn: .*turn-1/);
   assert.equal(status.messages[13]?.text ?? '', 'Turn state: interrupt requested');
-  assert.equal(status.messages[14]?.text ?? '', 'Turn control: /stop (/interrupt)');
+  assert.equal(status.messages[14]?.text ?? '', 'Turn control: /stop');
 
   releaseTurn();
   await firstTurn;
