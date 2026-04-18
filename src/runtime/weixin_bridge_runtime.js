@@ -47,6 +47,7 @@ export class WeixinBridgeRuntime {
     for (const event of result.events) {
       await this.handleInboundEvent(event);
     }
+    await this.platformPlugin.commitSyncCursor?.(result.syncCursor);
     return result;
   }
 
