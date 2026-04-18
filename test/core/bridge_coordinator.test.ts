@@ -6,23 +6,101 @@ class FakeProviderPlugin {
   kind: string;
   displayName: string;
   replyPrefix: string;
+  models: any[];
   startThreadCalls: any[];
   resumeThreadCalls: any[];
   startTurnCalls: any[];
   interruptTurnCalls: any[];
+  listModelsCalls: any[];
   threadCounter: number;
   baseTime: number;
   clock: number;
   threads: Map<any, any>;
 
-  constructor(kind, { replyPrefix }) {
+  constructor(kind: string, options: { replyPrefix?: string; models?: any[] } = {}) {
+    const { replyPrefix = '', models = null } = options;
     this.kind = kind;
     this.displayName = kind;
     this.replyPrefix = replyPrefix;
+    this.models = models ?? [
+      {
+        id: 'gpt-5.4',
+        model: 'gpt-5.4',
+        displayName: 'GPT-5.4',
+        description: 'Latest frontier agentic coding model.',
+        isDefault: true,
+        supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
+        defaultReasoningEffort: 'medium',
+      },
+      {
+        id: 'gpt-5.2-codex',
+        model: 'gpt-5.2-codex',
+        displayName: 'GPT-5.2-Codex',
+        description: 'Frontier codex model.',
+        isDefault: false,
+        supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
+        defaultReasoningEffort: 'medium',
+      },
+      {
+        id: 'gpt-5.1-codex-max',
+        model: 'gpt-5.1-codex-max',
+        displayName: 'GPT-5.1-Codex-Max',
+        description: 'Codex-optimized flagship for deep and fast reasoning.',
+        isDefault: false,
+        supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
+        defaultReasoningEffort: 'high',
+      },
+      {
+        id: 'gpt-5.4-mini',
+        model: 'gpt-5.4-mini',
+        displayName: 'GPT-5.4-Mini',
+        description: 'Smaller frontier coding model.',
+        isDefault: false,
+        supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
+        defaultReasoningEffort: 'medium',
+      },
+      {
+        id: 'gpt-5.3-codex',
+        model: 'gpt-5.3-codex',
+        displayName: 'GPT-5.3-Codex',
+        description: 'Frontier Codex-optimized codex model.',
+        isDefault: false,
+        supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
+        defaultReasoningEffort: 'medium',
+      },
+      {
+        id: 'gpt-5.3-codex-spark',
+        model: 'gpt-5.3-codex-spark',
+        displayName: 'GPT-5.3-Codex-Spark',
+        description: 'Ultra-fast coding model.',
+        isDefault: false,
+        supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
+        defaultReasoningEffort: 'medium',
+      },
+      {
+        id: 'gpt-5.2',
+        model: 'gpt-5.2',
+        displayName: 'GPT-5.2',
+        description: 'Optimized for professional work and long-running agents.',
+        isDefault: false,
+        supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
+        defaultReasoningEffort: 'medium',
+      },
+      {
+        id: 'gpt-5.1-codex-mini',
+        model: 'gpt-5.1-codex-mini',
+        displayName: 'GPT-5.1-Codex-Mini',
+        description: 'Cheaper, faster, but less capable.',
+        isDefault: false,
+        supportedReasoningEfforts: ['medium', 'high'],
+        defaultReasoningEffort: 'medium',
+      },
+    ];
     this.startThreadCalls = [];
     this.resumeThreadCalls = [];
     this.startTurnCalls = [];
     this.interruptTurnCalls = [];
+    this.listModelsCalls = [];
     this.threadCounter = 0;
     this.baseTime = Date.now();
     this.clock = 0;
@@ -142,6 +220,11 @@ class FakeProviderPlugin {
 
   async interruptTurn({ providerProfile, threadId, turnId }) {
     this.interruptTurnCalls.push({ providerProfile, threadId, turnId });
+  }
+
+  async listModels() {
+    this.listModelsCalls.push({});
+    return this.models;
   }
 
   async reconnectProfile() {
@@ -396,6 +479,8 @@ test('/helps lists all supported slash commands and help entrypoints', async () 
   assert.match(text, /\/helps \(\/help, \/h\) 查看所有斜杠命令/);
   assert.match(text, /\/stop \(\/sp\) 请求中断当前正在执行的回复/);
   assert.match(text, /\/provider \(\/pd\) 查看可用 provider/);
+  assert.match(text, /\/models \(\/ms\) 列出当前 provider 的可用模型/);
+  assert.match(text, /\/model \(\/m\) 查看或切换当前 scope 的模型设置/);
   assert.match(text, /\/threads \(\/th\) 查看当前 provider 的线程列表首页/);
   assert.match(text, /\/search \(\/se\) 按关键词搜索线程标题或 preview/);
   assert.match(text, /\/next \(\/nx\) 翻到当前线程列表的下一页/);
@@ -419,7 +504,169 @@ test('/helps renders English help text when locale is set to en', async () => {
   assert.match(text, /Slash Commands/);
   assert.match(text, /\/helps \(\/help, \/h\) Show all slash commands/);
   assert.match(text, /Help: \/helps <command>/);
+  assert.match(text, /\/models \(\/ms\) List available models for the current provider/);
+  assert.match(text, /\/model \(\/m\) View or switch model settings for the current scope/);
   assert.match(text, /\/lang Show or switch the current language used for text replies/);
+});
+
+test('/models lists available models for the current provider', async () => {
+  const { runtime } = makeRuntime();
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-models-1',
+    text: '/models',
+  });
+
+  assert.match(result.messages[0]?.text ?? '', /可用模型：openai-default/);
+  assert.match(result.messages[1]?.text ?? '', /当前模型：默认/);
+  assert.match(result.messages[2]?.text ?? '', /模型列表：/);
+  assert.match(result.messages[3]?.text ?? '', /- gpt-5.4/);
+  assert.match(result.messages[4]?.text ?? '', /- gpt-5.2-codex/);
+  assert.match(result.messages[3]?.text ?? '', /最新 frontier/);
+});
+
+test('/model shows current model and updates model setting for the next turn', async () => {
+  const { runtime, openai } = makeRuntime();
+
+  const empty = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-model-1',
+    text: '/model',
+  });
+  assert.match(empty.messages[0]?.text ?? '', /当前模型：默认/);
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-model-1',
+    text: 'start conversation',
+  });
+
+  const updated = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-model-1',
+    text: '/model gpt-5.2-codex',
+  });
+  assert.equal(updated.messages[0]?.text ?? '', '模型已更新为：gpt-5.2-codex');
+  assert.equal(updated.messages[1]?.text ?? '', '下一轮生效。');
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-model-1',
+    text: 'next turn',
+  });
+  assert.equal(openai.startTurnCalls.at(-1)?.sessionSettings?.model, 'gpt-5.2-codex');
+});
+
+test('/model sets reasoning effort for the current/default model', async () => {
+  const { runtime, openai } = makeRuntime();
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-effort-1',
+    text: 'start conversation',
+  });
+
+  const effortOnly = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-effort-1',
+    text: '/model high',
+  });
+  assert.equal(effortOnly.messages[0]?.text ?? '', '思考深度已更新为：high');
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-effort-1',
+    text: 'next turn',
+  });
+  assert.equal(openai.startTurnCalls.at(-1)?.sessionSettings?.reasoningEffort, 'high');
+});
+
+test('/model supports model and reasoning effort together, with validation', async () => {
+  const { runtime, openai } = makeRuntime();
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-model-effort-1',
+    text: 'hello first',
+  });
+
+  const updated = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-model-effort-1',
+    text: '/model gpt-5.4 xhigh',
+  });
+  assert.equal(updated.messages[0]?.text ?? '', '模型已更新为：gpt-5.4');
+  assert.equal(updated.messages[1]?.text ?? '', '思考深度已更新为：xhigh');
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-model-effort-1',
+    text: 'next turn',
+  });
+  const latestSessionSettings = openai.startTurnCalls.at(-1)?.sessionSettings ?? null;
+  assert.equal(latestSessionSettings?.model, 'gpt-5.4');
+  assert.equal(latestSessionSettings?.reasoningEffort, 'xhigh');
+
+  const invalid = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-model-effort-1',
+    text: '/model gpt-5.1-codex-mini xhigh',
+  });
+  assert.match(invalid.messages[0]?.text ?? '', /不支持该模型|不支持|不支持的思考深度/);
+});
+
+test('/model requires a space between model and reasoning effort', async () => {
+  const { runtime } = makeRuntime();
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-model-separator-1',
+    text: 'seed conversation',
+  });
+
+  const merged = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-model-separator-1',
+    text: '/model gpt-5.4xhigh',
+  });
+  assert.match(merged.messages[0]?.text ?? '', /模型和思考深度需要用空格分隔/);
+});
+
+test('/model supports reset and unknown-model handling', async () => {
+  const { runtime, openai } = makeRuntime();
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-model-2',
+    text: 'hello first',
+  });
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-model-2',
+    text: '/model gpt-5.2-codex',
+  });
+
+  const reset = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-model-2',
+    text: '/model default',
+  });
+  assert.equal(reset.messages[0]?.text ?? '', '模型已重置为默认');
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-model-2',
+    text: 'after reset',
+  });
+  assert.equal(openai.startTurnCalls.at(-1)?.sessionSettings?.model ?? null, null);
+
+  const unknown = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-model-2',
+    text: '/model unknown-model',
+  });
+  assert.match(unknown.messages[0]?.text ?? '', /未知模型：unknown-model/);
 });
 
 test('/lang displays current language when no locale argument is provided', async () => {
@@ -813,6 +1060,7 @@ test('bridge coordinator shows command-specific blocked messages while a turn is
     ['/open thread-1', '当前有回复在进行中，暂时不能切换线程。请先等待，或使用 /stop 中断。'],
     ['/rename thread-1 新名字', '当前有回复在进行中，暂时不能重命名线程。请先等待，或使用 /stop 中断。'],
     ['/provider minimax-default', '当前有回复在进行中，暂时不能切换 provider。请先等待，或使用 /stop 中断。'],
+    ['/model gpt-5.4', '当前有回复在进行中，暂时不能切换模型。请先等待，或使用 /stop 中断。'],
     ['/permissions full-access', '当前有回复在进行中，暂时不能切换权限预设。请先等待，或使用 /stop 中断。'],
     ['/reconnect', '当前有回复在进行中，暂时不能刷新当前 Codex 会话。请先等待，或使用 /stop 中断。'],
     ['/restart', '当前有回复在进行中，暂时不能重启桥接。请先等待，或使用 /stop 中断。'],

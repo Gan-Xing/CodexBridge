@@ -29,7 +29,7 @@ It borrows the most useful CLI help conventions while staying chat-friendly:
 - `/helps` shows the full command catalog
 - `/helps <command>` shows one command in detail
 - every slash command supports `-h`, `--help`, `-help`, and `-helps`
-- every slash command also supports a short alias such as `/h`, `/st`, `/sp`, `/n`, `/pd`, `/th`, `/se`, `/nx`, `/pv`, `/o`, `/pk`, `/rn`, `/perm`, `/rc`, and `/rs`
+- every slash command also supports a short alias such as `/h`, `/st`, `/sp`, `/n`, `/pd`, `/th`, `/se`, `/nx`, `/pv`, `/o`, `/pk`, `/rn`, `/m`, `/ms`, `/perm`, `/rc`, and `/rs`
 - `/lang` and `/lang <zh|en>` to switch reply language for this scope (higher priority than env).
 - thread browsing is index-first on WeChat, so `/open 2` is preferred over copying raw thread ids
 
@@ -57,6 +57,12 @@ It borrows the most useful CLI help conventions while staying chat-friendly:
 /pk 2
 /rename 2 微信桥接排障
 /rn 2 微信桥接排障
+/model
+/m
+/model gpt-5.4
+/model default
+/models
+/ms
 /lang zh
 /permissions
 /perm
@@ -125,6 +131,32 @@ Examples:
 /pd
 /provider openai-default
 /pd openai-default
+```
+
+### `/models` and `/ms`
+
+List available models for the current provider profile.
+
+Examples:
+
+```text
+/models
+/ms
+```
+
+### `/model` and `/m`
+
+View the current model setting or switch it for the current scope.
+
+Examples:
+
+```text
+/model
+/m
+/model default
+/model high
+/model gpt-5.4 xhigh
+/model gpt-5.4
 ```
 
 ### `/threads` and `/th`

@@ -8,10 +8,10 @@ import type {
   ProviderThreadSummary,
   ProviderTurnProgress,
   ProviderTurnResult,
+  ProviderModelInfo,
 } from '../../types/provider.js';
 
 type CodexClientLike = any;
-type CodexModelInfo = any;
 
 interface CodexProviderProfileConfig extends Record<string, unknown> {
   cliBin: string;
@@ -193,7 +193,7 @@ export class CodexProviderPlugin {
     providerProfile,
   }: {
     providerProfile: ProviderProfile;
-  }): Promise<any[]> {
+  }): Promise<ProviderModelInfo[]> {
     const client = await this.ensureClient(providerProfile);
     return client.listModels();
   }
@@ -216,13 +216,29 @@ export class CodexProviderPlugin {
     providerProfile: ProviderProfile,
     client: any,
     requestedModel: string | null,
-  ): Promise<CodexModelInfo | null> {
+  ): Promise<ProviderModelInfo | null> {
     if (requestedModel) {
-      return { model: requestedModel, defaultReasoningEffort: null };
+      return {
+        id: requestedModel,
+        model: requestedModel,
+        displayName: requestedModel,
+        description: '',
+        isDefault: false,
+        supportedReasoningEfforts: [],
+        defaultReasoningEffort: null,
+      };
     }
     const config = providerProfile.config as CodexProviderProfileConfig;
     if (config.defaultModel) {
-      return { model: config.defaultModel, defaultReasoningEffort: null };
+      return {
+        id: config.defaultModel,
+        model: config.defaultModel,
+        displayName: config.defaultModel,
+        description: '',
+        isDefault: false,
+        supportedReasoningEfforts: [],
+        defaultReasoningEffort: null,
+      };
     }
     const models = await client.listModels();
     return models.find((model) => model.isDefault)
@@ -230,7 +246,7 @@ export class CodexProviderPlugin {
       ?? null;
   }
 
-  resolveReasoningEffort(modelInfo: CodexModelInfo | null, requestedEffort: string | null): string | null {
+  resolveReasoningEffort(modelInfo: ProviderModelInfo | null, requestedEffort: string | null): string | null {
     if (requestedEffort) {
       return requestedEffort;
     }

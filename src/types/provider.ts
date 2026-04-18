@@ -46,6 +46,16 @@ export interface ProviderThreadListResult {
   nextCursor: string | null;
 }
 
+export interface ProviderModelInfo {
+  id: string;
+  model: string;
+  displayName: string;
+  description: string;
+  isDefault: boolean;
+  supportedReasoningEfforts: string[];
+  defaultReasoningEffort: string | null;
+}
+
 export interface ProviderTurnProgress {
   text: string;
   delta: string;
@@ -100,5 +110,7 @@ export interface ProviderPluginContract {
   reconnectProfile?(params: {
     providerProfile: ProviderProfile;
   }): Promise<Record<string, unknown>>;
+  listModels?(params: {
+    providerProfile: ProviderProfile;
+  }): Promise<ProviderModelInfo[]>;
 }
-

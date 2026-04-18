@@ -39,7 +39,7 @@ Project bootstrap is now focused on:
 
 Current implemented bridge pieces:
 
-- Core session routing with WeChat-friendly slash commands, including `/helps`, `/status`, `/stop`, `/new`, `/provider`, `/threads`, `/search`, `/next`, `/prev`, `/open`, `/peek`, `/rename`, `/permissions`, `/reconnect`, `/restart`, and `/lang`
+- Core session routing with WeChat-friendly slash commands, including `/helps`, `/status`, `/stop`, `/new`, `/provider`, `/models`, `/model`, `/threads`, `/search`, `/next`, `/prev`, `/open`, `/peek`, `/rename`, `/permissions`, `/reconnect`, `/restart`, and `/lang`
 - File-backed JSON repositories for persistent bridge state
 - WeChat platform skeleton for Hermes-compatible iLink config loading, QR account state reuse, inbound DM normalization, long-poll client/poller wiring, context-token persistence, text chunking, and outbound text/typing delivery
 - Codex profile loader and initial Codex app-server client/plugin path for shared thread execution
@@ -59,6 +59,12 @@ Recommended entrypoints:
 /sp
 /provider
 /pd
+/models
+/ms
+/model
+/m
+/model gpt-5.4 xhigh
+/model high
 /threads
 /th
 /search bridge
@@ -73,9 +79,37 @@ Recommended entrypoints:
 /pk 2
 /rename 2 微信桥接排障
 /rn 2 微信桥接排障
+/model default
+/models
 /lang
 /permissions
 /perm
+```
+
+### `/models` and `/ms`
+
+List available models for the current provider profile.
+
+Examples:
+
+```text
+/models
+/ms
+```
+
+### `/model` and `/m`
+
+Check or switch the model used for future turns.
+
+Examples:
+
+```text
+/model
+/m
+/model default
+/model high
+/model gpt-5.4 xhigh
+/model gpt-5.4
 ```
 
 All slash commands support command-scoped help flags:

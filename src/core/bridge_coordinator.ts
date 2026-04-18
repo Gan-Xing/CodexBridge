@@ -238,6 +238,10 @@ export class BridgeCoordinator {
         return this.handleReconnectCommand(event);
       case 'permissions':
         return this.handlePermissionsCommand(event, command.args);
+      case 'models':
+        return this.handleModelsCommand(event);
+      case 'model':
+        return this.handleModelCommand(event, command.args);
       default:
         return messageResponse([
           this.t('coordinator.command.unsupported', { name: command.name }),
@@ -423,6 +427,247 @@ export class BridgeCoordinator {
       this.t('coordinator.status.providerProfile', { id: providerProfile.id }),
       this.t('coordinator.status.bridgeSession', { id: session.id }),
     ], buildSessionMeta(session));
+  }
+
+  async handleModelsCommand(event) {
+    const scopeRef = toScopeRef(event);
+    const providerProfile = this.resolveScopeProviderProfile(scopeRef);
+    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+    if (typeof providerPlugin.listModels !== 'function') {
+      return messageResponse([
+        this.t('coordinator.model.unsupported'),
+      ], this.resolveScopedSessionMeta(scopeRef));
+    }
+    const models = await providerPlugin.listModels({
+      providerProfile,
+    });
+    const session = this.bridgeSessions.resolveScopeSession(scopeRef);
+    const settings = session ? this.bridgeSessions.getSessionSettings(session.id) : null;
+    const currentModel = settings?.model ?? this.t('coordinator.model.currentDefault');
+    return messageResponse([
+      this.t('coordinator.models.listTitle', { providerProfileId: providerProfile.id }),
+      this.t('coordinator.model.current', { value: currentModel }),
+      this.t('coordinator.models.helpHeader'),
+      ...(models.length === 0 ? [this.t('coordinator.models.empty')] : this.renderModelLines(models)),
+      this.t('coordinator.model.usageHint'),
+    ], this.resolveScopedSessionMeta(scopeRef));
+  }
+
+  async handleModelCommand(event, args) {
+    const scopeRef = toScopeRef(event);
+    const providerProfile = this.resolveScopeProviderProfile(scopeRef);
+    const normalizedArgs = args.map((arg) => String(arg ?? '').trim()).filter((arg) => arg.length > 0);
+    if (!normalizedArgs.length) {
+      const sessionForDisplay = this.bridgeSessions.resolveScopeSession(scopeRef);
+      const settings = sessionForDisplay ? this.bridgeSessions.getSessionSettings(sessionForDisplay.id) : null;
+      const currentModel = settings?.model ?? this.t('coordinator.model.currentDefault');
+      const currentReasoningEffort = settings?.reasoningEffort ?? this.t('common.default');
+      return messageResponse([
+        this.t('coordinator.model.current', { value: currentModel }),
+        this.t('coordinator.model.currentEffort', { value: currentReasoningEffort }),
+        this.t('coordinator.model.noArgHint', { providerProfileId: providerProfile.id }),
+      ], this.resolveScopedSessionMeta(scopeRef));
+    }
+    if (normalizedArgs.length > 2) {
+      return messageResponse([
+        this.t('coordinator.model.noArgHint', { providerProfileId: providerProfile.id }),
+      ], this.resolveScopedSessionMeta(scopeRef));
+    }
+    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+    const activeResponse = this.rejectIfActiveTurnForCommand(event, 'model');
+    if (activeResponse) {
+      return activeResponse;
+    }
+    const session = this.bridgeSessions.resolveScopeSession(scopeRef);
+    if (!session) {
+      return messageResponse([
+        this.t('coordinator.model.noSession'),
+      ], this.resolveScopedSessionMeta(scopeRef));
+    }
+    if (typeof providerPlugin.listModels !== 'function') {
+      return messageResponse([
+        this.t('coordinator.model.unsupported'),
+      ], buildSessionMeta(session));
+    }
+    const models = await providerPlugin.listModels({
+      providerProfile,
+    });
+    const requestedModel = normalizedArgs[0] ?? '';
+    const requestedEffort = normalizedArgs[1] ?? '';
+    const normalizedModel = requestedModel.toLowerCase();
+    const normalizedEffort = requestedEffort.trim().toLowerCase();
+    const sessionSettings = this.bridgeSessions.getSessionSettings(session.id);
+    const currentModel = this.resolveSessionModelForEffort(models, sessionSettings?.model);
+
+    if (['default', 'reset', 'clear', 'none', '默认', '重置'].includes(normalizedModel)) {
+      const updates = {
+        model: null,
+        reasoningEffort: null,
+      };
+      const messages = [this.t('coordinator.model.reset')];
+      if (normalizedEffort) {
+        const resolvedEffort = this.resolveEffortForModel(currentModel, normalizedEffort);
+        if (!resolvedEffort) {
+          return messageResponse([
+            this.t('coordinator.model.unsupportedEffort', {
+              effort: requestedEffort,
+              supported: this.formatSupportedEfforts(currentModel),
+            }),
+          ], buildSessionMeta(session));
+        }
+        updates.reasoningEffort = resolvedEffort;
+        messages.push(this.t('coordinator.model.effortUpdated', { value: resolvedEffort }));
+      }
+      this.bridgeSessions.upsertSessionSettings(session.id, {
+        ...updates,
+      });
+      return messageResponse([...messages, this.t('coordinator.permissions.nextTurn')], buildSessionMeta(session));
+    }
+    const matchedModel = this.findModelByToken(models, requestedModel);
+    if (!matchedModel && normalizedArgs.length === 1) {
+      const mergedInput = this.parseConcatenatedModelEffortToken(normalizedModel, models);
+      if (mergedInput) {
+        return messageResponse([
+          this.t('coordinator.model.missingEffortSeparator', {
+            model: mergedInput.model,
+            effort: mergedInput.effort,
+          }),
+        ], buildSessionMeta(session));
+      }
+      const resolvedEffort = this.resolveEffortForModel(currentModel, normalizedModel);
+      if (!resolvedEffort) {
+        return messageResponse([
+          this.t('coordinator.model.unknown', { name: requestedModel }),
+          this.t('coordinator.model.notFoundHint'),
+        ], buildSessionMeta(session));
+      }
+      this.bridgeSessions.upsertSessionSettings(session.id, {
+        reasoningEffort: resolvedEffort,
+      });
+      return messageResponse([
+        this.t('coordinator.model.effortUpdated', { value: resolvedEffort }),
+        this.t('coordinator.permissions.nextTurn'),
+      ], buildSessionMeta(session));
+    }
+    if (!matchedModel && normalizedArgs.length > 1) {
+      return messageResponse([
+        this.t('coordinator.model.unknown', { name: requestedModel }),
+        this.t('coordinator.model.notFoundHint'),
+      ], buildSessionMeta(session));
+    }
+    const resolvedEffort = requestedEffort
+      ? this.resolveEffortForModel(
+          matchedModel ?? currentModel,
+          normalizedEffort,
+        )
+      : null;
+    if (requestedEffort && !resolvedEffort) {
+      const modelForEffort = matchedModel ?? currentModel;
+      return messageResponse([
+        this.t('coordinator.model.unsupportedEffort', {
+          effort: requestedEffort,
+          supported: this.formatSupportedEfforts(modelForEffort),
+        }),
+      ], buildSessionMeta(session));
+    }
+    const updates = {} as {
+      model?: string;
+      reasoningEffort?: string;
+    };
+    const messages = [];
+    if (matchedModel) {
+      updates.model = String(matchedModel.model ?? matchedModel.id);
+      messages.push(this.t('coordinator.model.updated', { name: String(matchedModel.model ?? matchedModel.id) }));
+    }
+    if (requestedEffort) {
+      updates.reasoningEffort = resolvedEffort;
+      messages.push(this.t('coordinator.model.effortUpdated', { value: resolvedEffort }));
+    }
+    if (messages.length === 0) {
+      messages.push(this.t('coordinator.model.noArgHint', { providerProfileId: providerProfile.id }));
+    }
+    this.bridgeSessions.upsertSessionSettings(session.id, updates);
+    return messageResponse([...messages, this.t('coordinator.permissions.nextTurn')], buildSessionMeta(session));
+  }
+
+  resolveSessionModelForEffort(models, requestedModel) {
+    if (requestedModel) {
+      const matched = this.findModelByToken(models, requestedModel);
+      if (matched) {
+        return matched;
+      }
+    }
+    return models.find((model) => model.isDefault) ?? models[0] ?? null;
+  }
+
+  resolveEffortForModel(model, requestedEffort) {
+    if (!requestedEffort) {
+      return null;
+    }
+    const supportedEfforts = Array.isArray(model?.supportedReasoningEfforts) ? model.supportedReasoningEfforts : [];
+    if (supportedEfforts.length === 0) {
+      return null;
+    }
+    const normalized = String(requestedEffort).trim().toLowerCase();
+    const matched = supportedEfforts.find((effort) => String(effort ?? '').trim().toLowerCase() === normalized);
+    return matched ? String(matched) : null;
+  }
+
+  formatSupportedEfforts(model) {
+    const supportedEfforts = Array.isArray(model?.supportedReasoningEfforts) ? model.supportedReasoningEfforts : [];
+    return supportedEfforts.length > 0 ? supportedEfforts.join(', ') : this.t('coordinator.model.unsupportedEffortFallback');
+  }
+
+  findModelByToken(models, request) {
+    const normalized = String(request ?? '').trim();
+    const lowered = normalized.toLowerCase();
+    return models.find((model) => {
+      const modelId = String(model.model ?? '');
+      const modelDisplayName = String(model.displayName ?? '');
+      const modelConfigId = String(model.id ?? '');
+      const normalizedModelId = modelId.toLowerCase();
+      const normalizedDisplayName = modelDisplayName.toLowerCase();
+      const normalizedConfigId = modelConfigId.toLowerCase();
+      return modelId === normalized
+        || normalizedModelId === lowered
+        || modelDisplayName === normalized
+        || normalizedDisplayName === lowered
+        || modelConfigId === normalized
+        || normalizedConfigId === lowered;
+    }) ?? null;
+  }
+
+  parseConcatenatedModelEffortToken(token, models) {
+    const normalizedToken = String(token ?? '').trim().toLowerCase();
+    if (!normalizedToken) {
+      return null;
+    }
+    for (const model of models) {
+      const supportedEfforts = Array.isArray(model?.supportedReasoningEfforts) ? model.supportedReasoningEfforts : [];
+      if (supportedEfforts.length === 0) {
+        continue;
+      }
+      const modelTokens = [
+        String(model.id ?? ''),
+        String(model.model ?? ''),
+        String(model.displayName ?? ''),
+      ].map((value) => value.trim().toLowerCase()).filter(Boolean);
+      for (const effort of supportedEfforts) {
+        const normalizedEffort = String(effort ?? '').trim().toLowerCase();
+        if (!normalizedEffort || !normalizedToken.endsWith(normalizedEffort)) {
+          continue;
+        }
+        const modelPart = normalizedToken.slice(0, -normalizedEffort.length);
+        if (!modelPart || !modelTokens.includes(modelPart)) {
+          continue;
+        }
+        return {
+          model: String(model.model ?? model.id ?? model.displayName ?? ''),
+          effort: String(effort),
+        };
+      }
+    }
+    return null;
   }
 
   async handleRenameCommand(event, args) {
@@ -719,6 +964,47 @@ export class BridgeCoordinator {
     return session ? buildSessionMeta(session) : undefined;
   }
 
+  resolveScopedSessionMeta(scopeRef) {
+    return this.bridgeSessions.resolveScopeSession(scopeRef)
+      ? buildSessionMeta(this.bridgeSessions.resolveScopeSession(scopeRef))
+      : undefined;
+  }
+
+  resolveScopeProviderProfile(scopeRef) {
+    const current = this.bridgeSessions.resolveScopeSession(scopeRef);
+    const providerProfileId = current?.providerProfileId ?? this.resolveDefaultProviderProfileId();
+    return this.requireProviderProfile(providerProfileId);
+  }
+
+  renderModelLines(models) {
+    return models.map((model) => {
+      const modelId = String(model.model ?? model.id ?? '').trim();
+      const displayName = String(model.displayName ?? '').trim();
+      const reasonings = Array.isArray(model.supportedReasoningEfforts) && model.supportedReasoningEfforts.length > 0
+        ? ` (${model.supportedReasoningEfforts.join(', ')})`
+        : '';
+      const description = this.resolveModelDescription(model, modelId);
+      const defaultMarker = model.isDefault ? ` ${this.t('coordinator.models.defaultSuffix')}` : '';
+      if (!displayName || displayName === modelId) {
+        return `- ${modelId}${defaultMarker}${reasonings}${description ? ` - ${description}` : ''}`;
+      }
+      return `- ${modelId}${defaultMarker} ${displayName}${reasonings}${description ? ` - ${description}` : ''}`;
+    });
+  }
+
+  resolveModelDescription(model, modelId) {
+    const resolvedModelId = String(modelId ?? model?.model ?? model?.id ?? '').trim();
+    if (!resolvedModelId) {
+      return String(model?.description ?? '').trim();
+    }
+    const key = `coordinator.models.description.${resolvedModelId}`;
+    const localized = this.t(key);
+    if (localized === key) {
+      return String(model?.description ?? '').trim();
+    }
+    return localized;
+  }
+
   buildActiveTurnBlockedResponse(event, activeTurn) {
     return messageResponse([
       this.t('coordinator.blocked.active'),
@@ -984,6 +1270,8 @@ function renderCommandBlockedMessage(commandName, interruptRequested, i18n: Tran
   const action = {
     new: i18n.t('coordinator.action.new'),
     open: i18n.t('coordinator.action.open'),
+    models: i18n.t('coordinator.action.models'),
+    model: i18n.t('coordinator.action.model'),
     rename: i18n.t('coordinator.action.rename'),
     provider: i18n.t('coordinator.action.provider'),
     reconnect: i18n.t('coordinator.action.reconnect'),
@@ -1382,6 +1670,43 @@ function getCommandHelpSpecs(i18n: Translator) {
       i18n.t('coordinator.help.note.provider'),
     ],
   }),
+  models: freezeCommandHelp({
+    name: 'models',
+    aliases: ['ms'],
+    summary: i18n.t('coordinator.help.summary.models'),
+    usage: [
+      '/models',
+      '/models -h',
+    ],
+    examples: [
+      '/models',
+      '/models -h',
+    ],
+    notes: [
+      i18n.t('coordinator.help.note.models'),
+    ],
+  }),
+  model: freezeCommandHelp({
+    name: 'model',
+    aliases: ['m'],
+    summary: i18n.t('coordinator.help.summary.model'),
+    usage: [
+      '/model',
+      '/model <modelId|effort|default|reset>',
+      '/model <modelId> <effort>',
+      '/model -h',
+    ],
+    examples: [
+      '/model',
+      '/model gpt-5.4',
+      '/model high',
+      '/model gpt-5.4 xhigh',
+      '/model default',
+    ],
+    notes: [
+      i18n.t('coordinator.help.note.model'),
+    ],
+  }),
   threads: freezeCommandHelp({
     name: 'threads',
     aliases: ['th'],
@@ -1571,6 +1896,8 @@ const COMMAND_HELP_ORDER = Object.freeze([
   'stop',
   'new',
   'provider',
+  'models',
+  'model',
   'threads',
   'search',
   'next',
@@ -1594,6 +1921,8 @@ const COMMAND_ALIAS_DEFINITIONS = Object.freeze({
   stop: ['sp'],
   new: ['n'],
   provider: ['pd'],
+  models: ['ms'],
+  model: ['m'],
   threads: ['th'],
   search: ['se'],
   next: ['nx'],
