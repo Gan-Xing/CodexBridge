@@ -178,5 +178,5 @@ PY
 }
 
 stop_manual_weixin_runtime() {
-  pkill -f '/home/ubuntu/dev/CodexBridge/src/cli.js weixin serve' 2>/dev/null || true
+  pkill -f '/home/ubuntu/dev/CodexBridge/src/cli.ts weixin serve' 2>/dev/null || true
 }
