@@ -1,7 +1,10 @@
 import { parseSlashCommand } from '../core/command_parser.js';
 import { WeixinPoller } from '../platforms/weixin/poller.js';
 import { createI18n, type Translator } from '../i18n/index.js';
-import type { InboundTextEvent } from '../types/platform.js';
+import type {
+  InboundTextEvent,
+  PlatformMediaDeliveryResult,
+} from '../types/platform.js';
 import type { ProviderTurnProgress } from '../types/provider.js';
 
 interface DeliveryResult {
@@ -15,6 +18,8 @@ interface DeliveryResult {
 
 interface RuntimeResponseMessage {
   text?: string | null;
+  mediaPath?: string | null;
+  caption?: string | null;
 }
 
 interface RuntimeResponse {
@@ -40,6 +45,7 @@ interface PlatformPluginLike {
   commitSyncCursor?(syncCursor: string | null | undefined): Promise<void> | void;
   sendText(params: { externalScopeId: string; content: string }): Promise<DeliveryResult | null | undefined>;
   sendTyping?(params: { externalScopeId: string; status: 'start' | 'stop' }): Promise<void> | void;
+  sendMedia?(params: { externalScopeId: string; filePath: string; caption?: string | null }): Promise<PlatformMediaDeliveryResult | null | undefined>;
 }
 
 interface BridgeCoordinatorLike {
@@ -207,7 +213,11 @@ export class WeixinBridgeRuntime {
         type: response?.type ?? null,
         messageCount: Array.isArray(response?.messages) ? response.messages.length : null,
         messages: Array.isArray(response?.messages)
-          ? response.messages.map((message) => truncateDebugText(message?.text))
+          ? response.messages.map((message) => ({
+            text: truncateDebugText(message?.text),
+            mediaPath: String(message?.mediaPath ?? ''),
+            caption: truncateDebugText(message?.caption),
+          }))
           : null,
       });
       if (response?.type !== 'message') {
@@ -218,17 +228,26 @@ export class WeixinBridgeRuntime {
         return response;
       }
       const codexTurnMeta = response?.meta?.codexTurn ?? null;
-      const finalDelivery = await this.ensureFinalDelivered(event, streamState, response, codexTurnMeta);
-      debugRuntime('final_delivery_decision', {
-        scopeId: event.externalScopeId,
-        outputState: codexTurnMeta?.outputState ?? null,
-        finalSource: finalDelivery.source,
-        finalText: truncateDebugText(finalDelivery.finalText),
-        streamedPreview: truncateDebugText(streamState.streamedText),
-        previewChunkCount: streamState.sentChunkCount,
-        completionMode: finalDelivery.mode,
-        deliveryContent: truncateDebugText(finalDelivery.sentContent),
-      });
+      const finalText = extractResponseMessageText(response);
+      const mediaMessages = extractResponseMediaMessages(response);
+      if (normalizeComparableText(finalText) || codexTurnMeta) {
+        const finalDelivery = await this.ensureFinalDelivered(event, streamState, response, codexTurnMeta);
+        debugRuntime('final_delivery_decision', {
+          scopeId: event.externalScopeId,
+          outputState: codexTurnMeta?.outputState ?? null,
+          finalSource: finalDelivery.source,
+          finalText: truncateDebugText(finalDelivery.finalText),
+          streamedPreview: truncateDebugText(streamState.streamedText),
+          previewChunkCount: streamState.sentChunkCount,
+          completionMode: finalDelivery.mode,
+          deliveryContent: truncateDebugText(finalDelivery.sentContent),
+        });
+      } else {
+        await this.stopPreviewStreaming(streamState);
+      }
+      if (mediaMessages.length > 0) {
+        await this.deliverMediaMessages(event, mediaMessages);
+      }
       if (!options.deferPostResponseAction) {
         await this.runPostResponseAction(response, event);
       }
@@ -497,6 +516,54 @@ export class WeixinBridgeRuntime {
     };
   }
 
+  async sendMediaWithRetry({
+    externalScopeId,
+    filePath,
+    caption,
+  }: {
+    externalScopeId: string;
+    filePath: string;
+    caption?: string | null;
+  }): Promise<PlatformMediaDeliveryResult> {
+    if (typeof this.platformPlugin.sendMedia !== 'function') {
+      return {
+        success: false,
+        messageId: null,
+        sentPath: String(filePath ?? ''),
+        sentCaption: String(caption ?? '').trim(),
+        error: this.i18n.t('runtime.error.unknownDeliveryFailure'),
+      };
+    }
+    const result = await this.platformPlugin.sendMedia({
+      externalScopeId,
+      filePath,
+      caption,
+    });
+    return result ?? {
+      success: false,
+      messageId: null,
+      sentPath: String(filePath ?? ''),
+      sentCaption: String(caption ?? '').trim(),
+      error: this.i18n.t('runtime.error.unknownDeliveryFailure'),
+    };
+  }
+
+  async deliverMediaMessages(
+    event: InboundTextEvent,
+    messages: Array<{ mediaPath: string; caption?: string | null }>,
+  ): Promise<void> {
+    for (const message of messages) {
+      const result = await this.sendMediaWithRetry({
+        externalScopeId: event.externalScopeId,
+        filePath: message.mediaPath,
+        caption: message.caption ?? null,
+      });
+      if (!result.success) {
+        throw new Error(`media delivery failed: ${result.error || result.sentPath}`);
+      }
+    }
+  }
+
   async runPostResponseAction(response: RuntimeResponse, event: InboundTextEvent): Promise<void> {
     const action = response?.meta?.systemAction ?? null;
     if (!action || action.kind !== 'restart_bridge') {
@@ -565,11 +632,24 @@ function createStreamState(): StreamState {
 function extractResponseMessageText(response: RuntimeResponse): string {
   return Array.isArray(response?.messages)
     ? response.messages
+      .filter((message) => !String(message?.mediaPath ?? '').trim())
       .map((message) => String(message?.text ?? '').trim())
       .filter(Boolean)
       .join('\n\n')
       .trim()
     : '';
+}
+
+function extractResponseMediaMessages(response: RuntimeResponse): Array<{ mediaPath: string; caption?: string | null }> {
+  if (!Array.isArray(response?.messages)) {
+    return [];
+  }
+  return response.messages
+    .map((message) => ({
+      mediaPath: String(message?.mediaPath ?? '').trim(),
+      caption: typeof message?.caption === 'string' ? message.caption : null,
+    }))
+    .filter((message) => Boolean(message.mediaPath));
 }
 
 function resolveFinalCommitContent(finalText: string, previewText: string): string {

@@ -9,9 +9,11 @@ import {
   flushPendingRestartNotifications,
   materializeQrArtifact,
   pendingRestartNotificationsFile,
+  parseWeixinClearContextArgs,
   parseWeixinLoginArgs,
   parseWeixinServeArgs,
   readPendingRestartNotifications,
+  resolveClearContextAccountId,
 } from '../../../src/cli.js';
 
 test('parseWeixinLoginArgs reads supported CLI flags', () => {
@@ -51,6 +53,31 @@ test('parseWeixinServeArgs reads state-dir flag', () => {
 
   assert.equal(parsed.stateDir, '/tmp/codexbridge-state');
   assert.equal(parsed.cwd, '/tmp/project');
+});
+
+test('parseWeixinClearContextArgs reads state-dir and account-id flags', () => {
+  const parsed = parseWeixinClearContextArgs([
+    '--state-dir', '/tmp/codexbridge-state',
+    '--account-id', 'bot-account',
+  ]);
+
+  assert.equal(parsed.stateDir, '/tmp/codexbridge-state');
+  assert.equal(parsed.accountId, 'bot-account');
+});
+
+test('resolveClearContextAccountId infers the only saved account', () => {
+  assert.equal(resolveClearContextAccountId({
+    requestedAccountId: null,
+    allAccounts: ['bot-account'],
+  }), 'bot-account');
+  assert.equal(resolveClearContextAccountId({
+    requestedAccountId: null,
+    allAccounts: ['bot-a', 'bot-b'],
+  }), null);
+  assert.equal(resolveClearContextAccountId({
+    requestedAccountId: 'bot-b',
+    allAccounts: ['bot-a', 'bot-b'],
+  }), 'bot-b');
 });
 
 test('acquireServeLock prevents duplicate weixin serve processes for the same state dir', async () => {

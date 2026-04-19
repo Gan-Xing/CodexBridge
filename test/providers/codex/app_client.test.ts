@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { CodexAppClient } from '../../../src/providers/codex/app_client.js';
+import type { CodexTurnInput } from '../../../src/providers/codex/app_client.js';
 
 test('CodexAppClient listThreads returns preview rows and nextCursor', async () => {
   const client = new CodexAppClient({
@@ -124,6 +125,55 @@ test('CodexAppClient startTurn sends explicit default collaboration settings pay
     text: 'hello',
     text_elements: [],
   }]);
+});
+
+test('CodexAppClient startTurn forwards explicit local-image input arrays unchanged', async () => {
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+  });
+
+  const calls = [];
+  client.request = async (method, params) => {
+    calls.push([method, params]);
+    if (method === 'turn/start') {
+      return { turn: { id: 'turn-1' } };
+    }
+    if (method === 'thread/read') {
+      return {
+        thread: {
+          id: 'thread-1',
+          name: 'Thread 1',
+          turns: [{
+            id: 'turn-1',
+            status: 'completed',
+            items: [{
+              type: 'assistant_message',
+              text: 'done',
+            }],
+          }],
+        },
+      };
+    }
+    return {};
+  };
+
+  const input: CodexTurnInput[] = [
+    { type: 'text', text: 'inspect attachment', text_elements: [] },
+    { type: 'localImage', path: '/tmp/example.png' },
+  ];
+
+  await client.startTurn({
+    threadId: 'thread-1',
+    inputText: 'hello',
+    input,
+    model: 'gpt-5.4',
+    effort: 'medium',
+    collaborationMode: 'default',
+    timeoutMs: 10,
+  });
+
+  const turnStart = calls.find(([method]) => method === 'turn/start')?.[1];
+  assert.deepEqual(turnStart.input, input);
 });
 
 test('CodexAppClient omits null reasoning effort from default collaboration settings', async () => {

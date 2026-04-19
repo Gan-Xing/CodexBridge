@@ -1,6 +1,7 @@
 import { CodexAppClient, createNoopLogger, readCodexAccountIdentity } from './app_client.js';
+import type { CodexTurnInput } from './app_client.js';
 import type { BridgeSession, SessionSettings } from '../../types/core.js';
-import type { InboundTextEvent } from '../../types/platform.js';
+import type { InboundAttachment, InboundTextEvent } from '../../types/platform.js';
 import type {
   ProviderProfile,
   ProviderThreadListResult,
@@ -151,9 +152,11 @@ export class CodexProviderPlugin {
     const client = await this.ensureClient(providerProfile);
     const modelInfo = await this.resolveModelInfo(providerProfile, client, sessionSettings?.model ?? null);
     const effort = this.resolveReasoningEffort(modelInfo, sessionSettings?.reasoningEffort ?? null);
+    const turnInput = buildCodexTurnInput(event, inputText);
     const result = await client.startTurn({
       threadId: bridgeSession.codexThreadId,
-      inputText,
+      inputText: turnInput[0]?.type === 'text' ? turnInput[0].text : inputText,
+      input: turnInput,
       cwd: bridgeSession.cwd ?? event.cwd ?? null,
       model: modelInfo?.model ?? null,
       effort,
@@ -251,5 +254,87 @@ export class CodexProviderPlugin {
       return requestedEffort;
     }
     return modelInfo?.defaultReasoningEffort ?? null;
+  }
+}
+
+function buildCodexTurnInput(event: InboundTextEvent, inputText: string): CodexTurnInput[] {
+  const attachments = Array.isArray(event.attachments) ? event.attachments : [];
+  const normalizedInputText = String(inputText ?? '').trim();
+  if (attachments.length === 0) {
+    return [{
+      type: 'text',
+      text: normalizedInputText,
+      text_elements: [],
+    }];
+  }
+
+  const textPrompt = shouldReuseAttachmentPrompt(normalizedInputText)
+    ? normalizedInputText
+    : buildAttachmentPrompt(normalizedInputText, attachments);
+  const input: CodexTurnInput[] = [{
+    type: 'text',
+    text: textPrompt,
+    text_elements: [],
+  }];
+  for (const attachment of attachments) {
+    if (attachment.kind !== 'image') {
+      continue;
+    }
+    input.push({
+      type: 'localImage',
+      path: attachment.localPath,
+    });
+  }
+  return input;
+}
+
+function shouldReuseAttachmentPrompt(inputText: string): boolean {
+  return /we(chat|ixin) attachments:/iu.test(inputText);
+}
+
+function buildAttachmentPrompt(userText: string, attachments: readonly InboundAttachment[]): string {
+  const normalizedText = String(userText ?? '').trim();
+  const lines: string[] = [];
+  if (normalizedText) {
+    lines.push(normalizedText, '');
+  } else {
+    lines.push('User sent Weixin attachments without additional text.', '');
+  }
+  lines.push('Weixin attachments:');
+  attachments.forEach((attachment, index) => {
+    lines.push(`${index + 1}. ${describeAttachment(attachment)}`);
+    lines.push(`   path: ${attachment.localPath}`);
+    if (attachment.fileName) {
+      lines.push(`   filename: ${attachment.fileName}`);
+    }
+    if (attachment.mimeType) {
+      lines.push(`   mime: ${attachment.mimeType}`);
+    }
+    if (typeof attachment.durationSeconds === 'number' && Number.isFinite(attachment.durationSeconds)) {
+      lines.push(`   duration_seconds: ${attachment.durationSeconds}`);
+    }
+    if (attachment.transcriptText) {
+      lines.push(`   transcript_hint: ${attachment.transcriptText}`);
+    }
+    if (attachment.kind === 'image') {
+      lines.push('   attached_as: localImage');
+    }
+  });
+  lines.push('', 'Use the local file paths above when you inspect these attachments.');
+  return lines.join('\n');
+}
+
+function describeAttachment(attachment: InboundAttachment): string {
+  switch (attachment.kind) {
+    case 'image':
+      return 'image';
+    case 'voice':
+      return 'voice message';
+    case 'file':
+      return 'file';
+    case 'video':
+      return 'video';
+    default:
+      return 'attachment';
   }
 }

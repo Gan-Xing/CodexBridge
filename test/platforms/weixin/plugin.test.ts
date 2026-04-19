@@ -5,6 +5,8 @@ import path from 'node:path';
 import test from 'node:test';
 import { WeixinAccountStore } from '../../../src/platforms/weixin/account_store.js';
 import { loadWeixinConfig } from '../../../src/platforms/weixin/config.js';
+import { _resetContextTokenStoreForTest } from '../../../src/platforms/weixin/official/context_tokens.js';
+import { _resetSessionGuardForTest } from '../../../src/platforms/weixin/official/session_guard.js';
 import { WeixinPlatformPlugin } from '../../../src/platforms/weixin/plugin.js';
 
 function makeTempAccountsDir() {
@@ -17,6 +19,11 @@ function makePlugin(options: any) {
     ...options,
   } as any);
 }
+
+test.beforeEach(() => {
+  _resetContextTokenStoreForTest();
+  _resetSessionGuardForTest();
+});
 
 test('loadWeixinConfig restores token and base URL from saved account state', () => {
   const rootDir = makeTempAccountsDir();
@@ -43,7 +50,7 @@ test('loadWeixinConfig restores token and base URL from saved account state', ()
   assert.deepEqual(config.allowFrom, ['wxid_a', 'wxid_b']);
 });
 
-test('WeixinPlatformPlugin normalizes inbound DM text and persists context token', () => {
+test('WeixinPlatformPlugin normalizes inbound DM text and persists context token', async () => {
   const rootDir = makeTempAccountsDir();
   const accountStore = new WeixinAccountStore({ rootDir });
   const plugin = makePlugin({
@@ -64,7 +71,7 @@ test('WeixinPlatformPlugin normalizes inbound DM text and persists context token
     },
   });
 
-  const event = plugin.normalizeInboundEvent({
+  const event = await plugin.normalizeInboundEvent({
     from_user_id: 'wxid_sender',
     to_user_id: 'bot-account',
     msg_type: 0,
@@ -82,7 +89,7 @@ test('WeixinPlatformPlugin normalizes inbound DM text and persists context token
   assert.equal(accountStore.getContextToken('bot-account', 'wxid_sender'), 'ctx-1');
 });
 
-test('WeixinPlatformPlugin enforces DM allowlist when configured', () => {
+test('WeixinPlatformPlugin enforces DM allowlist when configured', async () => {
   const plugin = makePlugin({
     config: {
       enabled: true,
@@ -101,13 +108,13 @@ test('WeixinPlatformPlugin enforces DM allowlist when configured', () => {
     accountStore: new WeixinAccountStore({ rootDir: makeTempAccountsDir() }),
   });
 
-  const blocked = plugin.normalizeInboundEvent({
+  const blocked = await plugin.normalizeInboundEvent({
     from_user_id: 'wxid_blocked',
     to_user_id: 'bot-account',
     msg_type: 0,
     item_list: [{ type: 1, text_item: { text: 'hello' } }],
   });
-  const allowed = plugin.normalizeInboundEvent({
+  const allowed = await plugin.normalizeInboundEvent({
     from_user_id: 'wxid_allowed',
     to_user_id: 'bot-account',
     msg_type: 0,
@@ -116,6 +123,65 @@ test('WeixinPlatformPlugin enforces DM allowlist when configured', () => {
 
   assert.equal(blocked, null);
   assert.equal(allowed?.externalScopeId, 'wxid_allowed');
+});
+
+test('WeixinPlatformPlugin downloads inbound image messages into local attachments', async () => {
+  const rootDir = makeTempAccountsDir();
+  const accountStore = new WeixinAccountStore({ rootDir });
+  const plugin = makePlugin({
+    accountStore,
+    config: {
+      enabled: true,
+      accountId: 'bot-account',
+      token: 'token',
+      baseUrl: 'https://ilinkai.weixin.qq.com',
+      cdnBaseUrl: 'https://novac2c.cdn.weixin.qq.com/c2c',
+      dmPolicy: 'open',
+      groupPolicy: 'disabled',
+      allowFrom: [],
+      groupAllowFrom: [],
+      stateDir: path.dirname(path.dirname(rootDir)),
+      accountsDir: rootDir,
+      maxMessageLength: 4000,
+    },
+  });
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    if (String(input) !== 'https://cdn.example.com/image.png') {
+      throw new Error(`unexpected media url: ${String(input)}`);
+    }
+    return new Response(Buffer.from('fake-image-content'), {
+      status: 200,
+      headers: { 'content-type': 'image/png' },
+    });
+  }) as typeof globalThis.fetch;
+
+  try {
+    const event = await plugin.normalizeInboundEvent({
+      from_user_id: 'wxid_sender',
+      to_user_id: 'bot-account',
+      msg_type: 0,
+      message_id: 'msg-media-1',
+      item_list: [{
+        type: 2,
+        image_item: {
+          media: {
+            full_url: 'https://cdn.example.com/image.png',
+          },
+        },
+      }],
+    });
+
+    assert.equal(event?.externalScopeId, 'wxid_sender');
+    assert.equal(event?.text, '');
+    assert.equal(event?.attachments?.length, 1);
+    assert.equal(event?.attachments?.[0]?.kind, 'image');
+    assert.equal(fs.existsSync(String(event?.attachments?.[0]?.localPath ?? '')), true);
+    assert.equal(event?.metadata?.weixin?.attachmentCount, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('WeixinPlatformPlugin builds outbound text payloads with stored context token and chunking', () => {
@@ -320,6 +386,43 @@ test('WeixinPlatformPlugin pollOnce keeps events when typing ticket refresh fail
   assert.equal((plugin as any).typingTickets.size, 0);
 });
 
+test('WeixinPlatformPlugin caches typing config through the official-compatible config manager', async () => {
+  const rootDir = makeTempAccountsDir();
+  const accountStore = new WeixinAccountStore({ rootDir });
+  const plugin = makePlugin({
+    accountStore,
+    config: {
+      enabled: true,
+      accountId: 'bot-account',
+      token: 'token',
+      baseUrl: 'https://ilinkai.weixin.qq.com',
+      cdnBaseUrl: 'https://novac2c.cdn.weixin.qq.com/c2c',
+      dmPolicy: 'open',
+      groupPolicy: 'disabled',
+      allowFrom: [],
+      groupAllowFrom: [],
+      stateDir: path.dirname(path.dirname(rootDir)),
+      accountsDir: rootDir,
+      maxMessageLength: 4000,
+    },
+  });
+
+  let getConfigCalls = 0;
+  (plugin as any).client = {
+    async getConfig() {
+      getConfigCalls += 1;
+      return { typing_ticket: 'typing-1' };
+    },
+  };
+
+  const first = await plugin.ensureTypingTicket('wxid_sender');
+  const second = await plugin.ensureTypingTicket('wxid_sender');
+
+  assert.equal(first, 'typing-1');
+  assert.equal(second, 'typing-1');
+  assert.equal(getConfigCalls, 1);
+});
+
 test('WeixinPlatformPlugin preserves numeric message ids and drops duplicate batch messages', async () => {
   const rootDir = makeTempAccountsDir();
   const accountStore = new WeixinAccountStore({ rootDir });
@@ -433,6 +536,52 @@ test('WeixinPlatformPlugin sendText and sendTyping call the underlying iLink cli
   });
 });
 
+test('WeixinPlatformPlugin sendMedia calls the underlying official transport and preserves caption/context', async () => {
+  const rootDir = makeTempAccountsDir();
+  const accountStore = new WeixinAccountStore({ rootDir });
+  accountStore.setContextToken('bot-account', 'wxid_sender', 'ctx-1');
+  const plugin = makePlugin({
+    accountStore,
+    config: {
+      enabled: true,
+      accountId: 'bot-account',
+      token: 'token',
+      baseUrl: 'https://ilinkai.weixin.qq.com',
+      cdnBaseUrl: 'https://novac2c.cdn.weixin.qq.com/c2c',
+      dmPolicy: 'open',
+      groupPolicy: 'disabled',
+      allowFrom: [],
+      groupAllowFrom: [],
+      stateDir: path.dirname(path.dirname(rootDir)),
+      accountsDir: rootDir,
+      maxMessageLength: 4000,
+    },
+  });
+  const sentMedia = [];
+  (plugin as any).client = {
+    async sendMediaFile(payload) {
+      sentMedia.push(payload);
+      return { messageId: 'media-1' };
+    },
+  };
+
+  const result = await plugin.sendMedia({
+    externalScopeId: 'wxid_sender',
+    filePath: '/tmp/example.png',
+    caption: '截图说明',
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(result.messageId, 'media-1');
+  assert.deepEqual(sentMedia, [{
+    filePath: '/tmp/example.png',
+    toUserId: 'wxid_sender',
+    text: '截图说明',
+    contextToken: 'ctx-1',
+    cdnBaseUrl: 'https://novac2c.cdn.weixin.qq.com/c2c',
+  }]);
+});
+
 
 test('WeixinPlatformPlugin sendText returns a structured failure when iLink sendmessage keeps returning a non-zero ret code', async () => {
   const rootDir = makeTempAccountsDir();
@@ -473,6 +622,91 @@ test('WeixinPlatformPlugin sendText returns a structured failure when iLink send
   assert.equal(result.failedText, 'hello from bridge');
   assert.match(result.error, /-2/);
   assert.equal(attempts, 4);
+});
+
+test('WeixinPlatformPlugin pauses polling after session expired and skips the next network poll', async () => {
+  const rootDir = makeTempAccountsDir();
+  const waits: number[] = [];
+  const plugin = makePlugin({
+    sleepImpl: async (ms: number) => {
+      waits.push(ms);
+    },
+    accountStore: new WeixinAccountStore({ rootDir }),
+    config: {
+      enabled: true,
+      accountId: 'bot-account',
+      token: 'token',
+      baseUrl: 'https://ilinkai.weixin.qq.com',
+      cdnBaseUrl: 'https://novac2c.cdn.weixin.qq.com/c2c',
+      dmPolicy: 'open',
+      groupPolicy: 'disabled',
+      allowFrom: [],
+      groupAllowFrom: [],
+      stateDir: path.dirname(path.dirname(rootDir)),
+      accountsDir: rootDir,
+      maxMessageLength: 4000,
+    },
+  });
+  let attempts = 0;
+  (plugin as any).client = {
+    async getUpdates() {
+      attempts += 1;
+      return attempts === 1
+        ? { ret: -14, errcode: -14, errmsg: 'session expired' }
+        : { ret: 0, msgs: [], get_updates_buf: 'cursor-2' };
+    },
+  };
+
+  const first = await plugin.pollOnce();
+  const second = await plugin.pollOnce();
+
+  assert.equal(first.events.length, 0);
+  assert.equal(second.events.length, 0);
+  assert.equal(attempts, 1);
+  assert.equal(waits.length, 1);
+  assert.equal(waits[0], 5000);
+});
+
+test('WeixinPlatformPlugin sendText fails fast while the session is paused', async () => {
+  const rootDir = makeTempAccountsDir();
+  const plugin = makePlugin({
+    accountStore: new WeixinAccountStore({ rootDir }),
+    config: {
+      enabled: true,
+      accountId: 'bot-account',
+      token: 'token',
+      baseUrl: 'https://ilinkai.weixin.qq.com',
+      cdnBaseUrl: 'https://novac2c.cdn.weixin.qq.com/c2c',
+      dmPolicy: 'open',
+      groupPolicy: 'disabled',
+      allowFrom: [],
+      groupAllowFrom: [],
+      stateDir: path.dirname(path.dirname(rootDir)),
+      accountsDir: rootDir,
+      maxMessageLength: 4000,
+    },
+  });
+  let attempts = 0;
+  (plugin as any).client = {
+    async sendMessage() {
+      attempts += 1;
+      return { ret: -14, errcode: -14 };
+    },
+  };
+  const pausedTrigger = await plugin.sendText({
+    externalScopeId: 'wxid_sender',
+    content: 'hello from bridge',
+  });
+  assert.equal(pausedTrigger.success, false);
+  assert.match(pausedTrigger.error, /-14|session paused/i);
+  const secondResult = await plugin.sendText({
+    externalScopeId: 'wxid_sender',
+    content: 'hello again',
+  });
+
+  assert.equal(secondResult.success, false);
+  assert.match(secondResult.error, /session paused/i);
+  assert.equal(attempts, 1);
 });
 
 test('WeixinPlatformPlugin sends the first message immediately and gates later sends through the same interval', async () => {

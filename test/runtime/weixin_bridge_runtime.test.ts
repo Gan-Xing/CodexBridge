@@ -6,6 +6,7 @@ import { createI18n } from '../../src/i18n/index.js';
 interface RuntimeHarnessOptions {
   coordinator: any;
   sendText: (payload: { externalScopeId: string; content: string }) => Promise<any> | any;
+  sendMedia?: (payload: { externalScopeId: string; filePath: string; caption?: string | null }) => Promise<any> | any;
   sendTyping?: (payload: { externalScopeId: string; status: 'start' | 'stop' }) => Promise<void> | void;
   commitSyncCursor?: (syncCursor: string) => Promise<void> | void;
   previewSoftTargetBytes?: number;
@@ -15,6 +16,7 @@ interface RuntimeHarnessOptions {
 function makeRuntime({
   coordinator,
   sendText,
+  sendMedia,
   sendTyping,
   commitSyncCursor,
   previewSoftTargetBytes = 1,
@@ -50,6 +52,16 @@ function makeRuntime({
       },
       async sendTyping(payload: { externalScopeId: string; status: 'start' | 'stop' }) {
         await sendTyping?.(payload);
+      },
+      async sendMedia(payload: { externalScopeId: string; filePath: string; caption?: string | null }) {
+        const result = await sendMedia?.(payload);
+        return result ?? {
+          success: true,
+          messageId: 'media-1',
+          sentPath: payload.filePath,
+          sentCaption: String(payload.caption ?? '').trim(),
+          error: '',
+        };
       },
     },
     bridgeCoordinator: coordinator,
@@ -161,6 +173,77 @@ test('WeixinBridgeRuntime dispatches plain-text turns in the background so slash
   assert.deepEqual(sent, [
     { externalScopeId: 'wxid_1', content: 'stop requested' },
     { externalScopeId: 'wxid_1', content: 'final answer' },
+  ]);
+});
+
+test('WeixinBridgeRuntime sends media-only response messages through platform sendMedia', async () => {
+  const sentMedia: Array<{ externalScopeId: string; filePath: string; caption?: string | null }> = [];
+  const runtime = makeRuntime({
+    sendText: async () => {},
+    sendMedia: async (payload) => {
+      sentMedia.push(payload);
+    },
+    coordinator: {
+      async handleInboundEvent() {
+        return {
+          type: 'message',
+          messages: [{
+            mediaPath: '/tmp/example.png',
+            caption: '截图说明',
+          }],
+        };
+      },
+    },
+  });
+
+  await runtime.runOnce();
+
+  assert.deepEqual(sentMedia, [
+    {
+      externalScopeId: 'wxid_1',
+      filePath: '/tmp/example.png',
+      caption: '截图说明',
+    },
+  ]);
+});
+
+test('WeixinBridgeRuntime sends final text before media attachments in the same response', async () => {
+  const sentText: Array<{ externalScopeId: string; content: string }> = [];
+  const sentMedia: Array<{ externalScopeId: string; filePath: string; caption?: string | null }> = [];
+  const runtime = makeRuntime({
+    sendText: async ({ externalScopeId, content }) => {
+      sentText.push({ externalScopeId, content });
+    },
+    sendMedia: async (payload) => {
+      sentMedia.push(payload);
+    },
+    coordinator: {
+      async handleInboundEvent() {
+        return {
+          type: 'message',
+          messages: [
+            { text: '最终结果如下。' },
+            { mediaPath: '/tmp/example.pdf', caption: '附带文件' },
+          ],
+          meta: {
+            codexTurn: {
+              outputState: 'complete',
+              previewText: '',
+              finalSource: 'thread_items',
+            },
+          },
+        };
+      },
+    },
+  });
+
+  await runtime.runOnce();
+
+  assert.deepEqual(sentText, [
+    { externalScopeId: 'wxid_1', content: '最终结果如下。' },
+  ]);
+  assert.deepEqual(sentMedia, [
+    { externalScopeId: 'wxid_1', filePath: '/tmp/example.pdf', caption: '附带文件' },
   ]);
 });
 

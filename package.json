@@ -10,6 +10,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "typecheck:js": "tsc -p tsconfig.checkjs.json",
     "weixin:login": "tsx src/cli.ts weixin login",
+    "weixin:clear-context": "tsx src/cli.ts weixin clear-context",
     "weixin:serve": "tsx src/cli.ts weixin serve",
     "test": "node --import tsx --test"
   },

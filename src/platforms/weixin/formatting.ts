@@ -1,3 +1,5 @@
+import { StreamingMarkdownFilter } from './official/markdown_filter.js';
+
 const FENCE_RE = /^```/u;
 const WEIXIN_DELIVERY_LIMIT_BYTES = 2048;
 
@@ -6,7 +8,11 @@ export function formatWeixinText(content: unknown) {
   if (!normalized) {
     return '';
   }
-  const lines = normalized.split('\n').map((line) => rewriteHeading(line));
+  const filtered = sanitizeWeixinMarkdown(normalized);
+  if (!filtered) {
+    return '';
+  }
+  const lines = rewriteHeadingsPreservingFences(filtered);
   return lines.join('\n').replace(/\n{3,}/g, '\n\n');
 }
 
@@ -36,6 +42,29 @@ function rewriteHeading(line: string) {
     return `**${line.replace(/^##+\s+/u, '').trim()}**`;
   }
   return line;
+}
+
+function sanitizeWeixinMarkdown(content: string) {
+  const filter = new StreamingMarkdownFilter();
+  return `${filter.feed(content)}${filter.flush()}`.trim();
+}
+
+function rewriteHeadingsPreservingFences(content: string) {
+  const lines = content.split('\n');
+  const rewritten: string[] = [];
+  let inFence = false;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (FENCE_RE.test(trimmed)) {
+      rewritten.push(line);
+      inFence = !inFence;
+      continue;
+    }
+    rewritten.push(inFence ? line : rewriteHeading(line));
+  }
+
+  return rewritten;
 }
 
 function splitDeliveryUnits(content: string) {

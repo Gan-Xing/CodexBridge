@@ -247,10 +247,11 @@ function makeProviderProfile(id, providerKind, displayName) {
   };
 }
 
-function makeRuntime({ defaultCwd = null, restartBridge = null, locale = null } = {}) {
+function makeRuntime({ defaultCwd = null, restartBridge = null, locale = null, platformPlugins = [] } = {}) {
   const openai = new FakeProviderPlugin('openai-native', { replyPrefix: 'openai' });
   const minimax = new FakeProviderPlugin('minimax-via-cliproxy', { replyPrefix: 'minimax' });
   const runtime = createCodexBridgeRuntime({
+    platformPlugins,
     providerPlugins: [openai, minimax],
     providerProfiles: [
       makeProviderProfile('openai-default', 'openai-native', 'OpenAI Default'),
@@ -444,6 +445,36 @@ test('/status uses English output when locale is set to en', async () => {
   assert.match(result.messages[0]?.text ?? '', /No bridge session is currently bound to this scope/);
   assert.match(result.messages[1]?.text ?? '', /Default provider profile: openai-default/);
   assert.match(result.messages[2]?.text ?? '', /Default working directory: \(not set\)/);
+});
+
+test('/status includes weixin session pause state when the platform exposes it', async () => {
+  const weixinPlatform = {
+    id: 'weixin',
+    getStatus() {
+      return {
+        data: {
+          accountId: 'bot-account',
+          sessionPaused: true,
+          remainingPauseMinutes: 42,
+        },
+      };
+    },
+  };
+  const { runtime } = makeRuntime({
+    platformPlugins: [weixinPlatform],
+  });
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-status-weixin-1',
+    text: '/status',
+  });
+
+  const lines = result.messages.map((message) => message.text ?? '');
+  assert.ok(lines.some((line) => /微信账号：bot-account/.test(line)));
+  assert.ok(lines.some((line) => /微信会话：冷却中/.test(line)));
+  assert.ok(lines.some((line) => /微信上下文 token：无/.test(line)));
+  assert.ok(lines.some((line) => /微信冷却剩余：42 分钟/.test(line)));
 });
 
 test('/status includes active-turn state when a session is idle', async () => {

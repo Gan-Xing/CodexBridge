@@ -268,11 +268,13 @@ export class BridgeCoordinator {
   async handleStatusCommand(event) {
     const scopeRef = toScopeRef(event);
     const session = this.bridgeSessions.resolveScopeSession(scopeRef);
+    const platformStatusLines = await this.renderPlatformStatusLines(event);
     if (!session) {
       return messageResponse([
         this.t('coordinator.status.unboundScope', { scope: `${event.platform}:${event.externalScopeId}` }),
         this.t('coordinator.status.defaultProvider', { id: this.resolveDefaultProviderProfileId() }),
         this.t('coordinator.status.defaultCwd', { cwd: this.defaultCwd ?? this.t('common.notSet') }),
+        ...platformStatusLines,
       ]);
     }
     const providerProfile = this.requireProviderProfile(session.providerProfileId);
@@ -294,7 +296,20 @@ export class BridgeCoordinator {
       this.t('coordinator.status.currentTurn', { value: formatActiveTurnValue(activeTurn, this.currentI18n) }),
       this.t('coordinator.status.turnState', { value: formatActiveTurnState(activeTurn, this.currentI18n) }),
       ...(activeTurn ? [this.t('coordinator.status.turnControl')] : []),
+      ...platformStatusLines,
     ], buildSessionMeta(session));
+  }
+
+  async renderPlatformStatusLines(event) {
+    const platformPlugin = this.providerRegistry?.listPlatforms?.()
+      ?.find((plugin) => plugin?.id === event.platform) ?? null;
+    if (!platformPlugin || typeof platformPlugin.getStatus !== 'function') {
+      return [];
+    }
+    const status = await platformPlugin.getStatus({
+      externalScopeId: event.externalScopeId,
+    });
+    return renderPlatformStatusLines(event.platform, status?.data ?? null, this.currentI18n);
   }
 
   async handleNewCommand(event, args) {
@@ -1287,6 +1302,45 @@ function renderCommandBlockedMessage(commandName, interruptRequested, i18n: Tran
 function normalizeCwd(value) {
   const normalized = typeof value === 'string' ? value.trim() : '';
   return normalized || null;
+}
+
+function renderPlatformStatusLines(platformId, status, i18n: Translator) {
+  if (!status || platformId !== 'weixin') {
+    return [];
+  }
+  const accountId = typeof status.accountId === 'string' && status.accountId.trim()
+    ? status.accountId.trim()
+    : i18n.t('common.notSet');
+  const sessionPaused = Boolean(status.sessionPaused);
+  const lines = [
+    i18n.t('platform.weixin.status.account', { value: accountId }),
+    i18n.t('platform.weixin.status.session', {
+      value: sessionPaused
+        ? i18n.t('platform.weixin.status.sessionPaused')
+        : i18n.t('platform.weixin.status.sessionActive'),
+    }),
+    i18n.t('platform.weixin.status.contextToken', {
+      value: status.hasContextToken
+        ? i18n.t('platform.weixin.status.contextTokenPresent')
+        : i18n.t('platform.weixin.status.contextTokenAbsent'),
+    }),
+  ];
+  if (sessionPaused) {
+    lines.push(i18n.t('platform.weixin.status.sessionRemaining', {
+      minutes: Number(status.remainingPauseMinutes ?? 0),
+    }));
+  }
+  const matchedAccountIds = Array.isArray(status.contextTokenMatchedAccountIds)
+    ? status.contextTokenMatchedAccountIds
+      .map((value) => typeof value === 'string' ? value.trim() : '')
+      .filter(Boolean)
+    : [];
+  if (matchedAccountIds.length > 0) {
+    lines.push(i18n.t('platform.weixin.status.contextTokenMatches', {
+      value: matchedAccountIds.join(', '),
+    }));
+  }
+  return lines;
 }
 
 function formatActiveTurnValue(activeTurn, i18n: Translator) {

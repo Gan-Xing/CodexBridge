@@ -6,7 +6,8 @@ import { fileURLToPath } from 'node:url';
 import { WeixinAccountStore } from './platforms/weixin/account_store.js';
 import { WEIXIN_DEFAULT_BASE_URL, defaultCodexBridgeStateDir } from './platforms/weixin/config.js';
 import { WeixinPlatformPlugin } from './platforms/weixin/plugin.js';
-import { WeixinIlinkClient, qrLogin } from './platforms/weixin/client.js';
+import { DEFAULT_ILINK_BOT_TYPE, officialQrLogin } from './platforms/weixin/official/login.js';
+import { clearContextTokensForAccount } from './platforms/weixin/official/context_tokens.js';
 import { createCodexBridgeRuntime } from './runtime/bootstrap.js';
 import { createFileJsonRepositories } from './store/file_json/create_file_json_repositories.js';
 import { loadCodexProfilesFromEnv } from './providers/codex/config.js';
@@ -24,6 +25,11 @@ interface WeixinLoginArgs {
 interface WeixinServeArgs {
   stateDir: string | null;
   cwd: string | null;
+}
+
+interface WeixinClearContextArgs {
+  stateDir: string | null;
+  accountId: string | null;
 }
 
 interface ServeLockPayload {
@@ -52,6 +58,9 @@ async function main(argv: string[] = process.argv.slice(2)) {
   if (group === 'weixin' && command === 'serve') {
     return runWeixinServe(args);
   }
+  if (group === 'weixin' && command === 'clear-context') {
+    return runWeixinClearContext(args);
+  }
   printUsage();
   process.exitCode = 1;
 }
@@ -62,15 +71,12 @@ async function runWeixinLogin(args: string[]) {
   const stateDir = path.resolve(options.stateDir ?? defaultCodexBridgeStateDir());
   const accountsDir = path.join(stateDir, 'weixin', 'accounts');
   const accountStore = new WeixinAccountStore({ rootDir: accountsDir });
-  const client = new WeixinIlinkClient({
-    baseUrl: options.baseUrl ?? WEIXIN_DEFAULT_BASE_URL,
-  });
   let qrFilePath: string | null = null;
 
-  const credentials = await qrLogin({
-    client,
+  const credentials = await officialQrLogin({
     accountStore,
-    botType: options.botType,
+    accountsDir,
+    botType: options.botType ?? DEFAULT_ILINK_BOT_TYPE,
     timeoutSeconds: options.timeoutSeconds,
     onQrCode: async ({ qrcode, qrcodeImageContent }) => {
       const output = await materializeQrArtifact({
@@ -111,6 +117,40 @@ async function runWeixinLogin(args: string[]) {
   if (qrFilePath) {
     process.stdout.write(`qr_file: ${qrFilePath}\n`);
   }
+}
+
+async function runWeixinClearContext(args: string[]) {
+  const i18n = createI18n();
+  const options = parseWeixinClearContextArgs(args);
+  const stateDir = path.resolve(options.stateDir ?? defaultCodexBridgeStateDir());
+  const accountsDir = path.join(stateDir, 'weixin', 'accounts');
+  const accountStore = new WeixinAccountStore({ rootDir: accountsDir });
+  const allAccounts = accountStore.listAccounts();
+
+  if (allAccounts.length === 0) {
+    process.stderr.write(`${i18n.t('cli.clearContext.noAccounts')}\n`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const accountId = resolveClearContextAccountId({
+    requestedAccountId: options.accountId,
+    allAccounts,
+  });
+  if (!accountId) {
+    process.stderr.write(`${i18n.t('cli.clearContext.accountRequired')}\n`);
+    process.exitCode = 1;
+    return;
+  }
+  if (!allAccounts.includes(accountId)) {
+    process.stderr.write(`${i18n.t('cli.clearContext.accountNotFound', { accountId })}\n`);
+    process.exitCode = 1;
+    return;
+  }
+
+  clearContextTokensForAccount(accountsDir, accountId);
+  process.stdout.write(`${i18n.t('cli.clearContext.success')}\n`);
+  process.stdout.write(`${i18n.t('cli.clearContext.account', { value: accountId })}\n`);
 }
 
 async function runWeixinServe(args: string[]) {
@@ -242,6 +282,27 @@ function parseWeixinServeArgs(args: string[]): WeixinServeArgs {
     }
     if (arg === '--cwd' && next) {
       options.cwd = next;
+      index += 1;
+    }
+  }
+  return options;
+}
+
+function parseWeixinClearContextArgs(args: string[]): WeixinClearContextArgs {
+  const options: WeixinClearContextArgs = {
+    stateDir: null,
+    accountId: null,
+  };
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    const next = args[index + 1];
+    if (arg === '--state-dir' && next) {
+      options.stateDir = next;
+      index += 1;
+      continue;
+    }
+    if (arg === '--account-id' && next) {
+      options.accountId = next;
       index += 1;
     }
   }
@@ -518,8 +579,22 @@ function printUsage() {
   process.stdout.write([
     createI18n().t('cli.usage.title'),
     createI18n().t('cli.usage.login'),
+    createI18n().t('cli.usage.clearContext'),
     createI18n().t('cli.usage.serve'),
   ].join('\n'));
+}
+
+function resolveClearContextAccountId({
+  requestedAccountId,
+  allAccounts,
+}: {
+  requestedAccountId: string | null;
+  allAccounts: string[];
+}): string | null {
+  if (requestedAccountId) {
+    return requestedAccountId;
+  }
+  return allAccounts.length === 1 ? allAccounts[0] : null;
 }
 
 function formatError(error: unknown) {
@@ -541,7 +616,9 @@ export {
   main,
   materializeQrArtifact,
   pendingRestartNotificationsFile,
+  parseWeixinClearContextArgs,
   parseWeixinLoginArgs,
   parseWeixinServeArgs,
   readPendingRestartNotifications,
+  resolveClearContextAccountId,
 };

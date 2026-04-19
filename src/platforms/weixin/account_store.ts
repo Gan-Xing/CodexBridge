@@ -1,6 +1,11 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import {
+  getSyncBufFilePath,
+  loadGetUpdatesBuf,
+  saveGetUpdatesBuf,
+} from './official/sync_buf.js';
 
 export interface SavedWeixinAccount {
   token: string;
@@ -10,8 +15,6 @@ export interface SavedWeixinAccount {
 }
 
 type ContextTokenMap = Record<string, string>;
-type SyncCursorPayload = { get_updates_buf?: string };
-
 export class WeixinAccountStore {
   constructor({ rootDir = defaultWeixinAccountsDir() } = {}) {
     this.rootDir = rootDir;
@@ -58,15 +61,11 @@ export class WeixinAccountStore {
   }
 
   loadSyncCursor(accountId: string) {
-    const payload = this.readJson<SyncCursorPayload>(this.syncFile(accountId));
-    const cursor = payload?.get_updates_buf;
-    return typeof cursor === 'string' ? cursor : '';
+    return loadGetUpdatesBuf(this.syncFile(accountId)) ?? '';
   }
 
   saveSyncCursor(accountId: string, syncCursor: string) {
-    this.writeJson(this.syncFile(accountId), {
-      get_updates_buf: syncCursor,
-    });
+    saveGetUpdatesBuf(this.syncFile(accountId), syncCursor);
   }
 
   accountFile(accountId: string) {
@@ -78,7 +77,7 @@ export class WeixinAccountStore {
   }
 
   syncFile(accountId: string) {
-    return path.join(this.rootDir, `${accountId}.sync.json`);
+    return getSyncBufFilePath(this.rootDir, accountId);
   }
 
   readJson<T>(filePath: string): T | null {

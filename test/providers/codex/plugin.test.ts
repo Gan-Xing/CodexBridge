@@ -131,6 +131,80 @@ test('CodexProviderPlugin uses per-profile clients and forwards default model in
   assert.equal(seenDeveloperInstructions, '');
 });
 
+test('CodexProviderPlugin turns inbound attachments into text prompt plus localImage inputs', async () => {
+  let seenInput = null;
+  let seenInputText = null;
+  const plugin = makePlugin(() => ({
+    async start() {},
+    async startThread() {
+      return { threadId: 'thread-1', cwd: null, title: null };
+    },
+    async readThread(threadId: string) {
+      return { threadId, title: null, cwd: null };
+    },
+    async listThreads() {
+      return { items: [], nextCursor: null };
+    },
+    async startTurn(params: any) {
+      seenInput = params.input;
+      seenInputText = params.inputText;
+      return {
+        outputText: 'done',
+        threadId: params.threadId,
+        title: null,
+      };
+    },
+    async interruptTurn() {},
+    async listModels() {
+      return [{
+        id: 'gpt-5.4',
+        model: 'gpt-5.4',
+        displayName: 'GPT-5.4',
+        description: '',
+        isDefault: true,
+        supportedReasoningEfforts: ['medium'],
+        defaultReasoningEffort: 'medium',
+      }];
+    },
+  }));
+
+  await plugin.startTurn({
+    providerProfile: makeProfile(),
+    bridgeSession: makeBridgeSession(),
+    sessionSettings: makeSessionSettings(),
+    event: {
+      platform: 'weixin',
+      externalScopeId: 'wxid_1',
+      text: '',
+      attachments: [
+        {
+          kind: 'image',
+          localPath: '/tmp/example.png',
+          fileName: 'example.png',
+          mimeType: 'image/png',
+        },
+        {
+          kind: 'file',
+          localPath: '/tmp/report.pdf',
+          fileName: 'report.pdf',
+          mimeType: 'application/pdf',
+        },
+      ],
+    },
+    inputText: '',
+  });
+
+  assert.equal(Array.isArray(seenInput), true);
+  assert.equal(seenInput?.[0]?.type, 'text');
+  assert.match(seenInput?.[0]?.text ?? '', /Weixin attachments:/);
+  assert.match(seenInput?.[0]?.text ?? '', /report\.pdf/);
+  assert.deepEqual(seenInput?.[1], {
+    type: 'localImage',
+    path: '/tmp/example.png',
+  });
+  assert.match(String(seenInputText ?? ''), /Weixin attachments:/);
+});
+
 test('CodexProviderPlugin resolves default model metadata from listModels when profile defaults are empty', async () => {
   const calls = [];
   const plugin = makePlugin(() => ({

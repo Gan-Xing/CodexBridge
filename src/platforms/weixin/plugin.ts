@@ -1,38 +1,57 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { WeixinAccountStore } from './account_store.js';
-import { WeixinIlinkClient } from './client.js';
+import {
+  createWeixinOfficialTransport,
+  type WeixinOfficialTransport,
+} from './official/transport.js';
+import {
+  MessageItemType,
+  type MessageItem,
+  type WeixinMessage,
+} from './official/types.js';
+import {
+  findAccountIdsByContextToken,
+  getContextToken as getStoredContextToken,
+  restoreContextTokens as restoreStoredContextTokens,
+  setContextToken as setStoredContextToken,
+} from './official/context_tokens.js';
+import {
+  assertSessionActive,
+  getRemainingPauseMs,
+  isSessionPaused,
+  pauseSession,
+  SESSION_EXPIRED_ERRCODE,
+} from './official/session_guard.js';
+import { WeixinConfigManager } from './official/config_cache.js';
+import { downloadMediaFromItem } from './official/media/media_download.js';
+import { getExtensionFromMime, getMimeFromFilename } from './official/media/mime.js';
+import { buildTextMessageReq } from './official/send.js';
 import { loadWeixinConfig, validateWeixinConfig, type WeixinConfig } from './config.js';
 import { formatWeixinText, splitWeixinText } from './formatting.js';
 import { createI18n, type Translator } from '../../i18n/index.js';
-import type { InboundTextEvent, PlatformDeliveryRequest, PlatformPluginContract } from '../../types/platform.js';
+import type {
+  InboundAttachment,
+  InboundTextEvent,
+  PlatformDeliveryRequest,
+  PlatformMediaDeliveryResult,
+  PlatformStatusInfo,
+  PlatformPluginContract,
+} from '../../types/platform.js';
 
-const MESSAGE_TYPE_BOT = 2;
-const MESSAGE_STATE_FINISH = 2;
-const TEXT_ITEM = 1;
-const VOICE_ITEM = 3;
 const TYPING_START = 1;
 const TYPING_STOP = 2;
-
-interface WeixinMessageItem {
-  type?: number;
-  text_item?: { text?: string };
-  voice_item?: { text?: string };
-}
-
-interface WeixinInboundPayload {
-  from_user_id?: string;
-  to_user_id?: string;
-  room_id?: string;
-  chat_room_id?: string;
-  msg_type?: number;
-  message_id?: string;
-  context_token?: string;
-  item_list?: WeixinMessageItem[];
-}
 
 interface WeixinScope {
   chatType: 'group' | 'dm';
   externalScopeId: string;
+}
+
+interface WeixinInboundPayload extends WeixinMessage {
+  room_id?: string;
+  chat_room_id?: string;
+  msg_type?: number;
 }
 
 interface WeixinInboundMetadata extends Record<string, unknown> {
@@ -42,6 +61,8 @@ interface WeixinInboundMetadata extends Record<string, unknown> {
     chatType: 'group' | 'dm';
     messageId: string | null;
     contextTokenPresent: boolean;
+    attachmentCount: number;
+    attachmentErrors?: string[];
   };
 }
 
@@ -82,7 +103,7 @@ interface WeixinPlatformPluginOptions {
   locale?: string | null;
 }
 
-export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' | 'displayName' | 'start' | 'stop' | 'normalizeInboundEvent' | 'buildTextDeliveries'> {
+export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' | 'displayName' | 'start' | 'stop' | 'normalizeInboundEvent' | 'buildTextDeliveries' | 'sendText' | 'sendTyping' | 'sendMedia'> {
   constructor({
     config,
     accountStore,
@@ -100,6 +121,7 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
     });
     this.running = false;
     this.typingTickets = new Map();
+    this.configManager = null;
     this.client = null;
     this.chunkIntervalMs = chunkIntervalMs;
     this.sleepImpl = sleepImpl;
@@ -114,7 +136,8 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
   config: WeixinConfig;
   running: boolean;
   typingTickets: Map<string, string>;
-  client: WeixinIlinkClient | null;
+  configManager: WeixinConfigManager | null;
+  client: WeixinOfficialTransport | null;
   chunkIntervalMs: number;
   sleepImpl: (ms: number) => Promise<void>;
   nowFn: () => number;
@@ -130,20 +153,24 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
     if (errors.length > 0) {
       throw new Error(this.i18n.t('platform.weixin.plugin.startConfigError', { errors: errors.join('; ') }));
     }
-    this.client = new WeixinIlinkClient({
+    this.client = createWeixinOfficialTransport({
       baseUrl: this.config.baseUrl,
       token: this.config.token,
       locale: this.i18n.locale,
     });
+    this.configManager = this.createConfigManager();
+    restoreStoredContextTokens(this.config.accountsDir, this.config.accountId);
     this.running = true;
   }
 
   async stop() {
     this.running = false;
+    this.configManager?.clear();
+    this.configManager = null;
     this.client = null;
   }
 
-  normalizeInboundEvent(payload: WeixinInboundPayload): WeixinNormalizedEvent | null {
+  async normalizeInboundEvent(payload: WeixinInboundPayload): Promise<WeixinNormalizedEvent | null> {
     const senderId = stringValue(payload.from_user_id);
     if (!senderId || senderId === this.config.accountId) {
       debugWeixin('drop_message', {
@@ -163,9 +190,10 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
       return null;
     }
     const text = extractText(payload.item_list ?? []);
-    if (!text) {
+    const { attachments, errors: attachmentErrors } = await this.downloadInboundAttachments(payload);
+    if (!text && attachments.length === 0 && attachmentErrors.length === 0) {
       debugWeixin('drop_message', {
-        reason: 'no_text',
+        reason: 'no_supported_content',
         scopeId: scope.externalScopeId,
         chatType: scope.chatType,
         messageId: stringValue(payload.message_id),
@@ -175,18 +203,21 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
     }
     const contextToken = stringValue(payload.context_token);
     if (contextToken) {
-      this.accountStore.setContextToken(this.config.accountId, senderId, contextToken);
+      setStoredContextToken(this.config.accountsDir, this.config.accountId, senderId, contextToken);
     }
     debugWeixin('accept_message', {
       scopeId: scope.externalScopeId,
       chatType: scope.chatType,
       messageId: stringValue(payload.message_id),
       text,
+      attachmentCount: attachments.length,
+      attachmentErrors,
     });
     return {
       platform: this.id,
       externalScopeId: scope.externalScopeId,
       text,
+      attachments,
       metadata: {
         weixin: {
           senderId,
@@ -194,29 +225,23 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
           chatType: scope.chatType,
           messageId: stringValue(payload.message_id),
           contextTokenPresent: Boolean(contextToken),
+          attachmentCount: attachments.length,
+          attachmentErrors,
         },
       },
     };
   }
 
   buildTextDeliveries({ externalScopeId, content }: { externalScopeId: string; content: string }): WeixinTextDelivery[] {
-    const contextToken = this.accountStore.getContextToken(this.config.accountId, externalScopeId);
+    const contextToken = getStoredContextToken(this.config.accountsDir, this.config.accountId, externalScopeId);
     return splitWeixinText(formatWeixinText(content), this.config.maxMessageLength).map((text) => ({
       kind: 'weixin.sendmessage',
-      payload: {
-        msg: {
-          from_user_id: '',
-          to_user_id: externalScopeId,
-          client_id: `codexbridge-weixin-${crypto.randomUUID()}`,
-          message_type: MESSAGE_TYPE_BOT,
-          message_state: MESSAGE_STATE_FINISH,
-          item_list: [{
-            type: TEXT_ITEM,
-            text_item: { text },
-          }],
-          ...(contextToken ? { context_token: contextToken } : {}),
-        },
-      },
+      payload: buildTextMessageReq({
+        to: externalScopeId,
+        text,
+        contextToken,
+        clientId: `codexbridge-weixin-${crypto.randomUUID()}`,
+      }) as WeixinTextDelivery['payload'],
     }));
   }
 
@@ -228,6 +253,18 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
     if (!this.client) {
       throw new Error(this.i18n.t('platform.weixin.plugin.pollOnceNotStarted'));
     }
+    const remainingPauseMs = getRemainingPauseMs(this.config.accountId);
+    if (remainingPauseMs > 0) {
+      await this.sleepImpl(Math.min(remainingPauseMs, 5000));
+      return {
+        syncCursor: stringValue(requestedSyncCursor) ?? this.loadSyncCursor(),
+        events: [],
+        raw: {
+          ret: SESSION_EXPIRED_ERRCODE,
+          errcode: SESSION_EXPIRED_ERRCODE,
+        },
+      };
+    }
     const syncCursor = stringValue(requestedSyncCursor) ?? this.loadSyncCursor();
     debugWeixin('poll_start', {
       accountId: this.config.accountId,
@@ -236,6 +273,14 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
       syncCursorPreview: previewCursor(syncCursor),
     });
     const response = await this.client.getUpdates({ syncCursor });
+    if (isSessionExpiredResponse(response)) {
+      pauseSession(this.config.accountId);
+      return {
+        syncCursor,
+        events: [],
+        raw: response,
+      };
+    }
     const nextCursor = stringValue(response.get_updates_buf);
     const rawMessages = Array.isArray(response.msgs) ? response.msgs as WeixinInboundPayload[] : [];
     debugWeixin('poll_result', {
@@ -258,7 +303,7 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
         });
         continue;
       }
-      const event = this.normalizeInboundEvent(message);
+      const event = await this.normalizeInboundEvent(message);
       if (!event) {
         continue;
       }
@@ -280,6 +325,7 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
       events: events.map((event) => ({
         scopeId: event.externalScopeId,
         textPreview: previewText(event.text),
+        attachmentCount: Array.isArray(event.attachments) ? event.attachments.length : 0,
         senderId: event.metadata?.weixin?.senderId ?? null,
         chatType: event.metadata?.weixin?.chatType ?? null,
         messageId: event.metadata?.weixin?.messageId ?? null,
@@ -298,6 +344,59 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
     return normalized;
   }
 
+  async downloadInboundAttachments(payload: WeixinInboundPayload): Promise<{
+    attachments: InboundAttachment[];
+    errors: string[];
+  }> {
+    const itemList = Array.isArray(payload.item_list) ? payload.item_list : [];
+    const attachments: InboundAttachment[] = [];
+    const errors: string[] = [];
+    for (const item of itemList) {
+      if (!isMediaItem(item)) {
+        continue;
+      }
+      try {
+        const media = await downloadMediaFromItem(item, {
+          cdnBaseUrl: this.config.cdnBaseUrl,
+          saveMedia: async (buffer, contentType, subdir, maxBytes, originalFilename) =>
+            this.saveInboundMedia(buffer, contentType, subdir, maxBytes, originalFilename),
+          label: `weixin message ${stringValue(payload.message_id) ?? crypto.randomUUID()}`,
+        });
+        attachments.push(...convertDownloadedMediaToAttachments(item, media));
+      } catch (error) {
+        errors.push(error instanceof Error ? error.message : String(error));
+      }
+    }
+    return { attachments, errors };
+  }
+
+  async saveInboundMedia(
+    buffer: Buffer,
+    contentType: string | undefined,
+    subdir = 'inbound',
+    maxBytes = 100 * 1024 * 1024,
+    originalFilename?: string,
+  ): Promise<{ path: string }> {
+    if (buffer.length > maxBytes) {
+      throw new Error(`inbound media exceeds max size: ${buffer.length} > ${maxBytes}`);
+    }
+    const dir = path.join(
+      path.dirname(this.config.accountsDir),
+      subdir,
+      String(this.config.accountId ?? 'unknown-account'),
+    );
+    await fs.mkdir(dir, { recursive: true });
+    const originalBase = typeof originalFilename === 'string' ? path.basename(originalFilename).trim() : '';
+    const originalExt = originalBase ? path.extname(originalBase) : '';
+    const fallbackExt = contentType ? getExtensionFromMime(contentType) : '.bin';
+    const extension = originalExt || fallbackExt || '.bin';
+    const originalStem = originalBase ? originalBase.slice(0, originalBase.length - originalExt.length) : 'media';
+    const stem = sanitizeFilenameStem(originalStem);
+    const filePath = path.join(dir, `${stem}-${crypto.randomUUID()}${extension}`);
+    await fs.writeFile(filePath, buffer);
+    return { path: filePath };
+  }
+
   async sendText({ externalScopeId, content }: { externalScopeId: string; content: string }) {
     if (!this.client) {
       return {
@@ -307,6 +406,18 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
         failedIndex: 0,
         failedText: String(content ?? '').trim(),
         error: this.i18n.t('platform.weixin.plugin.sendTextNotStarted'),
+      };
+    }
+    try {
+      assertSessionActive(this.config.accountId);
+    } catch (error) {
+      return {
+        success: false,
+        deliveredCount: 0,
+        deliveredText: '',
+        failedIndex: 0,
+        failedText: String(content ?? '').trim(),
+        error: error instanceof Error ? error.message : String(error),
       };
     }
     const deliveries = this.buildTextDeliveries({
@@ -369,6 +480,13 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
           attempt,
           result,
         });
+        if (isSessionExpiredResponse(result)) {
+          pauseSession(this.config.accountId);
+          return {
+            success: false,
+            error: `session expired (errcode ${SESSION_EXPIRED_ERRCODE})`,
+          };
+        }
         assertSuccessfulSendResult(
           result,
           this.i18n.t('platform.weixin.plugin.sendFailure', {
@@ -421,34 +539,140 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
     if (!this.client) {
       throw new Error(this.i18n.t('platform.weixin.plugin.typingTicketNotStarted'));
     }
+    assertSessionActive(this.config.accountId);
     if (this.typingTickets.has(externalScopeId)) {
       return this.typingTickets.get(externalScopeId);
     }
-    const contextToken = this.accountStore.getContextToken(this.config.accountId, externalScopeId);
-    const response = await this.client.getConfig({
-      userId: externalScopeId,
-      contextToken,
-    });
-    const typingTicket = stringValue((response as Record<string, unknown>)?.typing_ticket);
+    const contextToken = getStoredContextToken(this.config.accountsDir, this.config.accountId, externalScopeId);
+    const typingTicket = (await this.getConfigManager().getForUser(externalScopeId, contextToken)).typingTicket;
     if (typingTicket) {
       this.recordTypingTicket(externalScopeId, typingTicket);
     }
     return typingTicket;
   }
 
-  async sendTyping({ externalScopeId, status = 'start' as 'start' | 'stop' }: { externalScopeId: string; status?: 'start' | 'stop' }) {
+  async sendTyping({ externalScopeId, status = 'start' as 'start' | 'stop' }: { externalScopeId: string; status?: 'start' | 'stop' }): Promise<void> {
     if (!this.client) {
       throw new Error(this.i18n.t('platform.weixin.plugin.sendTypingNotStarted'));
     }
+    assertSessionActive(this.config.accountId);
     const delivery = this.buildTypingDelivery({ externalScopeId, status });
     if (!delivery) {
-      return null;
+      return;
     }
-    return this.client.sendTyping({
+    const response = await this.client.sendTyping({
       toUserId: delivery.payload.ilink_user_id,
       typingTicket: delivery.payload.typing_ticket,
       status: delivery.payload.status,
     });
+    if (isSessionExpiredResponse(response)) {
+      pauseSession(this.config.accountId);
+    }
+  }
+
+  async sendMedia({
+    externalScopeId,
+    filePath,
+    caption = null,
+  }: {
+    externalScopeId: string;
+    filePath: string;
+    caption?: string | null;
+  }): Promise<PlatformMediaDeliveryResult> {
+    if (!this.client) {
+      return {
+        success: false,
+        messageId: null,
+        sentPath: String(filePath ?? ''),
+        sentCaption: String(caption ?? '').trim(),
+        error: this.i18n.t('platform.weixin.plugin.sendTextNotStarted'),
+      };
+    }
+    try {
+      assertSessionActive(this.config.accountId);
+    } catch (error) {
+      return {
+        success: false,
+        messageId: null,
+        sentPath: String(filePath ?? ''),
+        sentCaption: String(caption ?? '').trim(),
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+
+    const normalizedPath = String(filePath ?? '').trim();
+    const normalizedCaption = String(caption ?? '').trim();
+    let lastError: unknown = null;
+
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      debugWeixin('send_media', {
+        scopeId: externalScopeId,
+        filePath: normalizedPath,
+        caption: normalizedCaption,
+        attempt,
+      });
+      try {
+        const contextToken = getStoredContextToken(this.config.accountsDir, this.config.accountId, externalScopeId);
+        const result = await this.runWithMessageSendGate(async () => this.client?.sendMediaFile({
+          filePath: normalizedPath,
+          toUserId: externalScopeId,
+          text: normalizedCaption,
+          contextToken,
+          cdnBaseUrl: this.config.cdnBaseUrl,
+        }) ?? { messageId: null });
+        return {
+          success: true,
+          messageId: typeof result?.messageId === 'string' ? result.messageId : null,
+          sentPath: normalizedPath,
+          sentCaption: normalizedCaption,
+          error: '',
+        };
+      } catch (error) {
+        lastError = error;
+        const message = error instanceof Error ? error.message : String(error);
+        debugWeixin('send_media_failed', {
+          scopeId: externalScopeId,
+          filePath: normalizedPath,
+          attempt,
+          error: message,
+        });
+        if (message.includes(String(SESSION_EXPIRED_ERRCODE))) {
+          pauseSession(this.config.accountId);
+          break;
+        }
+      }
+    }
+
+    return {
+      success: false,
+      messageId: null,
+      sentPath: normalizedPath,
+      sentCaption: normalizedCaption,
+      error: lastError instanceof Error
+        ? lastError.message
+        : this.i18n.t('runtime.error.unknownDeliveryFailure'),
+    };
+  }
+
+  getStatus({ externalScopeId = null }: { externalScopeId?: string | null } = {}): PlatformStatusInfo {
+    const remainingPauseMs = getRemainingPauseMs(this.config.accountId);
+    const normalizedScopeId = typeof externalScopeId === 'string' ? externalScopeId.trim() : '';
+    const matchedAccountIds = normalizedScopeId
+      ? findAccountIdsByContextToken(this.config.accountsDir, this.accountStore.listAccounts(), normalizedScopeId)
+      : [];
+    return {
+      data: {
+        accountId: this.config.accountId,
+        running: this.running,
+        sessionPaused: isSessionPaused(this.config.accountId),
+        remainingPauseMs,
+        remainingPauseMinutes: remainingPauseMs > 0 ? Math.ceil(remainingPauseMs / 60_000) : 0,
+        hasContextToken: normalizedScopeId
+          ? Boolean(getStoredContextToken(this.config.accountsDir, this.config.accountId, normalizedScopeId))
+          : false,
+        contextTokenMatchedAccountIds: matchedAccountIds,
+      },
+    };
   }
 
   async runWithMessageSendGate<T>(task: () => Promise<T>): Promise<T> {
@@ -489,6 +713,25 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
     }
     return true;
   }
+
+  createConfigManager() {
+    return new WeixinConfigManager({
+      fetchConfig: async ({ userId, contextToken }) => this.client?.getConfig({
+        userId,
+        contextToken,
+      }) ?? { ret: -1 },
+      nowFn: this.nowFn,
+      onSessionExpired: () => pauseSession(this.config.accountId),
+      log: (message) => debugWeixin('config_cache', { message }),
+    });
+  }
+
+  getConfigManager() {
+    if (!this.configManager) {
+      this.configManager = this.createConfigManager();
+    }
+    return this.configManager;
+  }
 }
 
 function debugWeixin(event: string, payload: unknown) {
@@ -511,6 +754,12 @@ function summarizeInboundPayload(payload: WeixinInboundPayload) {
     itemTypes: itemList.map((item) => Number(item?.type)),
     textPreview: previewText(extractText(itemList)),
   };
+}
+
+function isSessionExpiredResponse(response: unknown): boolean {
+  const ret = Number((response as Record<string, unknown> | null)?.ret);
+  const errcode = Number((response as Record<string, unknown> | null)?.errcode);
+  return ret === SESSION_EXPIRED_ERRCODE || errcode === SESSION_EXPIRED_ERRCODE;
 }
 
 function previewText(value: unknown, maxLength = 80) {
@@ -546,18 +795,90 @@ export function resolveWeixinScope(message: WeixinInboundPayload, accountId: str
   };
 }
 
-export function extractText(itemList: WeixinMessageItem[]) {
+export function extractText(itemList: MessageItem[]) {
   for (const item of itemList) {
-    if (Number(item?.type) === TEXT_ITEM) {
+    if (Number(item?.type) === MessageItemType.TEXT) {
       return stringValue(item?.text_item?.text) ?? '';
     }
   }
   for (const item of itemList) {
-    if (Number(item?.type) === VOICE_ITEM) {
+    if (Number(item?.type) === MessageItemType.VOICE) {
       return stringValue(item?.voice_item?.text) ?? '';
     }
   }
   return '';
+}
+
+function isMediaItem(item: MessageItem) {
+  return Number(item?.type) === MessageItemType.IMAGE
+    || Number(item?.type) === MessageItemType.VOICE
+    || Number(item?.type) === MessageItemType.FILE
+    || Number(item?.type) === MessageItemType.VIDEO;
+}
+
+function convertDownloadedMediaToAttachments(item: MessageItem, media: {
+  decryptedPicPath?: string;
+  decryptedVoicePath?: string;
+  voiceMediaType?: string;
+  decryptedFilePath?: string;
+  fileMediaType?: string;
+  decryptedVideoPath?: string;
+}): InboundAttachment[] {
+  const attachments: InboundAttachment[] = [];
+  if (media.decryptedPicPath) {
+    attachments.push({
+      kind: 'image',
+      localPath: media.decryptedPicPath,
+      fileName: path.basename(media.decryptedPicPath),
+      mimeType: inferMimeFromPath(media.decryptedPicPath),
+    });
+  }
+  if (media.decryptedVoicePath) {
+    attachments.push({
+      kind: 'voice',
+      localPath: media.decryptedVoicePath,
+      fileName: path.basename(media.decryptedVoicePath),
+      mimeType: media.voiceMediaType ?? null,
+      transcriptText: stringValue(item?.voice_item?.text),
+      durationSeconds: typeof item?.voice_item?.playtime === 'number'
+        ? item.voice_item.playtime
+        : null,
+    });
+  }
+  if (media.decryptedFilePath) {
+    attachments.push({
+      kind: 'file',
+      localPath: media.decryptedFilePath,
+      mimeType: media.fileMediaType ?? null,
+      fileName: stringValue(item?.file_item?.file_name) ?? path.basename(media.decryptedFilePath),
+    });
+  }
+  if (media.decryptedVideoPath) {
+    attachments.push({
+      kind: 'video',
+      localPath: media.decryptedVideoPath,
+      fileName: path.basename(media.decryptedVideoPath),
+      mimeType: inferMimeFromPath(media.decryptedVideoPath),
+      durationSeconds: typeof item?.video_item?.play_length === 'number'
+        ? item.video_item.play_length
+        : null,
+    });
+  }
+  return attachments;
+}
+
+function sanitizeFilenameStem(value: string) {
+  const normalized = String(value ?? '')
+    .replace(/[^\p{L}\p{N}._-]+/gu, '-')
+    .replace(/-+/gu, '-')
+    .replace(/^-|-$/gu, '')
+    .trim();
+  return normalized || 'media';
+}
+
+function inferMimeFromPath(filePath: string): string | null {
+  const base = path.basename(filePath);
+  return base ? getMimeFromFilename(base) : null;
 }
 
 function assertSuccessfulSendResult(result: { ret?: number }, messageTemplate: string, ) {
@@ -593,7 +914,10 @@ function buildInboundDedupeKey(payload: WeixinInboundPayload) {
   const roomId = stringValue(payload?.room_id) ?? stringValue(payload?.chat_room_id) ?? '';
   const contextToken = stringValue(payload?.context_token) ?? '';
   const text = extractText(Array.isArray(payload?.item_list) ? payload.item_list : []);
-  if (!senderId && !toUserId && !roomId && !contextToken && !text) {
+  const itemFingerprints = Array.isArray(payload?.item_list)
+    ? payload.item_list.map(buildInboundItemFingerprint).filter(Boolean).join('||')
+    : '';
+  if (!senderId && !toUserId && !roomId && !contextToken && !text && !itemFingerprints) {
     return null;
   }
   return [
@@ -604,7 +928,37 @@ function buildInboundDedupeKey(payload: WeixinInboundPayload) {
     contextToken,
     String(Number(payload?.msg_type ?? 0)),
     text,
+    itemFingerprints,
   ].join('|');
+}
+
+function buildInboundItemFingerprint(item: MessageItem): string {
+  const type = Number(item?.type ?? 0);
+  switch (type) {
+    case MessageItemType.TEXT:
+      return `text:${stringValue(item?.text_item?.text) ?? ''}`;
+    case MessageItemType.IMAGE:
+      return `image:${stringValue(item?.image_item?.media?.full_url)
+        ?? stringValue(item?.image_item?.media?.encrypt_query_param)
+        ?? stringValue(item?.image_item?.url)
+        ?? ''}`;
+    case MessageItemType.VOICE:
+      return `voice:${stringValue(item?.voice_item?.media?.full_url)
+        ?? stringValue(item?.voice_item?.media?.encrypt_query_param)
+        ?? ''}:${stringValue(item?.voice_item?.text) ?? ''}`;
+    case MessageItemType.FILE:
+      return `file:${stringValue(item?.file_item?.file_name) ?? ''}:${
+        stringValue(item?.file_item?.media?.full_url)
+          ?? stringValue(item?.file_item?.media?.encrypt_query_param)
+          ?? ''
+      }`;
+    case MessageItemType.VIDEO:
+      return `video:${stringValue(item?.video_item?.media?.full_url)
+        ?? stringValue(item?.video_item?.media?.encrypt_query_param)
+        ?? ''}`;
+    default:
+      return `type:${type}`;
+  }
 }
 
 function sleep(ms: number) {

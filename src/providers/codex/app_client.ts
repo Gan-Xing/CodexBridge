@@ -62,6 +62,19 @@ interface CodexAppClientOptions {
   turnPollNow?: () => number;
 }
 
+export interface CodexTextTurnInput {
+  type: 'text';
+  text: string;
+  text_elements: [];
+}
+
+export interface CodexLocalImageTurnInput {
+  type: 'localImage';
+  path: string;
+}
+
+export type CodexTurnInput = CodexTextTurnInput | CodexLocalImageTurnInput;
+
 export class CodexAppClient extends EventEmitter {
   codexCliBin: string;
 
@@ -267,6 +280,7 @@ export class CodexAppClient extends EventEmitter {
   async startTurn({
     threadId,
     inputText,
+    input = null,
     cwd = null,
     model = null,
     effort = null,
@@ -281,6 +295,7 @@ export class CodexAppClient extends EventEmitter {
   }: {
     threadId: string;
     inputText: string;
+    input?: CodexTurnInput[] | null;
     cwd?: string | null;
     model?: string | null;
     effort?: string | null;
@@ -295,11 +310,13 @@ export class CodexAppClient extends EventEmitter {
   }): Promise<ProviderTurnResult> {
     const result: any = await this.request('turn/start', {
       threadId,
-      input: [{
-        type: 'text',
-        text: inputText,
-        text_elements: [],
-      }],
+      input: Array.isArray(input) && input.length > 0
+        ? input
+        : [{
+          type: 'text',
+          text: inputText,
+          text_elements: [],
+        }],
       cwd,
       approvalPolicy,
       sandboxPolicy: mapSandboxPolicy(sandboxMode),
