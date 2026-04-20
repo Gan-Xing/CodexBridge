@@ -89,6 +89,47 @@ test('WeixinPlatformPlugin normalizes inbound DM text and persists context token
   assert.equal(accountStore.getContextToken('bot-account', 'wxid_sender'), 'ctx-1');
 });
 
+test('WeixinPlatformPlugin normalizes inbound group text and persists context token for group scope', async () => {
+  const rootDir = makeTempAccountsDir();
+  const accountStore = new WeixinAccountStore({ rootDir });
+  const plugin = makePlugin({
+    accountStore,
+    config: {
+      enabled: true,
+      accountId: 'bot-account',
+      token: 'token',
+      baseUrl: 'https://ilinkai.weixin.qq.com',
+      cdnBaseUrl: 'https://novac2c.cdn.weixin.qq.com/c2c',
+      dmPolicy: 'open',
+      groupPolicy: 'open',
+      allowFrom: [],
+      groupAllowFrom: [],
+      stateDir: path.dirname(path.dirname(rootDir)),
+      accountsDir: rootDir,
+      maxMessageLength: 4000,
+    },
+  });
+
+  const event = await plugin.normalizeInboundEvent({
+    from_user_id: 'wxid_sender',
+    to_user_id: 'wxid_bot',
+    room_id: 'wxid_group',
+    msg_type: 1,
+    message_id: 'msg-group-1',
+    context_token: 'ctx-group',
+    item_list: [{
+      type: 1,
+      text_item: { text: 'group hello' },
+    }],
+  });
+
+  assert.equal(event?.platform, 'weixin');
+  assert.equal(event?.externalScopeId, 'wxid_group');
+  assert.equal(event?.text, 'group hello');
+  assert.equal(accountStore.getContextToken('bot-account', 'wxid_group'), 'ctx-group');
+  assert.equal(accountStore.getContextToken('bot-account', 'wxid_sender'), 'ctx-group');
+});
+
 test('WeixinPlatformPlugin enforces DM allowlist when configured', async () => {
   const plugin = makePlugin({
     config: {
@@ -580,6 +621,44 @@ test('WeixinPlatformPlugin sendMedia calls the underlying official transport and
     contextToken: 'ctx-1',
     cdnBaseUrl: 'https://novac2c.cdn.weixin.qq.com/c2c',
   }]);
+});
+
+test('WeixinPlatformPlugin sendMedia returns a clear error when context token is missing', async () => {
+  const rootDir = makeTempAccountsDir();
+  const plugin = makePlugin({
+    accountStore: new WeixinAccountStore({ rootDir }),
+    config: {
+      enabled: true,
+      accountId: 'bot-account',
+      token: 'token',
+      baseUrl: 'https://ilinkai.weixin.qq.com',
+      cdnBaseUrl: 'https://novac2c.cdn.weixin.qq.com/c2c',
+      dmPolicy: 'open',
+      groupPolicy: 'disabled',
+      allowFrom: [],
+      groupAllowFrom: [],
+      stateDir: path.dirname(path.dirname(rootDir)),
+      accountsDir: rootDir,
+      maxMessageLength: 4000,
+    },
+  });
+  let sentCount = 0;
+  (plugin as any).client = {
+    async sendMediaFile() {
+      sentCount += 1;
+      return { messageId: 'media-1' };
+    },
+  };
+
+  const result = await plugin.sendMedia({
+    externalScopeId: 'wxid_sender',
+    filePath: '/tmp/example.png',
+  });
+
+  assert.equal(result.success, false);
+  assert.equal(result.messageId, null);
+  assert.match(result.error, /context token/i);
+  assert.equal(sentCount, 0);
 });
 
 

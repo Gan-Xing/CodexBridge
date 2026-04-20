@@ -204,6 +204,9 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
     const contextToken = stringValue(payload.context_token);
     if (contextToken) {
       setStoredContextToken(this.config.accountsDir, this.config.accountId, senderId, contextToken);
+      if (scope.externalScopeId !== senderId) {
+        setStoredContextToken(this.config.accountsDir, this.config.accountId, scope.externalScopeId, contextToken);
+      }
     }
     debugWeixin('accept_message', {
       scopeId: scope.externalScopeId,
@@ -602,6 +605,16 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
 
     const normalizedPath = String(filePath ?? '').trim();
     const normalizedCaption = String(caption ?? '').trim();
+    const contextToken = getStoredContextToken(this.config.accountsDir, this.config.accountId, externalScopeId);
+    if (!contextToken) {
+      return {
+        success: false,
+        messageId: null,
+        sentPath: normalizedPath,
+        sentCaption: normalizedCaption,
+        error: this.i18n.t('platform.weixin.plugin.contextTokenMissing', { externalScopeId }),
+      };
+    }
     let lastError: unknown = null;
 
     for (let attempt = 1; attempt <= 3; attempt += 1) {
@@ -612,7 +625,6 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
         attempt,
       });
       try {
-        const contextToken = getStoredContextToken(this.config.accountsDir, this.config.accountId, externalScopeId);
         const result = await this.runWithMessageSendGate(async () => this.client?.sendMediaFile({
           filePath: normalizedPath,
           toUserId: externalScopeId,
