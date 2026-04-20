@@ -121,11 +121,12 @@ test('file-backed repositories preserve scope bindings across runtime restarts',
   const status = await runtimeB.services.bridgeCoordinator.handleInboundEvent({
     platform: 'weixin',
     externalScopeId: 'wx-user-1',
-    text: '/status',
+    text: '/status details',
   });
 
-  assert.match(status.messages[0]?.text ?? '', /Scope：weixin:wx-user-1/);
-  assert.match(status.messages[4]?.text ?? '', new RegExp(`Codex 线程：${first.session?.codexThreadId}`));
+  const lines = status.messages.map((message: any) => message?.text ?? '');
+  assert.ok(lines.some((line: string) => /Scope：weixin:wx-user-1/.test(line)));
+  assert.ok(lines.some((line: string) => new RegExp(`Codex 线程：${first.session?.codexThreadId}`).test(line)));
   assert.equal(status.session?.bridgeSessionId, first.session?.bridgeSessionId);
 });
 

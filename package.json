@@ -12,7 +12,7 @@
     "weixin:login": "tsx src/cli.ts weixin login",
     "weixin:clear-context": "tsx src/cli.ts weixin clear-context",
     "weixin:serve": "tsx src/cli.ts weixin serve",
-    "test": "node --import tsx --test"
+    "test": "rm -rf dist/test && node --import tsx --test"
   },
   "engines": {
     "node": ">=24"
