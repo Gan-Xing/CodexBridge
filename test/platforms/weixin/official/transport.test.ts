@@ -160,12 +160,13 @@ test('WeixinOfficialTransport.sendMediaFile uploads image media and sends the im
     const uploadCall = requests.find((entry) => entry.url.includes('/ilink/bot/getuploadurl'));
     assert.ok(uploadCall);
     const uploadPayload = JSON.parse(String(uploadCall?.body ?? '{}'));
-    assert.ok(Number(uploadPayload.thumb_rawsize) > 0);
-    assert.ok(typeof uploadPayload.thumb_rawfilemd5 === 'string' && uploadPayload.thumb_rawfilemd5.length > 0);
-    assert.ok(Number(uploadPayload.thumb_filesize) > 0);
+    assert.equal(uploadPayload.no_need_thumb, true);
+    assert.equal(uploadPayload.thumb_rawsize, undefined);
+    assert.equal(uploadPayload.thumb_rawfilemd5, undefined);
+    assert.equal(uploadPayload.thumb_filesize, undefined);
 
     const cdnUploads = requests.filter((entry) => entry.url.includes('/upload?'));
-    assert.equal(cdnUploads.length, 2);
+    assert.equal(cdnUploads.length, 1);
 
     const sendCall = requests.find((entry) => entry.url.includes('/ilink/bot/sendmessage'));
     assert.ok(sendCall);
@@ -175,8 +176,13 @@ test('WeixinOfficialTransport.sendMediaFile uploads image media and sends the im
     assert.equal(payload.msg.context_token, 'ctx-1');
     assert.equal(payload.msg.item_list?.[0]?.type, 2);
     assert.equal(payload.msg.item_list?.[0]?.image_item?.media?.encrypt_query_param, 'download-param');
-    assert.equal(payload.msg.item_list?.[0]?.image_item?.thumb_media?.encrypt_query_param, 'download-param');
-    assert.ok(Number(payload.msg.item_list?.[0]?.image_item?.thumb_size) > 0);
+    assert.equal(
+      payload.msg.item_list?.[0]?.image_item?.media?.aes_key,
+      Buffer.from(String(uploadPayload.aeskey ?? '')).toString('base64'),
+    );
+    assert.equal(payload.msg.item_list?.[0]?.image_item?.thumb_media, undefined);
+    assert.equal(payload.msg.item_list?.[0]?.image_item?.thumb_size, undefined);
+    assert.equal(payload.msg.item_list?.[0]?.image_item?.hd_size, undefined);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -367,7 +373,15 @@ test('WeixinOfficialTransport.sendMediaFile uploads video media with thumbnail m
     const mediaPayload = JSON.parse(String(sendCalls[1]?.body ?? '{}'));
     assert.equal(mediaPayload.msg.item_list?.[0]?.type, 5);
     assert.equal(mediaPayload.msg.item_list?.[0]?.video_item?.media?.encrypt_query_param, 'video-download-param');
+    assert.equal(
+      mediaPayload.msg.item_list?.[0]?.video_item?.media?.aes_key,
+      Buffer.from(String(uploadPayload.aeskey ?? '')).toString('base64'),
+    );
     assert.equal(mediaPayload.msg.item_list?.[0]?.video_item?.thumb_media?.encrypt_query_param, 'thumb-download-param');
+    assert.equal(
+      mediaPayload.msg.item_list?.[0]?.video_item?.thumb_media?.aes_key,
+      Buffer.from(String(uploadPayload.aeskey ?? '')).toString('base64'),
+    );
     assert.ok(Number(mediaPayload.msg.item_list?.[0]?.video_item?.thumb_size) > 0);
     assert.ok(Number(mediaPayload.msg.item_list?.[0]?.video_item?.play_length) > 0);
     assert.ok(typeof mediaPayload.msg.item_list?.[0]?.video_item?.video_md5 === 'string');

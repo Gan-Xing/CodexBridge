@@ -121,22 +121,10 @@ export async function sendImageMessageWeixin(params: {
       image_item: {
         media: {
           encrypt_query_param: params.uploaded.downloadEncryptedQueryParam,
-          aes_key: Buffer.from(params.uploaded.aeskey, 'hex').toString('base64'),
+          aes_key: encodeWeixinMediaAesKey(params.uploaded.aeskey),
           encrypt_type: 1,
         },
-        thumb_media: params.uploaded.thumb
-          ? {
-            encrypt_query_param: params.uploaded.thumb.downloadEncryptedQueryParam,
-            aes_key: Buffer.from(params.uploaded.aeskey, 'hex').toString('base64'),
-            encrypt_type: 1,
-          }
-          : undefined,
-        aeskey: params.uploaded.aeskey,
         mid_size: params.uploaded.fileSizeCiphertext,
-        thumb_size: params.uploaded.thumb?.fileSizeCiphertext,
-        thumb_height: params.uploaded.thumb?.height ?? undefined,
-        thumb_width: params.uploaded.thumb?.width ?? undefined,
-        hd_size: params.uploaded.fileSizeCiphertext,
       },
     },
   });
@@ -157,7 +145,7 @@ export async function sendVideoMessageWeixin(params: {
       video_item: {
         media: {
           encrypt_query_param: params.uploaded.downloadEncryptedQueryParam,
-          aes_key: Buffer.from(params.uploaded.aeskey, 'hex').toString('base64'),
+          aes_key: encodeWeixinMediaAesKey(params.uploaded.aeskey),
           encrypt_type: 1,
         },
         video_size: params.uploaded.fileSizeCiphertext,
@@ -166,7 +154,7 @@ export async function sendVideoMessageWeixin(params: {
         thumb_media: params.uploaded.thumb
           ? {
             encrypt_query_param: params.uploaded.thumb.downloadEncryptedQueryParam,
-            aes_key: Buffer.from(params.uploaded.aeskey, 'hex').toString('base64'),
+            aes_key: encodeWeixinMediaAesKey(params.uploaded.aeskey),
             encrypt_type: 1,
           }
           : undefined,
@@ -194,7 +182,7 @@ export async function sendFileMessageWeixin(params: {
       file_item: {
         media: {
           encrypt_query_param: params.uploaded.downloadEncryptedQueryParam,
-          aes_key: Buffer.from(params.uploaded.aeskey, 'hex').toString('base64'),
+          aes_key: encodeWeixinMediaAesKey(params.uploaded.aeskey),
           encrypt_type: 1,
         },
         file_name: params.fileName,
@@ -203,4 +191,11 @@ export async function sendFileMessageWeixin(params: {
       },
     },
   });
+}
+
+function encodeWeixinMediaAesKey(aesKeyHex: string): string {
+  // openclaw-weixin / official ilink clients base64-encode the hex string
+  // itself on the wire. We keep the same encoding so the WeChat client can
+  // decrypt uploaded media correctly.
+  return Buffer.from(aesKeyHex).toString('base64');
 }

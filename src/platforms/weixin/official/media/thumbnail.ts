@@ -79,6 +79,40 @@ export async function createVideoThumbnailJpeg(filePath: string): Promise<{
   }
 }
 
+export async function transcodeStillImageJpeg(filePath: string): Promise<{
+  filePath: string;
+  cleanup: () => Promise<void>;
+} | null> {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'codexbridge-weixin-image-'));
+  const outputPath = path.join(tempDir, 'image.jpg');
+  try {
+    await execFileAsync('ffmpeg', [
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-y',
+      '-i',
+      filePath,
+      '-frames:v',
+      '1',
+      '-pix_fmt',
+      'yuvj420p',
+      '-q:v',
+      '2',
+      outputPath,
+    ]);
+    return {
+      filePath: outputPath,
+      cleanup: async () => {
+        await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+      },
+    };
+  } catch {
+    await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+    return null;
+  }
+}
+
 function toNumberOrNull(value: unknown): number | null {
   const num = Number(value);
   return Number.isFinite(num) ? num : null;

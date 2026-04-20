@@ -19,6 +19,10 @@ export type UploadedThumbInfo = {
 export type UploadedFileInfo = {
   filekey: string;
   downloadEncryptedQueryParam: string;
+  // Keep the generated AES-128 key as a 32-char hex string. When sending a
+  // media message downstream, Weixin expects the hex string itself to be
+  // base64-encoded on the wire (matching openclaw-weixin), not the raw 16-byte
+  // key buffer base64.
   aeskey: string;
   fileSize: number;
   fileSizeCiphertext: number;
@@ -174,13 +178,7 @@ async function resolveThumbSource(params: {
   mainPlaintext: Buffer;
 }): Promise<ThumbSource | null> {
   if (params.mediaType === UploadMediaType.IMAGE) {
-    const mediaInfo = await probeMediaInfo(params.filePath);
-    return buildThumbSource({
-      plaintext: params.mainPlaintext,
-      width: mediaInfo?.width ?? null,
-      height: mediaInfo?.height ?? null,
-      cleanup: null,
-    });
+    return null;
   }
 
   if (params.mediaType !== UploadMediaType.VIDEO) {
