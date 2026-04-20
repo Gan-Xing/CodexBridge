@@ -1,6 +1,7 @@
 import { formatPlatformScopeKey } from './contracts.js';
 import { createI18n, type Translator } from '../i18n/index.js';
-import type { PlatformScopeRef } from '../types/core.js';
+import type { PlatformScopeRef, TurnArtifactDeliveryState } from '../types/core.js';
+import type { ProviderApprovalRequest } from '../types/provider.js';
 
 interface ActiveTurnRecord {
   scopeRef: PlatformScopeRef;
@@ -10,6 +11,8 @@ interface ActiveTurnRecord {
   turnId: string | null;
   interruptRequested: boolean;
   interruptDispatched: boolean;
+  pendingApprovals: ProviderApprovalRequest[];
+  artifactDelivery: TurnArtifactDeliveryState | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -60,6 +63,8 @@ export class ActiveTurnRegistry {
       turnId: initial.turnId ?? null,
       interruptRequested: false,
       interruptDispatched: false,
+      pendingApprovals: [],
+      artifactDelivery: null,
       createdAt: now,
       updatedAt: now,
     };
@@ -90,6 +95,34 @@ export class ActiveTurnRegistry {
   noteInterruptDispatched(scopeRef: PlatformScopeRef, value = true): ActiveTurnRecord | null {
     return this.updateScopeTurn(scopeRef, {
       interruptDispatched: value,
+    });
+  }
+
+  addPendingApproval(scopeRef: PlatformScopeRef, request: ProviderApprovalRequest): ActiveTurnRecord | null {
+    const record = this.resolveScopeTurn(scopeRef);
+    if (!record) {
+      return null;
+    }
+    const next = record.pendingApprovals.filter((entry) => entry.requestId !== request.requestId);
+    next.push(request);
+    return this.updateScopeTurn(scopeRef, {
+      pendingApprovals: next,
+    });
+  }
+
+  clearPendingApproval(scopeRef: PlatformScopeRef, requestId: string): ActiveTurnRecord | null {
+    const record = this.resolveScopeTurn(scopeRef);
+    if (!record) {
+      return null;
+    }
+    return this.updateScopeTurn(scopeRef, {
+      pendingApprovals: record.pendingApprovals.filter((entry) => entry.requestId !== requestId),
+    });
+  }
+
+  clearPendingApprovals(scopeRef: PlatformScopeRef): ActiveTurnRecord | null {
+    return this.updateScopeTurn(scopeRef, {
+      pendingApprovals: [],
     });
   }
 

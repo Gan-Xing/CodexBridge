@@ -1,10 +1,19 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { formatPlatformScopeKey } from './contracts.js';
 import { parseSlashCommand } from './command_parser.js';
 import { NotFoundError } from './errors.js';
+import {
+  createPendingTurnArtifactDeliveryState,
+  createTurnArtifactContext,
+  detectRequestedArtifactFormat,
+  detectTurnArtifactIntent,
+  ensureTurnArtifactDirectories,
+  finalizeTurnArtifacts,
+} from './turn_artifacts.js';
 import {
   createI18n,
   formatRelativeTimeLocalized,
@@ -12,15 +21,24 @@ import {
   type SupportedLocale,
   type Translator,
 } from '../i18n/index.js';
+import type { TurnArtifactDeliveryState, UploadBatchItem, UploadBatchState } from '../types/core.js';
+import type { InboundAttachment, InboundTextEvent } from '../types/platform.js';
+import type { OutputArtifact, ProviderApprovalRequest } from '../types/provider.js';
 
 const THREAD_PAGE_SIZE = 5;
 const THREAD_PREVIEW_LIMIT = 72;
 const THREAD_HISTORY_TURN_LIMIT = 3;
 const HELP_FLAG_SET = new Set(['-h', '--help', '-help', '-helps']);
+const STATUS_DETAILS_ARG_SET = new Set(['details', 'detail', 'full']);
 
 type CoordinatorResponse = {
   type: 'message';
-  messages: Array<{ text: string }>;
+  messages: Array<{
+    text?: string | null;
+    artifact?: OutputArtifact | null;
+    mediaPath?: string | null;
+    caption?: string | null;
+  }>;
   session: any;
   meta?: Record<string, any>;
 };
@@ -33,6 +51,7 @@ type StartTurnOptions = {
     bridgeSessionId: string;
     providerProfileId: string;
   }) => Promise<void> | void;
+  onApprovalRequest?: (request: ProviderApprovalRequest) => Promise<void> | void;
 };
 
 type RecoveryFailure = Error & {
@@ -48,6 +67,13 @@ type CommandHelpSpec = {
   notes: readonly string[];
 };
 
+type RetryableRequestSnapshot = {
+  text: string;
+  attachments: InboundAttachment[];
+  cwd: string | null;
+  storedAt: number;
+};
+
 export class BridgeCoordinator {
   bridgeSessions: any;
   activeTurns: any;
@@ -59,6 +85,7 @@ export class BridgeCoordinator {
   now: any;
   threadBrowserStates: Map<any, any>;
   localeOverridesByScope: Map<string, SupportedLocale>;
+  pendingArtifactClarificationsByScope: Map<string, { originalText: string; askedAt: number }>;
   localeContext: AsyncLocalStorage<SupportedLocale>;
   i18n: Translator;
 
@@ -83,6 +110,7 @@ export class BridgeCoordinator {
     this.now = now;
     this.threadBrowserStates = new Map();
     this.localeOverridesByScope = new Map();
+    this.pendingArtifactClarificationsByScope = new Map();
     this.localeContext = new AsyncLocalStorage();
     this.i18n = createI18n(locale);
   }
@@ -135,29 +163,39 @@ export class BridgeCoordinator {
   async handleInboundEventWithLocale(event, options = {}) {
     const command = parseSlashCommand(event.text);
     if (command) {
-      return this.handleCommand(event, command);
+      return this.handleCommand(event, command, options);
     }
     return this.handleConversationTurn(event, options);
   }
 
   async handleConversationTurn(event, options = {}) {
     const scopeRef = toScopeRef(event);
-    const activeTurn = this.activeTurns?.resolveScopeTurn(scopeRef) ?? null;
+    const clarification = this.resolveArtifactClarification(scopeRef, event);
+    if (clarification.response) {
+      return clarification.response;
+    }
+    const effectiveEvent = clarification.event ?? event;
+    const currentSession = this.bridgeSessions.resolveScopeSession(scopeRef);
+    const uploadState = currentSession ? this.getUploadsStateForSession(currentSession.id) : null;
+    if (uploadState?.active) {
+      return this.handleUploadsConversationTurn(effectiveEvent, scopeRef, currentSession, uploadState, options);
+    }
+    const activeTurn = await this.reconcileActiveTurn(scopeRef);
     if (activeTurn) {
-      return this.buildActiveTurnBlockedResponse(event, activeTurn);
+      return this.buildActiveTurnBlockedResponse(effectiveEvent, activeTurn);
     }
     this.activeTurns?.beginScopeTurn(scopeRef);
     let session = null;
     try {
-      const locale = this.resolveScopeLocale(scopeRef, event);
+      const locale = this.resolveScopeLocale(scopeRef, effectiveEvent);
       session = await this.bridgeSessions.resolveOrCreateScopeSession(scopeRef, {
         providerProfileId: this.resolveDefaultProviderProfileId(),
-        cwd: this.resolveEventCwd(event),
+        cwd: this.resolveEventCwd(effectiveEvent),
         initialSettings: {
           locale,
         },
         providerStartOptions: {
-          sourcePlatform: event.platform,
+          sourcePlatform: effectiveEvent.platform,
         },
       });
       this.activeTurns?.updateScopeTurn(scopeRef, {
@@ -165,8 +203,9 @@ export class BridgeCoordinator {
         providerProfileId: session.providerProfileId,
         threadId: session.codexThreadId,
       });
-      const { result, session: nextSession } = await this.startTurnWithRecovery(scopeRef, session, event, options);
-      const response = messageResponse([result.outputText], buildSessionMeta(nextSession));
+      this.storeRetryableRequest(session.id, effectiveEvent);
+      const { result, session: nextSession } = await this.startTurnWithRecovery(scopeRef, session, effectiveEvent, options);
+      const response = turnResponse(result, this.currentI18n, buildSessionMeta(nextSession));
       response.meta = {
         ...(response.meta ?? {}),
         codexTurn: {
@@ -181,7 +220,7 @@ export class BridgeCoordinator {
       if (!failure) {
         throw error;
       }
-      const response = messageResponse([''], session ? buildSessionMeta(session) : this.buildScopedSessionMeta(event));
+      const response = messageResponse([''], session ? buildSessionMeta(session) : this.buildScopedSessionMeta(effectiveEvent));
       response.meta = {
         ...(response.meta ?? {}),
         codexTurn: {
@@ -197,7 +236,38 @@ export class BridgeCoordinator {
     }
   }
 
-  async handleCommand(event, command) {
+  resolveArtifactClarification(scopeRef, event) {
+    const scopeKey = formatPlatformScopeKey(scopeRef.platform, scopeRef.externalScopeId);
+    const pending = this.pendingArtifactClarificationsByScope.get(scopeKey) ?? null;
+    if (pending) {
+      this.pendingArtifactClarificationsByScope.delete(scopeKey);
+      const resolvedFormat = detectRequestedArtifactFormat(event?.text ?? '');
+      if (!resolvedFormat) {
+        return { event };
+      }
+      return {
+        event: {
+          ...event,
+          text: mergeArtifactClarificationAnswer(pending.originalText, resolvedFormat),
+        },
+      };
+    }
+    const intent = detectTurnArtifactIntent(event?.text ?? '');
+    if (!intent.requested || !intent.requiresClarification) {
+      return { event };
+    }
+    this.pendingArtifactClarificationsByScope.set(scopeKey, {
+      originalText: String(event?.text ?? ''),
+      askedAt: this.now(),
+    });
+    return {
+      response: messageResponse([
+        this.t('coordinator.artifact.clarifyFormat'),
+      ], this.buildScopedSessionMeta(event)),
+    };
+  }
+
+  async handleCommand(event, command, options = {}) {
     const commandName = normalizeCommandName(command.name);
     if (commandName !== 'helps' && command.args.some((arg) => isHelpFlag(arg))) {
       return this.handleHelpsCommand(event, [commandName]);
@@ -208,9 +278,13 @@ export class BridgeCoordinator {
         return this.handleHelpsCommand(event, command.args);
       case 'status':
       case 'where':
-        return this.handleStatusCommand(event);
+        return this.handleStatusCommand(event, command.args);
+      case 'usage':
+        return this.handleUsageCommand(event);
       case 'new':
         return this.handleNewCommand(event, command.args);
+      case 'uploads':
+        return this.handleUploadsCommand(event, command.args);
       case 'stop':
       case 'interrupt':
         return this.handleStopCommand(event);
@@ -236,8 +310,14 @@ export class BridgeCoordinator {
         return this.handleRestartCommand(event);
       case 'reconnect':
         return this.handleReconnectCommand(event);
+      case 'retry':
+        return this.handleRetryCommand(event, options);
       case 'permissions':
         return this.handlePermissionsCommand(event, command.args);
+      case 'allow':
+        return this.handleAllowCommand(event, command.args);
+      case 'deny':
+        return this.handleDenyCommand(event, command.args);
       case 'models':
         return this.handleModelsCommand(event);
       case 'model':
@@ -265,26 +345,57 @@ export class BridgeCoordinator {
     return textResponse(renderCommandHelp(spec, this.currentI18n), this.buildScopedSessionMeta(event));
   }
 
-  async handleStatusCommand(event) {
+  async handleStatusCommand(event, args = []) {
     const scopeRef = toScopeRef(event);
     const session = this.bridgeSessions.resolveScopeSession(scopeRef);
-    const platformStatusLines = await this.renderPlatformStatusLines(event);
-    if (!session) {
-      return messageResponse([
-        this.t('coordinator.status.unboundScope', { scope: `${event.platform}:${event.externalScopeId}` }),
-        this.t('coordinator.status.defaultProvider', { id: this.resolveDefaultProviderProfileId() }),
-        this.t('coordinator.status.defaultCwd', { cwd: this.defaultCwd ?? this.t('common.notSet') }),
-        ...platformStatusLines,
-      ]);
+    const statusMode = this.resolveStatusMode(args);
+    if (statusMode === 'invalid') {
+      return this.handleHelpsCommand(event, ['status']);
     }
-    const providerProfile = this.requireProviderProfile(session.providerProfileId);
-    const settings = this.bridgeSessions.getSessionSettings(session.id);
+    const details = statusMode === 'details';
+    const platformStatusLines = await this.renderPlatformStatusLines(event, { details });
+    const providerProfile = session
+      ? this.requireProviderProfile(session.providerProfileId)
+      : this.resolveScopeProviderProfile(scopeRef);
+    const usageReport = await this.resolveProviderUsage(providerProfile);
+    const settings = session ? this.bridgeSessions.getSessionSettings(session.id) : null;
+    const modelValue = await this.resolveStatusModelValue(providerProfile, settings);
+    const lastArtifactDelivery = resolveStoredArtifactDelivery(settings);
+    if (!session) {
+      const lines = [
+        this.t('coordinator.status.interfaceProfile', { id: providerProfile.id }),
+        ...(details ? [this.t('coordinator.status.providerKind', { kind: providerProfile.providerKind })] : []),
+        ...this.renderUsageSummaryLines(usageReport),
+        this.t('coordinator.status.defaultCwd', { cwd: this.defaultCwd ?? this.t('common.notSet') }),
+        this.t('coordinator.status.model', { value: modelValue }),
+        this.t('coordinator.status.reasoningEffort', { value: '' }),
+        this.t('coordinator.status.accessPreset', { value: '' }),
+        ...platformStatusLines,
+        ...(!details ? [this.t('coordinator.status.detailHint')] : []),
+      ];
+      return messageResponse(lines);
+    }
     const activeTurn = this.activeTurns?.resolveScopeTurn(scopeRef) ?? null;
-    return messageResponse([
+    const simpleLines = [
+      this.t('coordinator.status.interfaceProfile', { id: providerProfile.id }),
+      this.t('coordinator.status.threadTitle', {
+        value: formatCurrentBindingTitle(session.title, session.codexThreadId, this.currentI18n),
+      }),
+      ...this.renderUsageSummaryLines(usageReport),
+      this.t('coordinator.status.workingDirectory', { cwd: session.cwd ?? this.defaultCwd ?? this.t('common.notSet') }),
+      this.t('coordinator.status.model', { value: modelValue }),
+      this.t('coordinator.status.reasoningEffort', { value: settings?.reasoningEffort ?? '' }),
+      this.t('coordinator.status.accessPreset', { value: settings?.accessPreset ?? '' }),
+    ];
+    const detailLines = [
       this.t('coordinator.status.scope', { scope: `${event.platform}:${event.externalScopeId}` }),
       this.t('coordinator.status.bridgeSession', { id: session.id }),
       this.t('coordinator.status.providerProfile', { id: providerProfile.id }),
       this.t('coordinator.status.providerKind', { kind: providerProfile.providerKind }),
+      this.t('coordinator.status.threadTitle', {
+        value: formatCurrentBindingTitle(session.title, session.codexThreadId, this.currentI18n),
+      }),
+      ...this.renderUsageSummaryLines(usageReport),
       this.t('coordinator.status.codexThread', { id: session.codexThreadId }),
       this.t('coordinator.status.workingDirectory', { cwd: session.cwd ?? this.defaultCwd ?? this.t('common.notSet') }),
       this.t('coordinator.status.model', { value: settings?.model ?? this.t('common.default') }),
@@ -296,11 +407,42 @@ export class BridgeCoordinator {
       this.t('coordinator.status.currentTurn', { value: formatActiveTurnValue(activeTurn, this.currentI18n) }),
       this.t('coordinator.status.turnState', { value: formatActiveTurnState(activeTurn, this.currentI18n) }),
       ...(activeTurn ? [this.t('coordinator.status.turnControl')] : []),
-      ...platformStatusLines,
-    ], buildSessionMeta(session));
+      ...renderArtifactDeliveryStatusLines(activeTurn?.artifactDelivery ?? lastArtifactDelivery, this.currentI18n),
+    ];
+    const lines = details
+      ? [...detailLines, ...platformStatusLines]
+      : [...simpleLines, ...platformStatusLines, this.t('coordinator.status.detailHint')];
+    return messageResponse(lines, buildSessionMeta(session));
   }
 
-  async renderPlatformStatusLines(event) {
+  async handleUsageCommand(event) {
+    const scopeRef = toScopeRef(event);
+    const providerProfile = this.resolveScopeProviderProfile(scopeRef);
+    const report = await this.resolveProviderUsage(providerProfile);
+    if (!report) {
+      return messageResponse([
+        this.t('coordinator.usage.title', { providerProfileId: providerProfile.id }),
+        this.t('coordinator.usage.unavailable'),
+      ], this.resolveScopedSessionMeta(scopeRef));
+    }
+    return messageResponse([
+      this.t('coordinator.usage.title', { providerProfileId: providerProfile.id }),
+      ...this.renderUsageDetailLines(report),
+    ], this.resolveScopedSessionMeta(scopeRef));
+  }
+
+  resolveStatusMode(args = []) {
+    const mode = String(args[0] ?? '').trim().toLowerCase();
+    if (!mode) {
+      return 'simple';
+    }
+    if (STATUS_DETAILS_ARG_SET.has(mode)) {
+      return 'details';
+    }
+    return 'invalid';
+  }
+
+  async renderPlatformStatusLines(event, { details = false } = {}) {
     const platformPlugin = this.providerRegistry?.listPlatforms?.()
       ?.find((plugin) => plugin?.id === event.platform) ?? null;
     if (!platformPlugin || typeof platformPlugin.getStatus !== 'function') {
@@ -309,11 +451,11 @@ export class BridgeCoordinator {
     const status = await platformPlugin.getStatus({
       externalScopeId: event.externalScopeId,
     });
-    return renderPlatformStatusLines(event.platform, status?.data ?? null, this.currentI18n);
+    return renderPlatformStatusLines(event.platform, status?.data ?? null, this.currentI18n, { details });
   }
 
   async handleNewCommand(event, args) {
-    const activeResponse = this.rejectIfActiveTurnForCommand(event, 'new');
+    const activeResponse = await this.rejectIfActiveTurnForCommand(event, 'new');
     if (activeResponse) {
       return activeResponse;
     }
@@ -336,6 +478,283 @@ export class BridgeCoordinator {
       this.t('coordinator.status.providerProfile', { id: nextSession.providerProfileId }),
       this.t('coordinator.status.codexThread', { id: nextSession.codexThreadId }),
     ], buildSessionMeta(nextSession));
+  }
+
+  async handleUploadsCommand(event, args) {
+    const action = String(args[0] ?? '').trim().toLowerCase();
+    if (action === 'status') {
+      return this.handleUploadsStatusCommand(event);
+    }
+    if (action === 'cancel') {
+      const activeResponse = await this.rejectIfActiveTurnForCommand(event, 'uploads');
+      if (activeResponse) {
+        return activeResponse;
+      }
+      return this.handleUploadsCancelCommand(event);
+    }
+    if (action) {
+      return this.handleHelpsCommand(event, ['uploads']);
+    }
+    const activeResponse = await this.rejectIfActiveTurnForCommand(event, 'uploads');
+    if (activeResponse) {
+      return activeResponse;
+    }
+    const scopeRef = toScopeRef(event);
+    const session = await this.bridgeSessions.resolveOrCreateScopeSession(scopeRef, {
+      providerProfileId: this.resolveScopeProviderProfile(scopeRef).id,
+      cwd: this.resolveEventCwd(event),
+      initialSettings: {
+        locale: this.resolveScopeLocale(scopeRef, event),
+      },
+      providerStartOptions: {
+        sourcePlatform: event.platform,
+        trigger: 'uploads-command',
+      },
+    });
+    const existing = this.getUploadsStateForSession(session.id);
+    if (existing?.active) {
+      return messageResponse([
+        this.t('coordinator.uploads.alreadyActive'),
+        ...this.renderUploadsStateLines(session, existing),
+        this.t('coordinator.uploads.waiting'),
+        this.t('coordinator.uploads.statusHint'),
+        this.t('coordinator.uploads.cancelHint'),
+      ], buildSessionMeta(session));
+    }
+    const nextState = createUploadBatchState(this.now());
+    this.setUploadsStateForSession(session.id, nextState);
+    return messageResponse([
+      this.t('coordinator.uploads.started'),
+      this.t('coordinator.uploads.batch', { id: nextState.batchId }),
+      this.t('coordinator.uploads.directory', {
+        value: this.resolveUploadBatchDirectory(session, nextState) ?? this.t('common.notSet'),
+      }),
+      this.t('coordinator.uploads.waiting'),
+      this.t('coordinator.uploads.statusHint'),
+      this.t('coordinator.uploads.cancelHint'),
+    ], buildSessionMeta(session));
+  }
+
+  async handleUploadsStatusCommand(event) {
+    const session = this.bridgeSessions.resolveScopeSession(toScopeRef(event));
+    if (!session) {
+      return messageResponse([this.t('coordinator.uploads.noneActive')], this.buildScopedSessionMeta(event));
+    }
+    const state = this.getUploadsStateForSession(session.id);
+    if (!state?.active) {
+      return messageResponse([this.t('coordinator.uploads.noneActive')], buildSessionMeta(session));
+    }
+    return messageResponse(this.renderUploadsStateLines(session, state), buildSessionMeta(session));
+  }
+
+  async handleUploadsCancelCommand(event) {
+    const session = this.bridgeSessions.resolveScopeSession(toScopeRef(event));
+    if (!session) {
+      return messageResponse([this.t('coordinator.uploads.noneActive')], this.buildScopedSessionMeta(event));
+    }
+    const state = this.getUploadsStateForSession(session.id);
+    if (!state?.active) {
+      return messageResponse([this.t('coordinator.uploads.noneActive')], buildSessionMeta(session));
+    }
+    await this.removeUploadBatchFiles(session, state);
+    this.setUploadsStateForSession(session.id, null);
+    return messageResponse([
+      this.t('coordinator.uploads.cancelled'),
+      this.t('coordinator.uploads.cleared', { count: state.items.length }),
+    ], buildSessionMeta(session));
+  }
+
+  async handleUploadsConversationTurn(event, scopeRef, session, uploadState, options: StartTurnOptions = {}) {
+    const activeTurn = await this.reconcileActiveTurn(scopeRef);
+    if (activeTurn) {
+      return this.buildActiveTurnBlockedResponse(event, activeTurn);
+    }
+    const currentAttachments = normalizeInboundAttachments(event.attachments);
+    const newItems = await this.stageUploadAttachments(session, uploadState, currentAttachments);
+    const nextState: UploadBatchState = {
+      ...uploadState,
+      items: [...uploadState.items, ...newItems],
+      updatedAt: this.now(),
+    };
+    const submissionText = resolveUploadSubmissionText(event, currentAttachments);
+    if (!submissionText) {
+      this.setUploadsStateForSession(session.id, nextState);
+      if (currentAttachments.length === 0) {
+        return messageResponse([
+          this.t('coordinator.uploads.waiting'),
+          this.t('coordinator.uploads.statusHint'),
+          this.t('coordinator.uploads.cancelHint'),
+        ], buildSessionMeta(session));
+      }
+      const lines = [
+        this.t('coordinator.uploads.added', { count: newItems.length }),
+      ];
+      if (containsVoiceWithoutTranscript(currentAttachments)) {
+        lines.push(this.t('coordinator.uploads.voiceNeedsText'));
+      } else {
+        lines.push(this.t('coordinator.uploads.waitingForPrompt'));
+      }
+      lines.push(this.t('coordinator.uploads.statusHint'));
+      lines.push(this.t('coordinator.uploads.cancelHint'));
+      return messageResponse(lines, buildSessionMeta(session));
+    }
+
+    this.activeTurns?.beginScopeTurn(scopeRef);
+    let nextSession = session;
+    try {
+      this.setUploadsStateForSession(session.id, nextState);
+      this.activeTurns?.updateScopeTurn(scopeRef, {
+        bridgeSessionId: session.id,
+        providerProfileId: session.providerProfileId,
+        threadId: session.codexThreadId,
+      });
+      const mergedEvent = buildUploadTurnEvent(event, submissionText, nextState);
+      this.storeRetryableRequest(session.id, mergedEvent);
+      const started = await this.startTurnWithRecovery(scopeRef, session, mergedEvent, options);
+      nextSession = started.session;
+      this.setUploadsStateForSession(nextSession.id, null);
+      const response = messageResponse([started.result.outputText], buildSessionMeta(nextSession));
+      response.meta = {
+        ...(response.meta ?? {}),
+        codexTurn: {
+          outputState: started.result.outputState ?? 'complete',
+          previewText: started.result.previewText ?? '',
+          finalSource: started.result.finalSource ?? 'thread_items',
+        },
+      };
+      return response;
+    } catch (error) {
+      const failure = classifyTurnFailure(error, this.currentI18n);
+      if (!failure) {
+        throw error;
+      }
+      const response = messageResponse([''], buildSessionMeta(nextSession));
+      response.meta = {
+        ...(response.meta ?? {}),
+        codexTurn: {
+          outputState: failure.outputState,
+          previewText: '',
+          finalSource: 'none',
+          errorMessage: failure.errorMessage ?? '',
+        },
+      };
+      return response;
+    } finally {
+      this.activeTurns?.endScopeTurn(scopeRef);
+    }
+  }
+
+  getUploadsStateForSession(bridgeSessionId: string): UploadBatchState | null {
+    const settings = this.bridgeSessions.getSessionSettings(bridgeSessionId);
+    return normalizeUploadBatchState(settings?.metadata?.uploads ?? null);
+  }
+
+  resolveRetryableRequest(bridgeSessionId: string): RetryableRequestSnapshot | null {
+    const settings = this.bridgeSessions.getSessionSettings(bridgeSessionId);
+    return normalizeRetryableRequestSnapshot(settings?.metadata?.lastRetryableRequest ?? null);
+  }
+
+  storeRetryableRequest(bridgeSessionId: string, event: InboundTextEvent) {
+    this.bridgeSessions.upsertSessionSettings(bridgeSessionId, {
+      metadata: {
+        lastRetryableRequest: {
+          text: String(event?.text ?? ''),
+          attachments: cloneInboundAttachments(normalizeInboundAttachments(event?.attachments)),
+          cwd: normalizeCwd(event?.cwd),
+          storedAt: this.now(),
+        },
+      },
+    });
+  }
+
+  setUploadsStateForSession(bridgeSessionId: string, state: UploadBatchState | null) {
+    this.bridgeSessions.upsertSessionSettings(bridgeSessionId, {
+      metadata: {
+        uploads: state,
+      },
+    });
+  }
+
+  renderUploadsStateLines(session, state: UploadBatchState) {
+    const lines = [
+      this.t('coordinator.uploads.statusTitle', { count: state.items.length }),
+      this.t('coordinator.uploads.batch', { id: state.batchId }),
+      this.t('coordinator.uploads.directory', {
+        value: this.resolveUploadBatchDirectory(session, state) ?? this.t('common.notSet'),
+      }),
+      this.t('coordinator.uploads.fileCount', { count: state.items.length }),
+    ];
+    if (state.items.length === 0) {
+      lines.push(this.t('coordinator.uploads.empty'));
+      return lines;
+    }
+    for (const [index, item] of state.items.entries()) {
+      lines.push(this.t('coordinator.uploads.item', {
+        index: index + 1,
+        kind: this.t(`coordinator.uploads.kind.${item.kind}`),
+        name: item.fileName ?? path.basename(item.localPath),
+      }));
+      lines.push(this.t('coordinator.uploads.path', { value: item.localPath }));
+      if (item.mimeType) {
+        lines.push(this.t('coordinator.uploads.mime', { value: item.mimeType }));
+      }
+      if (typeof item.sizeBytes === 'number') {
+        lines.push(this.t('coordinator.uploads.size', { value: item.sizeBytes }));
+      }
+      if (typeof item.durationSeconds === 'number') {
+        lines.push(this.t('coordinator.uploads.duration', { value: item.durationSeconds }));
+      }
+      if (item.transcriptText) {
+        lines.push(this.t('coordinator.uploads.transcript', {
+          value: truncateInlineText(item.transcriptText, 120),
+        }));
+      }
+    }
+    return lines;
+  }
+
+  resolveUploadBatchDirectory(session, state: UploadBatchState) {
+    const cwd = normalizeCwd(session?.cwd) ?? this.defaultCwd ?? null;
+    if (!cwd) {
+      return null;
+    }
+    return path.join(cwd, '.codexbridge', 'uploads', state.batchId);
+  }
+
+  async stageUploadAttachments(session, uploadState: UploadBatchState, attachments: InboundAttachment[]) {
+    if (attachments.length === 0) {
+      return [];
+    }
+    const staged: UploadBatchItem[] = [];
+    const batchDir = this.resolveUploadBatchDirectory(session, uploadState);
+    for (const attachment of attachments) {
+      const stagedPath = await stageAttachmentFile(attachment, batchDir, uploadState.items.length + staged.length);
+      const sizeBytes = await readFileSize(stagedPath ?? attachment.localPath);
+      staged.push({
+        id: crypto.randomUUID(),
+        kind: attachment.kind,
+        localPath: stagedPath ?? attachment.localPath,
+        originalPath: attachment.localPath,
+        fileName: normalizeNullableString(attachment.fileName) ?? path.basename(stagedPath ?? attachment.localPath),
+        mimeType: normalizeNullableString(attachment.mimeType),
+        transcriptText: normalizeNullableString(attachment.transcriptText),
+        durationSeconds: typeof attachment.durationSeconds === 'number' ? attachment.durationSeconds : null,
+        sizeBytes,
+        receivedAt: this.now(),
+      });
+    }
+    return staged;
+  }
+
+  async removeUploadBatchFiles(session, state: UploadBatchState) {
+    const batchDir = this.resolveUploadBatchDirectory(session, state);
+    if (!batchDir) {
+      return;
+    }
+    await fs.promises.rm(batchDir, {
+      recursive: true,
+      force: true,
+    });
   }
 
   async handleThreadsCommand(event) {
@@ -408,7 +827,7 @@ export class BridgeCoordinator {
   }
 
   async handleOpenCommand(event, args) {
-    const activeResponse = this.rejectIfActiveTurnForCommand(event, 'open');
+    const activeResponse = await this.rejectIfActiveTurnForCommand(event, 'open');
     if (activeResponse) {
       return activeResponse;
     }
@@ -489,7 +908,7 @@ export class BridgeCoordinator {
       ], this.resolveScopedSessionMeta(scopeRef));
     }
     const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
-    const activeResponse = this.rejectIfActiveTurnForCommand(event, 'model');
+    const activeResponse = await this.rejectIfActiveTurnForCommand(event, 'model');
     if (activeResponse) {
       return activeResponse;
     }
@@ -686,7 +1105,7 @@ export class BridgeCoordinator {
   }
 
   async handleRenameCommand(event, args) {
-    const activeResponse = this.rejectIfActiveTurnForCommand(event, 'rename');
+    const activeResponse = await this.rejectIfActiveTurnForCommand(event, 'rename');
     if (activeResponse) {
       return activeResponse;
     }
@@ -751,7 +1170,7 @@ export class BridgeCoordinator {
     if (!profile) {
       return messageResponse([this.t('coordinator.provider.unknown', { id: requested })]);
     }
-    const activeResponse = this.rejectIfActiveTurnForCommand(event, 'provider');
+    const activeResponse = await this.rejectIfActiveTurnForCommand(event, 'provider');
     if (activeResponse) {
       return activeResponse;
     }
@@ -805,7 +1224,7 @@ export class BridgeCoordinator {
   }
 
   async handleRestartCommand(event) {
-    const activeResponse = this.rejectIfActiveTurnForCommand(event, 'restart');
+    const activeResponse = await this.rejectIfActiveTurnForCommand(event, 'restart');
     if (activeResponse) {
       return activeResponse;
     }
@@ -828,7 +1247,7 @@ export class BridgeCoordinator {
   }
 
   async handleReconnectCommand(event) {
-    const activeResponse = this.rejectIfActiveTurnForCommand(event, 'reconnect');
+    const activeResponse = await this.rejectIfActiveTurnForCommand(event, 'reconnect');
     if (activeResponse) {
       return activeResponse;
     }
@@ -856,6 +1275,49 @@ export class BridgeCoordinator {
     }
   }
 
+  async handleRetryCommand(event, options: StartTurnOptions = {}) {
+    const activeResponse = await this.rejectIfActiveTurnForCommand(event, 'retry');
+    if (activeResponse) {
+      return activeResponse;
+    }
+    const scopeRef = toScopeRef(event);
+    const session = this.bridgeSessions.resolveScopeSession(scopeRef);
+    if (!session) {
+      return messageResponse([this.t('coordinator.retry.none')], this.buildScopedSessionMeta(event));
+    }
+    const snapshot = this.resolveRetryableRequest(session.id);
+    if (!snapshot) {
+      return messageResponse([this.t('coordinator.retry.none')], buildSessionMeta(session));
+    }
+    const missingAttachment = snapshot.attachments.find((attachment) => !fs.existsSync(attachment.localPath)) ?? null;
+    if (missingAttachment) {
+      return messageResponse([
+        this.t('coordinator.retry.missingAttachments'),
+        this.t('coordinator.retry.attachmentPath', { value: missingAttachment.localPath }),
+      ], buildSessionMeta(session));
+    }
+    const providerProfile = this.requireProviderProfile(session.providerProfileId);
+    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+    if (typeof providerPlugin.reconnectProfile === 'function') {
+      try {
+        await providerPlugin.reconnectProfile({ providerProfile });
+      } catch (error) {
+        return messageResponse([
+          this.t('coordinator.retry.reconnectFailed', { error: formatUserError(error) }),
+        ], buildSessionMeta(session));
+      }
+    }
+    return this.handleConversationTurn({
+      platform: event.platform,
+      externalScopeId: event.externalScopeId,
+      text: snapshot.text,
+      attachments: cloneInboundAttachments(snapshot.attachments),
+      cwd: snapshot.cwd ?? normalizeCwd(session.cwd) ?? this.defaultCwd ?? null,
+      locale: this.resolveScopeLocale(scopeRef, event),
+      metadata: event.metadata,
+    }, options);
+  }
+
   async handlePermissionsCommand(event, args) {
     const scopeRef = toScopeRef(event);
     const session = this.bridgeSessions.resolveScopeSession(scopeRef);
@@ -868,7 +1330,7 @@ export class BridgeCoordinator {
     if (args.length === 0) {
       return messageResponse(renderPermissionsLines(this.bridgeSessions.getSessionSettings(session.id), this.currentI18n), buildSessionMeta(session));
     }
-    const activeResponse = this.rejectIfActiveTurnForCommand(event, 'permissions');
+    const activeResponse = await this.rejectIfActiveTurnForCommand(event, 'permissions');
     if (activeResponse) {
       return activeResponse;
     }
@@ -893,9 +1355,77 @@ export class BridgeCoordinator {
     ], buildSessionMeta(session));
   }
 
+  async handleAllowCommand(event, args) {
+    const scopeRef = toScopeRef(event);
+    const active = await this.reconcileActiveTurn(scopeRef);
+    const sessionMeta = buildActiveTurnMeta(active) ?? this.buildScopedSessionMeta(event);
+    const pendingApprovals = Array.isArray(active?.pendingApprovals) ? active.pendingApprovals : [];
+    if (args.length === 0) {
+      if (pendingApprovals.length === 0) {
+        return messageResponse([this.t('coordinator.allow.none')], sessionMeta);
+      }
+      return messageResponse(renderAllowLines(pendingApprovals, this.currentI18n), sessionMeta);
+    }
+    const parsed = parseAllowCommandArgs(args);
+    if (!parsed.option) {
+      return messageResponse([
+        this.t('coordinator.allow.usage'),
+        this.t('coordinator.allow.help'),
+      ], sessionMeta);
+    }
+    if (!active || pendingApprovals.length === 0) {
+      return messageResponse([this.t('coordinator.allow.none')], sessionMeta);
+    }
+    const request = pendingApprovals[parsed.requestIndex - 1] ?? null;
+    if (!request) {
+      return messageResponse([
+        this.t('coordinator.allow.missingRequest', { index: parsed.requestIndex }),
+      ], sessionMeta);
+    }
+    const providerProfile = this.requireProviderProfile(active.providerProfileId);
+    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+    if (typeof providerPlugin.respondToApproval !== 'function') {
+      return messageResponse([
+        this.t('coordinator.allow.unsupported', { kind: providerProfile.providerKind }),
+      ], sessionMeta);
+    }
+    try {
+      await providerPlugin.respondToApproval({
+        providerProfile,
+        request,
+        option: parsed.option,
+      });
+      this.activeTurns?.clearPendingApproval(scopeRef, request.requestId);
+      const reconciledActive = await this.reconcileActiveTurn(scopeRef);
+      return messageResponse(
+        renderAllowAcknowledgementLines(request, parsed.option, this.currentI18n, Boolean(reconciledActive)),
+        buildActiveTurnMeta(reconciledActive) ?? sessionMeta,
+      );
+    } catch (error) {
+      return messageResponse([
+        this.t('coordinator.allow.failed', { error: formatUserError(error) }),
+      ], sessionMeta);
+    }
+  }
+
+  async handleDenyCommand(event, args) {
+    if (args.length > 1) {
+      return this.handleHelpsCommand(event, ['deny']);
+    }
+    const indexArg = String(args[0] ?? '').trim();
+    if (!indexArg) {
+      return this.handleAllowCommand(event, ['3']);
+    }
+    const requestIndex = Number.parseInt(indexArg, 10);
+    if (!Number.isFinite(requestIndex) || requestIndex <= 0) {
+      return this.handleHelpsCommand(event, ['deny']);
+    }
+    return this.handleAllowCommand(event, ['3', String(requestIndex)]);
+  }
+
   async handleStopCommand(event) {
     const scopeRef = toScopeRef(event);
-    const active = this.activeTurns?.resolveScopeTurn(scopeRef) ?? null;
+    const active = await this.reconcileActiveTurn(scopeRef);
     if (!active) {
       return messageResponse([this.t('coordinator.stop.none')], this.buildScopedSessionMeta(event));
     }
@@ -1020,7 +1550,156 @@ export class BridgeCoordinator {
     return localized;
   }
 
+  async resolveProviderUsage(providerProfile) {
+    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+    if (typeof providerPlugin?.getUsage !== 'function') {
+      return null;
+    }
+    try {
+      return await providerPlugin.getUsage({
+        providerProfile,
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  renderUsageSummaryLines(report) {
+    if (!report) {
+      return [];
+    }
+    const [primaryWindow, weeklyWindow] = selectUsageWindows(report);
+    return [
+      this.t('coordinator.status.account', { value: this.formatUsageAccount(report) }),
+      this.t('coordinator.status.usage5h', { value: this.formatUsageWindowValue(primaryWindow) }),
+      this.t('coordinator.status.usageWeek', { value: this.formatUsageWindowValue(weeklyWindow) }),
+    ];
+  }
+
+  renderUsageDetailLines(report) {
+    return this.renderUsageSummaryLines(report);
+  }
+
+  async reconcileActiveTurn(scopeRef) {
+    const activeTurn = this.activeTurns?.resolveScopeTurn(scopeRef) ?? null;
+    if (!activeTurn) {
+      return null;
+    }
+    if (!activeTurn.providerProfileId || !activeTurn.threadId || !activeTurn.turnId) {
+      return activeTurn;
+    }
+    try {
+      const providerProfile = this.requireProviderProfile(activeTurn.providerProfileId);
+      const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+      if (typeof providerPlugin?.readThread !== 'function') {
+        return activeTurn;
+      }
+      const thread = await providerPlugin.readThread({
+        providerProfile,
+        threadId: activeTurn.threadId,
+        includeTurns: true,
+      });
+      const turn = thread?.turns?.find((entry) => entry.id === activeTurn.turnId) ?? null;
+      if (turn && isProviderTurnTerminal(turn.status)) {
+        this.activeTurns?.endScopeTurn(scopeRef);
+        return null;
+      }
+    } catch {
+      return activeTurn;
+    }
+    return this.activeTurns?.resolveScopeTurn(scopeRef) ?? null;
+  }
+
+  async resolveStatusModelValue(providerProfile, settings) {
+    if (typeof settings?.model === 'string' && settings.model.trim()) {
+      return settings.model.trim();
+    }
+    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+    if (typeof providerPlugin?.listModels === 'function') {
+      try {
+        const models = await providerPlugin.listModels({
+          providerProfile,
+        });
+        const defaultModel = models.find((model) => model?.isDefault)
+          ?? models[0]
+          ?? null;
+        const modelValue = String(defaultModel?.model ?? defaultModel?.id ?? '').trim();
+        if (modelValue) {
+          return modelValue;
+        }
+      } catch {
+        // Ignore provider model lookup failures in status output.
+      }
+    }
+    return this.t('common.default');
+  }
+
+  formatUsageAccount(report) {
+    const base = String(
+      report?.email
+      ?? report?.accountId
+      ?? report?.userId
+      ?? this.t('common.unknown'),
+    ).trim() || this.t('common.unknown');
+    const plan = typeof report?.plan === 'string' && report.plan.trim()
+      ? report.plan.trim()
+      : null;
+    return plan ? `${base} (${plan})` : base;
+  }
+
+  formatUsageWindowValue(window) {
+    if (!window) {
+      return this.t('common.unknown');
+    }
+    const usedPercent = Number(window.usedPercent ?? 0);
+    const remaining = Math.max(0, Math.min(100, Math.round(100 - usedPercent)));
+    const value = `${remaining}%`;
+    const reset = this.formatUsageResetPhrase(window.resetAfterSeconds ?? 0);
+    if (!reset) {
+      return value;
+    }
+    return this.t('coordinator.usage.remainingWithReset', { value, reset });
+  }
+
+  formatUsageResetPhrase(seconds) {
+    const numericSeconds = Math.max(0, Math.floor(Number(seconds ?? 0)));
+    if (numericSeconds <= 0) {
+      return this.t('coordinator.usage.resetSoon');
+    }
+    return this.t('coordinator.usage.resetIn', {
+      value: this.formatUsageDuration(numericSeconds),
+    });
+  }
+
+  formatUsageDuration(seconds) {
+    const locale = this.currentI18n.locale;
+    const totalSeconds = Math.max(0, Math.floor(Number(seconds ?? 0)));
+    const days = Math.floor(totalSeconds / 86_400);
+    const hours = Math.floor((totalSeconds % 86_400) / 3_600);
+    const minutes = Math.floor((totalSeconds % 3_600) / 60);
+    const parts = [];
+    if (days > 0) {
+      parts.push(locale === 'zh-CN' ? `${days} 天` : `${days}d`);
+    }
+    if (hours > 0) {
+      parts.push(locale === 'zh-CN' ? `${hours} 小时` : `${hours}h`);
+    }
+    if (minutes > 0 && parts.length < 2) {
+      parts.push(locale === 'zh-CN' ? `${minutes} 分钟` : `${minutes}m`);
+    }
+    if (parts.length === 0) {
+      parts.push(locale === 'zh-CN' ? '1 分钟' : '1m');
+    }
+    return parts.slice(0, 2).join(' ');
+  }
+
   buildActiveTurnBlockedResponse(event, activeTurn) {
+    if (hasPendingApproval(activeTurn)) {
+      return messageResponse([
+        this.t('coordinator.allow.pending'),
+        this.t('coordinator.allow.pendingHint'),
+      ], buildActiveTurnMeta(activeTurn) ?? this.buildScopedSessionMeta(event));
+    }
     return messageResponse([
       this.t('coordinator.blocked.active'),
       activeTurn.interruptRequested
@@ -1029,10 +1708,18 @@ export class BridgeCoordinator {
     ], buildActiveTurnMeta(activeTurn) ?? this.buildScopedSessionMeta(event));
   }
 
-  rejectIfActiveTurnForCommand(event, commandName = 'generic') {
-    const activeTurn = this.activeTurns?.resolveScopeTurn(toScopeRef(event)) ?? null;
+  async rejectIfActiveTurnForCommand(event, commandName = 'generic') {
+    const activeTurn = await this.reconcileActiveTurn(toScopeRef(event));
     if (!activeTurn) {
       return null;
+    }
+    if (hasPendingApproval(activeTurn)) {
+      return messageResponse([
+        this.t('coordinator.allow.pendingForAction', {
+          action: renderCommandBlockedMessage(commandName, activeTurn.interruptRequested, this.currentI18n),
+        }),
+        this.t('coordinator.allow.pendingHint'),
+      ], buildActiveTurnMeta(activeTurn) ?? this.buildScopedSessionMeta(event));
     }
     return messageResponse([
       renderCommandBlockedMessage(commandName, activeTurn.interruptRequested, this.currentI18n),
@@ -1147,23 +1834,46 @@ export class BridgeCoordinator {
   }
 
   async startTurnOnSession(session, event, options: StartTurnOptions = {}) {
+    const scopeRef = toScopeRef(event);
     const providerProfile = this.requireProviderProfile(session.providerProfileId);
     const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
     const sessionSettings = this.bridgeSessions.getSessionSettings(session.id);
+    const turnArtifactContext = createTurnArtifactContext({
+      bridgeSessionId: session.id,
+      cwd: normalizeCwd(session.cwd) ?? this.resolveEventCwd(event),
+      text: event.text,
+    });
+    const pendingArtifactDelivery = createPendingTurnArtifactDeliveryState(turnArtifactContext);
+    ensureTurnArtifactDirectories(turnArtifactContext);
+    const turnEvent = withTurnArtifactContext(event, turnArtifactContext);
+    this.activeTurns?.updateScopeTurn(scopeRef, {
+      bridgeSessionId: session.id,
+      providerProfileId: session.providerProfileId,
+      threadId: session.codexThreadId,
+      artifactDelivery: pendingArtifactDelivery,
+    });
     const result = await providerPlugin.startTurn({
       providerProfile,
       bridgeSession: session,
       sessionSettings,
-      event,
+      event: turnEvent,
       inputText: event.text,
       onProgress: options.onProgress ?? null,
       onTurnStarted: async (meta: { turnId?: string | null; threadId?: string | null } = {}) => {
-        const scopeRef = toScopeRef(event);
+        if (turnArtifactContext) {
+          turnArtifactContext.turnId = meta.turnId ?? null;
+        }
         const active = this.activeTurns?.updateScopeTurn(scopeRef, {
           bridgeSessionId: session.id,
           providerProfileId: session.providerProfileId,
           threadId: meta.threadId ?? session.codexThreadId,
           turnId: meta.turnId ?? null,
+          artifactDelivery: pendingArtifactDelivery
+            ? {
+              ...pendingArtifactDelivery,
+              turnId: meta.turnId ?? null,
+            }
+            : null,
         }) ?? null;
         if (typeof options.onTurnStarted === 'function') {
           await options.onTurnStarted({
@@ -1177,18 +1887,36 @@ export class BridgeCoordinator {
           await this.dispatchInterruptForActiveTurn(active);
         }
       },
+      onApprovalRequest: async (request: ProviderApprovalRequest) => {
+        this.activeTurns?.addPendingApproval(scopeRef, request);
+        if (typeof options.onApprovalRequest === 'function') {
+          await options.onApprovalRequest(request);
+        }
+      },
+    });
+    const finalizedResult = finalizeTurnArtifacts({
+      result,
+      context: turnArtifactContext,
+    });
+    this.activeTurns?.updateScopeTurn(scopeRef, {
+      artifactDelivery: finalizedResult.artifactDelivery ?? pendingArtifactDelivery ?? null,
     });
     const nextSession = this.bridgeSessions.updateSession(session.id, {
-      codexThreadId: result.threadId ?? session.codexThreadId,
+      codexThreadId: finalizedResult.threadId ?? session.codexThreadId,
       title: this.bridgeSessions.resolveThreadDisplayTitle({
         providerProfileId: session.providerProfileId,
-        threadId: result.threadId ?? session.codexThreadId,
-        providerTitle: result.title ?? null,
+        threadId: finalizedResult.threadId ?? session.codexThreadId,
+        providerTitle: finalizedResult.title ?? null,
         fallbackTitle: session.title,
       }),
       cwd: normalizeCwd(session.cwd) ?? this.resolveEventCwd(event),
     });
-    return { result, session: nextSession };
+    this.bridgeSessions.upsertSessionSettings(session.id, {
+      metadata: {
+        lastArtifactDelivery: finalizedResult.artifactDelivery ?? null,
+      },
+    });
+    return { result: finalizedResult, session: nextSession };
   }
 
   async dispatchInterruptForActiveTurn(activeTurn) {
@@ -1284,12 +2012,14 @@ function buildActiveTurnMeta(activeTurn) {
 function renderCommandBlockedMessage(commandName, interruptRequested, i18n: Translator) {
   const action = {
     new: i18n.t('coordinator.action.new'),
+    uploads: i18n.t('coordinator.action.uploads'),
     open: i18n.t('coordinator.action.open'),
     models: i18n.t('coordinator.action.models'),
     model: i18n.t('coordinator.action.model'),
     rename: i18n.t('coordinator.action.rename'),
     provider: i18n.t('coordinator.action.provider'),
     reconnect: i18n.t('coordinator.action.reconnect'),
+    retry: i18n.t('coordinator.action.retry'),
     restart: i18n.t('coordinator.action.restart'),
     permissions: i18n.t('coordinator.action.permissions'),
   }[commandName] ?? i18n.t('coordinator.action.generic');
@@ -1299,12 +2029,40 @@ function renderCommandBlockedMessage(commandName, interruptRequested, i18n: Tran
   return i18n.t('coordinator.blocked.cannotAction', { action });
 }
 
+function hasPendingApproval(activeTurn): boolean {
+  return Array.isArray(activeTurn?.pendingApprovals) && activeTurn.pendingApprovals.length > 0;
+}
+
+function selectUsageWindows(report) {
+  for (const bucket of report?.buckets ?? []) {
+    if (!Array.isArray(bucket?.windows) || bucket.windows.length === 0) {
+      continue;
+    }
+    let primaryWindow = null;
+    let weeklyWindow = null;
+    for (const window of bucket.windows) {
+      if (!primaryWindow && Number(window?.windowSeconds ?? 0) === 18_000) {
+        primaryWindow = window;
+      }
+      if (!weeklyWindow && Number(window?.windowSeconds ?? 0) === 604_800) {
+        weeklyWindow = window;
+      }
+    }
+    primaryWindow ??= bucket.windows[0] ?? null;
+    weeklyWindow ??= bucket.windows[1] ?? null;
+    if (primaryWindow || weeklyWindow) {
+      return [primaryWindow, weeklyWindow];
+    }
+  }
+  return [null, null];
+}
+
 function normalizeCwd(value) {
   const normalized = typeof value === 'string' ? value.trim() : '';
   return normalized || null;
 }
 
-function renderPlatformStatusLines(platformId, status, i18n: Translator) {
+function renderPlatformStatusLines(platformId, status, i18n: Translator, { details = false } = {}) {
   if (!status || platformId !== 'weixin') {
     return [];
   }
@@ -1313,18 +2071,21 @@ function renderPlatformStatusLines(platformId, status, i18n: Translator) {
     : i18n.t('common.notSet');
   const sessionPaused = Boolean(status.sessionPaused);
   const lines = [
-    i18n.t('platform.weixin.status.account', { value: accountId }),
     i18n.t('platform.weixin.status.session', {
       value: sessionPaused
         ? i18n.t('platform.weixin.status.sessionPaused')
         : i18n.t('platform.weixin.status.sessionActive'),
     }),
-    i18n.t('platform.weixin.status.contextToken', {
-      value: status.hasContextToken
-        ? i18n.t('platform.weixin.status.contextTokenPresent')
-        : i18n.t('platform.weixin.status.contextTokenAbsent'),
-    }),
   ];
+  if (!details) {
+    return lines;
+  }
+  lines.unshift(i18n.t('platform.weixin.status.account', { value: accountId }));
+  lines.push(i18n.t('platform.weixin.status.contextToken', {
+    value: status.hasContextToken
+      ? i18n.t('platform.weixin.status.contextTokenPresent')
+      : i18n.t('platform.weixin.status.contextTokenAbsent'),
+  }));
   if (sessionPaused) {
     lines.push(i18n.t('platform.weixin.status.sessionRemaining', {
       minutes: Number(status.remainingPauseMinutes ?? 0),
@@ -1360,6 +2121,132 @@ function formatActiveTurnState(activeTurn, i18n: Translator) {
   return activeTurn.turnId ? i18n.t('coordinator.turnState.running') : i18n.t('coordinator.turnState.starting');
 }
 
+function resolveStoredArtifactDelivery(settings): TurnArtifactDeliveryState | null {
+  const metadata = settings?.metadata;
+  if (!metadata || typeof metadata !== 'object') {
+    return null;
+  }
+  const lastArtifactDelivery = metadata.lastArtifactDelivery;
+  return lastArtifactDelivery && typeof lastArtifactDelivery === 'object'
+    ? lastArtifactDelivery as TurnArtifactDeliveryState
+    : null;
+}
+
+function renderArtifactDeliveryNotice(artifactDelivery: TurnArtifactDeliveryState | null, i18n: Translator): string {
+  if (!artifactDelivery?.noticeCode) {
+    return '';
+  }
+  const rejectedCount = Array.isArray(artifactDelivery.rejectedArtifacts) ? artifactDelivery.rejectedArtifacts.length : 0;
+  const deliveredCount = Array.isArray(artifactDelivery.deliveredArtifacts) ? artifactDelivery.deliveredArtifacts.length : 0;
+  const sizeLimit = formatBinarySize(artifactDelivery.maxArtifactSizeBytes);
+  switch (artifactDelivery.noticeCode) {
+    case 'count_and_size_limited':
+      return i18n.t('coordinator.artifact.notice.countAndSizeLimited', {
+        delivered: deliveredCount,
+        rejected: rejectedCount,
+        size: sizeLimit,
+      });
+    case 'count_limited':
+      return i18n.t('coordinator.artifact.notice.countLimited', {
+        delivered: deliveredCount,
+        rejected: rejectedCount,
+      });
+    case 'size_limited':
+      return i18n.t('coordinator.artifact.notice.sizeLimited', {
+        rejected: rejectedCount,
+        size: sizeLimit,
+      });
+    case 'ambiguous_candidates':
+      return i18n.t('coordinator.artifact.notice.ambiguousCandidates', {
+        count: artifactDelivery.scannedCandidateCount || rejectedCount || 2,
+      });
+    case 'missing_deliverable':
+      return i18n.t('coordinator.artifact.notice.missingDeliverable', {
+        format: artifactDelivery.requestedFormat ?? i18n.t('common.notSet'),
+      });
+    default:
+      return '';
+  }
+}
+
+function renderArtifactDeliveryStatusLines(
+  artifactDelivery: TurnArtifactDeliveryState | null,
+  i18n: Translator,
+): string[] {
+  if (!artifactDelivery) {
+    return [];
+  }
+  const lines = [
+    i18n.t('coordinator.status.artifactStage', { value: formatArtifactDeliveryStage(artifactDelivery.stage, i18n) }),
+    i18n.t('coordinator.status.artifactFormat', {
+      value: artifactDelivery.requestedFormat ?? i18n.t('common.notSet'),
+    }),
+    i18n.t('coordinator.status.artifactPolicy', {
+      count: artifactDelivery.maxArtifactCount,
+      size: formatBinarySize(artifactDelivery.maxArtifactSizeBytes),
+    }),
+    i18n.t('coordinator.status.artifactCounts', {
+      selected: artifactDelivery.deliveredArtifacts.length,
+      rejected: artifactDelivery.rejectedArtifacts.length,
+      candidates: artifactDelivery.scannedCandidateCount,
+    }),
+    i18n.t('coordinator.status.artifactDir', { value: artifactDelivery.artifactDir }),
+    i18n.t('coordinator.status.artifactSpoolDir', { value: artifactDelivery.spoolDir }),
+  ];
+  const notice = renderArtifactDeliveryNotice(artifactDelivery, i18n);
+  if (notice) {
+    lines.push(i18n.t('coordinator.status.artifactNotice', { value: notice }));
+  }
+  return lines;
+}
+
+function formatArtifactDeliveryStage(stage: TurnArtifactDeliveryState['stage'], i18n: Translator): string {
+  switch (stage) {
+    case 'pending':
+      return i18n.t('coordinator.artifact.stage.pending');
+    case 'ready':
+      return i18n.t('coordinator.artifact.stage.ready');
+    case 'fallback_ready':
+      return i18n.t('coordinator.artifact.stage.fallbackReady');
+    case 'limited':
+      return i18n.t('coordinator.artifact.stage.limited');
+    case 'ambiguous':
+      return i18n.t('coordinator.artifact.stage.ambiguous');
+    case 'missing':
+      return i18n.t('coordinator.artifact.stage.missing');
+    default:
+      return i18n.t('common.unknown');
+  }
+}
+
+function formatBinarySize(value: unknown): string {
+  const bytes = Number(value ?? NaN);
+  if (!Number.isFinite(bytes) || bytes < 0) {
+    return '0 B';
+  }
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  const units = ['KiB', 'MiB', 'GiB', 'TiB'];
+  let size = bytes;
+  let unitIndex = -1;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+  const digits = size >= 10 ? 0 : 1;
+  return `${size.toFixed(digits)} ${units[Math.max(unitIndex, 0)]}`;
+}
+
+function mergeArtifactClarificationAnswer(originalText: string, format: string): string {
+  const normalizedOriginal = String(originalText ?? '').trim();
+  const normalizedFormat = String(format ?? '').trim().toUpperCase();
+  if (!normalizedOriginal) {
+    return `Export the final deliverable as ${normalizedFormat} and send it back as an attachment.`;
+  }
+  return `${normalizedOriginal}\n\nExport the final deliverable as ${normalizedFormat} and send it back as an attachment.`;
+}
+
 function messageResponse(lines, session = undefined): CoordinatorResponse {
   return {
     type: 'message',
@@ -1372,8 +2259,89 @@ function textResponse(text, session = undefined) {
   return messageResponse([text], session);
 }
 
+function turnResponse(result, i18n: Translator, session = undefined): CoordinatorResponse {
+  const messages: Array<{
+    text?: string | null;
+    artifact?: OutputArtifact | null;
+    mediaPath?: string | null;
+    caption?: string | null;
+  }> = [];
+  const outputText = String(result?.outputText ?? '');
+  const previewText = String(result?.previewText ?? '');
+  if (outputText) {
+    messages.push({ text: outputText });
+  } else if ((result?.outputState ?? 'complete') === 'partial' && previewText) {
+    messages.push({ text: previewText });
+  }
+  const artifactNotice = renderArtifactDeliveryNotice(result?.artifactDelivery ?? null, i18n);
+  if (artifactNotice) {
+    messages.push({ text: artifactNotice });
+  }
+  const artifacts = normalizeArtifactsForResponse(result);
+  for (const artifact of artifacts) {
+    const mediaPath = String(artifact?.path ?? '').trim();
+    if (!mediaPath) {
+      continue;
+    }
+    messages.push({
+      artifact,
+      mediaPath,
+      caption: typeof artifact?.caption === 'string' ? artifact.caption : null,
+    });
+  }
+  return {
+    type: 'message',
+    messages,
+    session: session ?? null,
+  };
+}
+
 function buildThreadBrowserKey(event) {
   return formatPlatformScopeKey(event.platform, event.externalScopeId);
+}
+
+function withTurnArtifactContext(event: InboundTextEvent, turnArtifactContext) {
+  if (!turnArtifactContext) {
+    return event;
+  }
+  const metadata = event?.metadata && typeof event.metadata === 'object'
+    ? event.metadata
+    : {};
+  const codexbridge = metadata?.codexbridge && typeof metadata.codexbridge === 'object'
+    ? metadata.codexbridge
+    : {};
+  return {
+    ...event,
+    metadata: {
+      ...metadata,
+      codexbridge: {
+        ...codexbridge,
+        turnArtifactContext,
+      },
+    },
+  };
+}
+
+function normalizeArtifactsForResponse(result): OutputArtifact[] {
+  const outputArtifacts = Array.isArray(result?.outputArtifacts) ? result.outputArtifacts : [];
+  if (outputArtifacts.length > 0) {
+    return outputArtifacts;
+  }
+  const outputMedia = Array.isArray(result?.outputMedia) ? result.outputMedia : [];
+  return outputMedia
+    .map((media) => {
+      const mediaPath = String(media?.path ?? '').trim();
+      if (!mediaPath) {
+        return null;
+      }
+      return {
+        kind: 'image' as const,
+        path: mediaPath,
+        caption: typeof media?.caption === 'string' ? media.caption : null,
+        source: 'provider_native' as const,
+      };
+    })
+    .filter(Boolean) as OutputArtifact[];
 }
 
 function renderThreadsPageMessage({
@@ -1386,8 +2354,11 @@ function renderThreadsPageMessage({
   hasPreviousPage,
   hasNextPage,
 }) {
+  const currentItem = currentSession && currentSession.providerProfileId === providerProfile.id
+    ? items.find((item) => item.threadId === currentSession.codexThreadId) ?? null
+    : null;
   const currentTitle = currentSession && currentSession.providerProfileId === providerProfile.id
-    ? currentSession.title ?? i18n.t('coordinator.thread.untitled')
+    ? formatCurrentBindingTitle(currentItem?.title ?? currentSession.title, currentSession.codexThreadId, i18n)
     : i18n.t('common.none');
   const lines = [
     i18n.t('coordinator.threadList.title', { providerProfileId: providerProfile.id }),
@@ -1437,6 +2408,18 @@ function buildThreadsFooter({ i18n, hasPreviousPage, hasNextPage, exampleIndex }
     commands.push('/next');
   }
   return i18n.t('coordinator.threadList.actions', { commands: commands.join('  ') });
+}
+
+function formatCurrentBindingTitle(title, threadId, i18n: Translator) {
+  const normalizedTitle = normalizeCwd(title);
+  if (normalizedTitle) {
+    return normalizedTitle;
+  }
+  const normalizedThreadId = normalizeCwd(threadId);
+  if (normalizedThreadId) {
+    return `${i18n.t('coordinator.thread.untitled')} (${normalizedThreadId})`;
+  }
+  return i18n.t('coordinator.thread.untitled');
 }
 
 function renderThreadPeek(thread, i18n: Translator) {
@@ -1508,6 +2491,25 @@ function classifyPreviewTurnStatus(status, assistantText) {
     return 'failed';
   }
   return assistantText ? 'partial' : 'missing';
+}
+
+function isProviderTurnTerminal(status) {
+  const normalized = String(status ?? '').trim().toLowerCase();
+  return [
+    'completed',
+    'complete',
+    'succeeded',
+    'success',
+    'finished',
+    'failed',
+    'error',
+    'timed_out',
+    'timeout',
+    'interrupted',
+    'cancelled',
+    'canceled',
+    'aborted',
+  ].includes(normalized);
 }
 
 function formatAssistantTurnLine(status, text, i18n: Translator) {
@@ -1664,14 +2666,35 @@ function getCommandHelpSpecs(i18n: Translator) {
     summary: i18n.t('coordinator.help.summary.status'),
     usage: [
       '/status',
+      '/status details',
       '/where',
       '/status -h',
     ],
     examples: [
       '/status',
+      '/status details',
       '/where',
     ],
-    notes: [],
+    notes: [
+      i18n.t('coordinator.help.note.status'),
+    ],
+  }),
+  usage: freezeCommandHelp({
+    name: 'usage',
+    aliases: ['us'],
+    summary: i18n.t('coordinator.help.summary.usage'),
+    usage: [
+      '/usage',
+      '/us',
+      '/usage -h',
+    ],
+    examples: [
+      '/usage',
+      '/us',
+    ],
+    notes: [
+      i18n.t('coordinator.help.note.usage'),
+    ],
   }),
   stop: freezeCommandHelp({
     name: 'stop',
@@ -1705,6 +2728,25 @@ function getCommandHelpSpecs(i18n: Translator) {
     ],
     notes: [
       i18n.t('coordinator.help.note.new'),
+    ],
+  }),
+  uploads: freezeCommandHelp({
+    name: 'uploads',
+    aliases: ['up', 'ul'],
+    summary: i18n.t('coordinator.help.summary.uploads'),
+    usage: [
+      '/uploads',
+      '/uploads status',
+      '/uploads cancel',
+      '/uploads -h',
+    ],
+    examples: [
+      '/uploads',
+      '/up status',
+      '/up cancel',
+    ],
+    notes: [
+      i18n.t('coordinator.help.note.uploads'),
     ],
   }),
   provider: freezeCommandHelp({
@@ -1893,6 +2935,44 @@ function getCommandHelpSpecs(i18n: Translator) {
       i18n.t('coordinator.help.note.permissions'),
     ],
   }),
+  allow: freezeCommandHelp({
+    name: 'allow',
+    aliases: ['al'],
+    summary: i18n.t('coordinator.help.summary.allow'),
+    usage: [
+      '/allow',
+      '/allow <1|2> [index]',
+      '/allow -h',
+    ],
+    examples: [
+      '/allow',
+      '/allow 1',
+      '/allow 2',
+      '/allow 2 2',
+      '/al 1',
+    ],
+    notes: [
+      i18n.t('coordinator.help.note.allow'),
+    ],
+  }),
+  deny: freezeCommandHelp({
+    name: 'deny',
+    aliases: ['dn'],
+    summary: i18n.t('coordinator.help.summary.deny'),
+    usage: [
+      '/deny',
+      '/deny [index]',
+      '/deny -h',
+    ],
+    examples: [
+      '/deny',
+      '/deny 2',
+      '/dn',
+    ],
+    notes: [
+      i18n.t('coordinator.help.note.deny'),
+    ],
+  }),
   reconnect: freezeCommandHelp({
     name: 'reconnect',
     aliases: ['rc'],
@@ -1906,6 +2986,23 @@ function getCommandHelpSpecs(i18n: Translator) {
     ],
     notes: [
       i18n.t('coordinator.help.note.reconnect'),
+    ],
+  }),
+  retry: freezeCommandHelp({
+    name: 'retry',
+    aliases: ['rt'],
+    summary: i18n.t('coordinator.help.summary.retry'),
+    usage: [
+      '/retry',
+      '/rt',
+      '/retry -h',
+    ],
+    examples: [
+      '/retry',
+      '/rt',
+    ],
+    notes: [
+      i18n.t('coordinator.help.note.retry'),
     ],
   }),
   restart: freezeCommandHelp({
@@ -1947,8 +3044,10 @@ function getCommandHelpSpecs(i18n: Translator) {
 const COMMAND_HELP_ORDER = Object.freeze([
   'helps',
   'status',
+  'usage',
   'stop',
   'new',
+  'uploads',
   'provider',
   'models',
   'model',
@@ -1960,7 +3059,10 @@ const COMMAND_HELP_ORDER = Object.freeze([
   'peek',
   'rename',
   'permissions',
+  'allow',
+  'deny',
   'reconnect',
+  'retry',
   'restart',
   'lang',
 ]);
@@ -1972,8 +3074,10 @@ const HIDDEN_COMMAND_ALIASES = Object.freeze({
 const COMMAND_ALIAS_DEFINITIONS = Object.freeze({
   helps: ['help', 'h'],
   status: ['where', 'st'],
+  usage: ['us'],
   stop: ['sp'],
   new: ['n'],
+  uploads: ['up', 'ul'],
   provider: ['pd'],
   models: ['ms'],
   model: ['m'],
@@ -1985,12 +3089,236 @@ const COMMAND_ALIAS_DEFINITIONS = Object.freeze({
   peek: ['pk'],
   rename: ['rn'],
   permissions: ['perm'],
+  allow: ['al'],
+  deny: ['dn'],
   reconnect: ['rc'],
+  retry: ['rt'],
   restart: ['rs'],
   lang: [],
 });
 
 const COMMAND_CANONICAL_NAME_MAP = buildCommandCanonicalNameMapFromAliases(COMMAND_ALIAS_DEFINITIONS, HIDDEN_COMMAND_ALIASES);
+
+function createUploadBatchState(now: number): UploadBatchState {
+  return {
+    active: true,
+    batchId: crypto.randomUUID(),
+    startedAt: now,
+    updatedAt: now,
+    items: [],
+  };
+}
+
+function normalizeUploadBatchState(value: unknown): UploadBatchState | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const batchId = normalizeNullableString(record.batchId);
+  const items = Array.isArray(record.items)
+    ? record.items
+      .map(normalizeUploadBatchItem)
+      .filter((item): item is UploadBatchItem => Boolean(item))
+    : [];
+  if (!batchId) {
+    return null;
+  }
+  return {
+    active: record.active !== false,
+    batchId,
+    startedAt: typeof record.startedAt === 'number' ? record.startedAt : Date.now(),
+    updatedAt: typeof record.updatedAt === 'number' ? record.updatedAt : Date.now(),
+    items,
+  };
+}
+
+function normalizeUploadBatchItem(value: unknown): UploadBatchItem | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const kind = normalizeAttachmentKind(record.kind);
+  const localPath = normalizeNullableString(record.localPath);
+  const originalPath = normalizeNullableString(record.originalPath) ?? localPath;
+  if (!kind || !localPath) {
+    return null;
+  }
+  return {
+    id: normalizeNullableString(record.id) ?? crypto.randomUUID(),
+    kind,
+    localPath,
+    originalPath: originalPath ?? localPath,
+    fileName: normalizeNullableString(record.fileName),
+    mimeType: normalizeNullableString(record.mimeType),
+    transcriptText: normalizeNullableString(record.transcriptText),
+    durationSeconds: typeof record.durationSeconds === 'number' ? record.durationSeconds : null,
+    sizeBytes: typeof record.sizeBytes === 'number' ? record.sizeBytes : null,
+    receivedAt: typeof record.receivedAt === 'number' ? record.receivedAt : Date.now(),
+  };
+}
+
+function normalizeAttachmentKind(value: unknown): UploadBatchItem['kind'] | null {
+  if (value === 'image' || value === 'voice' || value === 'file' || value === 'video') {
+    return value;
+  }
+  return null;
+}
+
+function normalizeInboundAttachments(value: unknown): InboundAttachment[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((attachment): attachment is InboundAttachment =>
+    Boolean(attachment)
+    && typeof attachment === 'object'
+    && typeof attachment.localPath === 'string'
+    && normalizeAttachmentKind((attachment as InboundAttachment).kind) !== null);
+}
+
+function cloneInboundAttachments(attachments: InboundAttachment[]): InboundAttachment[] {
+  return attachments.map((attachment) => ({
+    kind: attachment.kind,
+    localPath: attachment.localPath,
+    fileName: normalizeNullableString(attachment.fileName),
+    mimeType: normalizeNullableString(attachment.mimeType),
+    transcriptText: normalizeNullableString(attachment.transcriptText),
+    durationSeconds: typeof attachment.durationSeconds === 'number' ? attachment.durationSeconds : null,
+  }));
+}
+
+function normalizeRetryableRequestSnapshot(value: unknown): RetryableRequestSnapshot | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const text = String(record.text ?? '').trim();
+  if (!text) {
+    return null;
+  }
+  return {
+    text,
+    attachments: cloneInboundAttachments(normalizeInboundAttachments(record.attachments)),
+    cwd: normalizeCwd(record.cwd),
+    storedAt: typeof record.storedAt === 'number' ? record.storedAt : Date.now(),
+  };
+}
+
+function resolveUploadSubmissionText(event: InboundTextEvent, attachments: InboundAttachment[]): string {
+  const text = String(event.text ?? '').trim();
+  if (text) {
+    return text;
+  }
+  for (const attachment of attachments) {
+    const transcriptText = normalizeNullableString(attachment.transcriptText);
+    if (attachment.kind === 'voice' && transcriptText) {
+      return transcriptText;
+    }
+  }
+  return '';
+}
+
+function containsVoiceWithoutTranscript(attachments: InboundAttachment[]): boolean {
+  return attachments.some((attachment) => attachment.kind === 'voice' && !normalizeNullableString(attachment.transcriptText));
+}
+
+function buildUploadTurnEvent(event: InboundTextEvent, text: string, state: UploadBatchState): InboundTextEvent {
+  return {
+    ...event,
+    text,
+    attachments: state.items.map((item) => ({
+      kind: item.kind,
+      localPath: item.localPath,
+      fileName: item.fileName,
+      mimeType: item.mimeType,
+      transcriptText: item.transcriptText,
+      durationSeconds: item.durationSeconds,
+    })),
+    metadata: {
+      ...(event.metadata ?? {}),
+      uploadBatchId: state.batchId,
+      uploadCount: state.items.length,
+    },
+  };
+}
+
+function truncateInlineText(value: string, limit = 120): string {
+  const normalized = String(value ?? '').trim().replace(/\s+/gu, ' ');
+  if (normalized.length <= limit) {
+    return normalized;
+  }
+  return `${normalized.slice(0, Math.max(0, limit - 1))}…`;
+}
+
+function normalizeNullableString(value: unknown): string | null {
+  const normalized = typeof value === 'string' ? value.trim() : '';
+  return normalized || null;
+}
+
+async function stageAttachmentFile(
+  attachment: InboundAttachment,
+  batchDir: string | null,
+  index: number,
+): Promise<string | null> {
+  const originalPath = normalizeNullableString(attachment.localPath);
+  if (!originalPath) {
+    return null;
+  }
+  if (!batchDir) {
+    return null;
+  }
+  const fileName = sanitizeUploadFileName(
+    attachment.fileName
+    ?? path.basename(originalPath)
+    ?? `${attachment.kind}-${index + 1}`,
+  );
+  const targetPath = await ensureUniqueFilePath(batchDir, `${String(index + 1).padStart(2, '0')}-${fileName}`);
+  try {
+    await fs.promises.mkdir(batchDir, { recursive: true });
+    if (path.resolve(originalPath) === path.resolve(targetPath)) {
+      return targetPath;
+    }
+    await fs.promises.copyFile(originalPath, targetPath);
+    return targetPath;
+  } catch {
+    return null;
+  }
+}
+
+function sanitizeUploadFileName(value: string): string {
+  const normalized = String(value ?? '').trim();
+  const safe = normalized.replace(/[<>:"/\\|?*\u0000-\u001f]+/gu, '_');
+  return safe || 'attachment';
+}
+
+async function ensureUniqueFilePath(directory: string, baseName: string): Promise<string> {
+  const parsed = path.parse(baseName);
+  let attempt = 0;
+  while (true) {
+    const candidateName = attempt === 0
+      ? baseName
+      : `${parsed.name}-${attempt}${parsed.ext}`;
+    const candidatePath = path.join(directory, candidateName);
+    try {
+      await fs.promises.access(candidatePath, fs.constants.F_OK);
+      attempt += 1;
+    } catch {
+      return candidatePath;
+    }
+  }
+}
+
+async function readFileSize(filePath: string | null): Promise<number | null> {
+  const normalizedPath = normalizeNullableString(filePath);
+  if (!normalizedPath) {
+    return null;
+  }
+  try {
+    const stat = await fs.promises.stat(normalizedPath);
+    return stat.size;
+  } catch {
+    return null;
+  }
+}
 
 function buildCommandCanonicalNameMap(
   specs: Record<string, CommandHelpSpec>,
@@ -2216,4 +3544,139 @@ function renderPermissionsLines(settings, i18n: Translator) {
     '',
     i18n.t('coordinator.permissions.applyNextTurn'),
   ];
+}
+
+function parseAllowCommandArgs(args): { option: 1 | 2 | 3 | null; requestIndex: number } {
+  const option = normalizeAllowOption(args[0]);
+  const parsedIndex = Number.parseInt(String(args[1] ?? ''), 10);
+  return {
+    option,
+    requestIndex: Number.isFinite(parsedIndex) && parsedIndex > 0 ? parsedIndex : 1,
+  };
+}
+
+function normalizeAllowOption(value): 1 | 2 | 3 | null {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (['1', 'once', 'yes', 'y', 'approve'].includes(normalized)) {
+    return 1;
+  }
+  if (['2', 'session', 'always', 'remember', 'allow'].includes(normalized)) {
+    return 2;
+  }
+  if (['3', 'deny', 'no', 'n', 'reject'].includes(normalized)) {
+    return 3;
+  }
+  return null;
+}
+
+function renderAllowLines(requests: ProviderApprovalRequest[], i18n: Translator) {
+  const lines = [
+    i18n.t('coordinator.allow.title', { count: requests.length }),
+  ];
+  if (requests.length > 1) {
+    lines.push(i18n.t('coordinator.allow.requestIndexHint'));
+  }
+  const visibleRequests = requests.slice(0, 3);
+  for (const [index, request] of visibleRequests.entries()) {
+    if (lines.length > 1) {
+      lines.push('');
+    }
+    lines.push(...renderApprovalRequestLines(request, index + 1, i18n));
+  }
+  if (requests.length > visibleRequests.length) {
+    lines.push('');
+    lines.push(i18n.t('coordinator.allow.moreRequests', { count: requests.length - visibleRequests.length }));
+  }
+  return lines;
+}
+
+function renderApprovalRequestLines(request: ProviderApprovalRequest, index: number, i18n: Translator) {
+  const lines = [
+    i18n.t('coordinator.allow.requestHeader', {
+      index,
+      kind: formatApprovalKind(request.kind, i18n),
+    }),
+  ];
+  if (request.reason) {
+    lines.push(i18n.t('coordinator.allow.reason', { value: request.reason }));
+  }
+  if (request.command) {
+    lines.push(i18n.t('coordinator.allow.command', { value: request.command }));
+  }
+  if (request.cwd) {
+    lines.push(i18n.t('coordinator.allow.cwd', { value: request.cwd }));
+  }
+  if (request.fileChanges?.length) {
+    lines.push(i18n.t('coordinator.allow.files', { value: request.fileChanges.join(', ') }));
+  }
+  if (request.grantRoot) {
+    lines.push(i18n.t('coordinator.allow.grantRoot', { value: request.grantRoot }));
+  }
+  if (request.networkPermission != null) {
+    lines.push(i18n.t('coordinator.allow.network', {
+      value: request.networkPermission ? i18n.t('common.enabled') : i18n.t('common.disabled'),
+    }));
+  }
+  if (request.fileReadPermissions?.length) {
+    lines.push(i18n.t('coordinator.allow.fileRead', { value: request.fileReadPermissions.join(', ') }));
+  }
+  if (request.fileWritePermissions?.length) {
+    lines.push(i18n.t('coordinator.allow.fileWrite', { value: request.fileWritePermissions.join(', ') }));
+  }
+  lines.push(i18n.t('coordinator.allow.options'));
+  lines.push(i18n.t('coordinator.allow.option1'));
+  lines.push(supportsSessionWideApproval(request)
+    ? i18n.t('coordinator.allow.option2')
+    : i18n.t('coordinator.allow.option2Unavailable'));
+  lines.push(i18n.t('coordinator.allow.option3'));
+  lines.push(i18n.t('coordinator.allow.help'));
+  return lines;
+}
+
+function renderAllowAcknowledgementLines(
+  request: ProviderApprovalRequest,
+  option: 1 | 2 | 3,
+  i18n: Translator,
+  activeTurnContinues = true,
+) {
+  const followUpLine = activeTurnContinues
+    ? (option === 3 ? i18n.t('coordinator.allow.waitModel') : i18n.t('coordinator.allow.continue'))
+    : i18n.t('coordinator.allow.noLongerActive');
+  if (option === 1) {
+    return [
+      i18n.t('coordinator.allow.approvedOnce', { kind: formatApprovalKind(request.kind, i18n) }),
+      followUpLine,
+    ];
+  }
+  if (option === 2) {
+    return [
+      i18n.t('coordinator.allow.approvedSession', { kind: formatApprovalKind(request.kind, i18n) }),
+      followUpLine,
+    ];
+  }
+  return [
+    i18n.t('coordinator.allow.denied', { kind: formatApprovalKind(request.kind, i18n) }),
+    followUpLine,
+  ];
+}
+
+function supportsSessionWideApproval(request: ProviderApprovalRequest): boolean {
+  if (request.kind === 'permissions' || request.kind === 'file_change') {
+    return true;
+  }
+  return Boolean(
+    request.availableDecisionKeys?.includes('acceptForSession')
+    || request.availableDecisionKeys?.includes('acceptWithExecpolicyAmendment')
+    || (request.execPolicyAmendment && request.execPolicyAmendment.length > 0),
+  );
+}
+
+function formatApprovalKind(kind: ProviderApprovalRequest['kind'], i18n: Translator) {
+  if (kind === 'permissions') {
+    return i18n.t('coordinator.allow.kind.permissions');
+  }
+  if (kind === 'file_change') {
+    return i18n.t('coordinator.allow.kind.fileChange');
+  }
+  return i18n.t('coordinator.allow.kind.command');
 }

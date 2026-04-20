@@ -5,6 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
 import type {
+  ProviderApprovalRequest,
+  ProviderUsageReport,
   ProviderThreadListResult,
   ProviderThreadStartResult,
   ProviderThreadSummary,
@@ -35,9 +37,41 @@ interface CodexModelInfo {
   defaultReasoningEffort: string | null;
 }
 
+interface CodexAppRateLimitsResponse {
+  rateLimits?: CodexAppRateLimitSnapshot | null;
+  rateLimitsByLimitId?: Record<string, CodexAppRateLimitSnapshot> | null;
+}
+
+interface CodexAppRateLimitSnapshot {
+  limitId?: string | null;
+  limitName?: string | null;
+  planType?: string | null;
+  primary?: CodexAppRateLimitWindow | null;
+  secondary?: CodexAppRateLimitWindow | null;
+  credits?: CodexAppCreditsSnapshot | null;
+}
+
+interface CodexAppRateLimitWindow {
+  usedPercent?: number | null;
+  windowDurationMins?: number | null;
+  resetsAt?: number | null;
+}
+
+interface CodexAppCreditsSnapshot {
+  balance?: string | null;
+  hasCredits?: boolean | null;
+  unlimited?: boolean | null;
+}
+
 interface PendingRequest {
   resolve: (value: any) => void;
   reject: (error: Error) => void;
+}
+
+interface PendingApproval {
+  rpcId: string;
+  transportKind: 'v2_command' | 'v2_file_change' | 'v2_permissions' | 'legacy_exec' | 'legacy_apply_patch';
+  request: ProviderApprovalRequest;
 }
 
 interface ProgressState {
@@ -53,6 +87,7 @@ interface CodexAppClientOptions {
   autolaunch?: boolean;
   modelCatalog?: CodexModelInfo[];
   modelCatalogMode?: 'merge' | 'overlay-only';
+  enabledFeatures?: string[];
   clientInfo?: CodexClientInfo;
   spawnImpl?: typeof spawn;
   webSocketFactory?: (url: string) => WebSocket;
@@ -86,6 +121,8 @@ export class CodexAppClient extends EventEmitter {
 
   modelCatalogMode: 'merge' | 'overlay-only';
 
+  enabledFeatures: string[];
+
   clientInfo: CodexClientInfo;
 
   spawnImpl: typeof spawn;
@@ -106,6 +143,8 @@ export class CodexAppClient extends EventEmitter {
 
   pending: Map<string, PendingRequest>;
 
+  pendingApprovals: Map<string, PendingApproval>;
+
   requestId: number;
 
   port: number | null;
@@ -120,6 +159,7 @@ export class CodexAppClient extends EventEmitter {
     autolaunch = false,
     modelCatalog = [],
     modelCatalogMode = 'merge',
+    enabledFeatures = ['image_generation'],
     clientInfo = {
       name: 'codexbridge',
       title: 'CodexBridge',
@@ -138,6 +178,7 @@ export class CodexAppClient extends EventEmitter {
     this.autolaunch = autolaunch;
     this.modelCatalog = modelCatalog;
     this.modelCatalogMode = modelCatalogMode;
+    this.enabledFeatures = normalizeFeatureList(enabledFeatures);
     this.clientInfo = clientInfo;
     this.spawnImpl = spawnImpl;
     this.webSocketFactory = webSocketFactory;
@@ -149,6 +190,7 @@ export class CodexAppClient extends EventEmitter {
     this.child = null;
     this.socket = null;
     this.pending = new Map();
+    this.pendingApprovals = new Map();
     this.requestId = 0;
     this.port = null;
     this.connected = false;
@@ -191,6 +233,7 @@ export class CodexAppClient extends EventEmitter {
       });
     }
     this.child = null;
+    this.pendingApprovals.clear();
     this.rejectPending(new Error('Codex app client stopped'));
   }
 
@@ -291,6 +334,7 @@ export class CodexAppClient extends EventEmitter {
     developerInstructions = '',
     onProgress = null,
     onTurnStarted = null,
+    onApprovalRequest = null,
     timeoutMs = 15 * 60 * 1000,
   }: {
     threadId: string;
@@ -306,6 +350,7 @@ export class CodexAppClient extends EventEmitter {
     developerInstructions?: string;
     onProgress?: ((progress: ProviderTurnProgress) => Promise<void> | void) | null;
     onTurnStarted?: ((meta: Record<string, unknown>) => Promise<void> | void) | null;
+    onApprovalRequest?: ((request: ProviderApprovalRequest) => Promise<void> | void) | null;
     timeoutMs?: number;
   }): Promise<ProviderTurnResult> {
     const result: any = await this.request('turn/start', {
@@ -347,12 +392,53 @@ export class CodexAppClient extends EventEmitter {
       threadId,
       turnId: String(turn.id),
       onProgress,
+      onApprovalRequest,
       timeoutMs,
     });
   }
 
   async interruptTurn({ threadId, turnId }: { threadId: string; turnId: string }): Promise<void> {
     await this.request('turn/interrupt', { threadId, turnId }, { timeoutMs: 15_000 });
+  }
+
+  getPendingApprovals({
+    threadId = null,
+    turnId = null,
+  }: {
+    threadId?: string | null;
+    turnId?: string | null;
+  } = {}): ProviderApprovalRequest[] {
+    return [...this.pendingApprovals.values()]
+      .map((entry) => entry.request)
+      .filter((entry) => {
+        if (threadId && entry.threadId !== threadId) {
+          return false;
+        }
+        if (turnId && entry.turnId !== turnId) {
+          return false;
+        }
+        return true;
+      });
+  }
+
+  async respondToApproval({
+    requestId,
+    option,
+  }: {
+    requestId: string;
+    option: 1 | 2 | 3;
+  }): Promise<void> {
+    const pending = this.pendingApprovals.get(String(requestId)) ?? null;
+    if (!pending) {
+      throw new Error(`Unknown approval request: ${requestId}`);
+    }
+    const result = buildApprovalResponseResult(pending, option);
+    this.pendingApprovals.delete(String(requestId));
+    this.send({
+      jsonrpc: '2.0',
+      id: pending.rpcId,
+      result,
+    });
   }
 
   async listModels(): Promise<CodexModelInfo[]> {
@@ -374,6 +460,11 @@ export class CodexAppClient extends EventEmitter {
     return mergeModelCatalog(models, this.modelCatalog);
   }
 
+  async readUsage(): Promise<ProviderUsageReport | null> {
+    const result = await this.request('account/rateLimits/read', {}, { timeoutMs: 15_000 });
+    return mapAppServerRateLimits(result);
+  }
+
   async startServer(): Promise<void> {
     if (this.autolaunch && this.launchCommand?.trim()) {
       const launcher = this.spawnImpl(this.launchCommand, {
@@ -384,7 +475,8 @@ export class CodexAppClient extends EventEmitter {
       launcher.unref?.();
     }
     this.port = await reservePort();
-    this.child = this.spawnImpl(this.codexCliBin, ['app-server', '--listen', `ws://127.0.0.1:${this.port}`], {
+    const featureArgs = this.enabledFeatures.flatMap((feature) => ['--enable', feature]);
+    this.child = this.spawnImpl(this.codexCliBin, ['app-server', ...featureArgs, '--listen', `ws://127.0.0.1:${this.port}`], {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     this.child.stderr?.on('data', (chunk) => {
@@ -501,8 +593,22 @@ export class CodexAppClient extends EventEmitter {
     }
 
     if ('method' in message) {
+      if ('id' in message && this.handleServerRequest(message)) {
+        return;
+      }
       this.emit('notification', message);
     }
+  }
+
+  handleServerRequest(message: any): boolean {
+    const pendingApproval = mapPendingApproval(message);
+    if (!pendingApproval) {
+      this.emit('server_request', message);
+      return false;
+    }
+    this.pendingApprovals.set(pendingApproval.rpcId, pendingApproval);
+    this.emit('approval_request', pendingApproval.request);
+    return true;
   }
 
   rejectPending(error: Error): void {
@@ -516,11 +622,13 @@ export class CodexAppClient extends EventEmitter {
     threadId,
     turnId,
     onProgress,
+    onApprovalRequest,
     timeoutMs,
   }: {
     threadId: string;
     turnId: string;
     onProgress?: ((progress: ProviderTurnProgress) => Promise<void> | void) | null;
+    onApprovalRequest?: ((request: ProviderApprovalRequest) => Promise<void> | void) | null;
     timeoutMs: number;
   }): Promise<ProviderTurnResult> {
     const deadline = this.turnPollNow() + timeoutMs;
@@ -557,7 +665,19 @@ export class CodexAppClient extends EventEmitter {
         });
       }
     };
+    const onApprovalEvent = (request: ProviderApprovalRequest) => {
+      if (request.threadId !== threadId) {
+        return;
+      }
+      if (request.turnId && request.turnId !== turnId) {
+        return;
+      }
+      if (typeof onApprovalRequest === 'function') {
+        void onApprovalRequest(request);
+      }
+    };
     this.on('notification', onNotification);
+    this.on('approval_request', onApprovalEvent);
     try {
       while (this.turnPollNow() < deadline) {
         let thread = null;
@@ -578,18 +698,37 @@ export class CodexAppClient extends EventEmitter {
         if (turn && isTurnTerminal(turn.status)) {
           const outputText = extractTurnOutputText(turn);
           if (outputText) {
+            const outputArtifacts = extractTurnOutputArtifacts(turn);
             return {
               turnId,
               threadId,
               title: thread?.title ?? null,
               outputText,
+              outputArtifacts,
+              outputMedia: normalizeLegacyImageMedia(outputArtifacts),
               outputState: 'complete',
               previewText: progressState.finalAnswerText,
               finalSource: 'thread_items',
               status: turn.status,
             };
           }
+          const outputArtifacts = extractTurnOutputArtifacts(turn);
+          if (outputArtifacts.length > 0) {
+            return {
+              turnId,
+              threadId,
+              title: thread?.title ?? null,
+              outputText: '',
+              outputArtifacts,
+              outputMedia: normalizeLegacyImageMedia(outputArtifacts),
+              outputState: 'complete',
+              previewText: progressState.finalAnswerText,
+              finalSource: 'thread_items_media',
+              status: turn.status,
+            };
+          }
           const sessionState = inspectTurnCompletionFromSessionPath(thread?.path ?? null, turnId);
+          const hasAssistantVisibleItems = turn.items.some((item) => isAssistantVisibleItem(item));
           const completionState = classifyTurnCompletionState(turn);
           if (completionState === 'interrupted') {
             return {
@@ -606,6 +745,39 @@ export class CodexAppClient extends EventEmitter {
           if (turn.error) {
             throw new Error(turn.error);
           }
+          if (sessionState.lastAgentMessage && hasAssistantVisibleItems) {
+            return {
+              turnId,
+              threadId,
+              title: thread?.title ?? null,
+              outputText: sessionState.lastAgentMessage,
+              outputState: 'complete',
+              previewText: progressState.finalAnswerText,
+              finalSource: 'session_task_complete',
+              status: turn.status,
+            };
+          }
+          const sessionTaskCompleteNeedsMaterializationWait = sessionState.hasTaskComplete && !hasAssistantVisibleItems;
+          if (shouldWaitForSettledOutputAfterTerminalTurn(turn, progressState) || sessionTaskCompleteNeedsMaterializationWait) {
+            const snapshotKey = buildTurnSnapshotKey(turn);
+            if (snapshotKey === lastTurnSnapshotKey) {
+              stableTerminalReadCount += 1;
+            } else {
+              lastTurnSnapshotKey = snapshotKey;
+              stableTerminalReadCount = 1;
+            }
+            firstTerminalWithoutOutputAt ??= this.turnPollNow();
+            if (
+              (
+                this.turnPollNow() - firstTerminalWithoutOutputAt < terminalSettleMs
+                || stableTerminalReadCount < 3
+              )
+              && this.turnPollNow() + 1000 < deadline
+            ) {
+              await this.turnPollSleep(1000);
+              continue;
+            }
+          }
           if (sessionState.lastAgentMessage) {
             return {
               turnId,
@@ -619,56 +791,327 @@ export class CodexAppClient extends EventEmitter {
             };
           }
           if (sessionState.hasTaskComplete) {
+            const previewText = resolveTurnPreviewText(turn, progressState);
             return {
               turnId,
               threadId,
               title: thread?.title ?? null,
               outputText: '',
-              outputState: progressState.finalAnswerText ? 'partial' : 'missing',
-              previewText: progressState.finalAnswerText,
-              finalSource: progressState.finalAnswerText ? 'progress_only' : 'session_task_complete_empty',
+              outputState: previewText ? 'partial' : 'missing',
+              previewText,
+              finalSource: progressState.finalAnswerText
+                ? 'progress_only'
+                : progressState.commentaryText
+                  ? 'commentary_only'
+                  : 'session_task_complete_empty',
               status: turn.status,
             };
           }
-          if (shouldWaitForSettledOutputAfterTerminalTurn(turn, progressState)) {
-            const snapshotKey = buildTurnSnapshotKey(turn);
-            if (snapshotKey === lastTurnSnapshotKey) {
-              stableTerminalReadCount += 1;
-            } else {
-              lastTurnSnapshotKey = snapshotKey;
-              stableTerminalReadCount = 1;
-            }
-            firstTerminalWithoutOutputAt ??= this.turnPollNow();
-            if (
-              this.turnPollNow() - firstTerminalWithoutOutputAt < terminalSettleMs
-              || stableTerminalReadCount < 3
-            ) {
+          if (hasUnsettledAssistantActivity(turn, progressState)) {
+            if (this.turnPollNow() + 1000 < deadline) {
               await this.turnPollSleep(1000);
               continue;
             }
+            const previewText = resolveTurnPreviewText(turn, progressState);
+            if (previewText) {
+              return {
+                turnId,
+                threadId,
+                title: thread?.title ?? null,
+                outputText: '',
+                outputState: 'partial',
+                previewText,
+                finalSource: progressState.finalAnswerText ? 'progress_only' : 'commentary_only',
+                status: turn.status,
+              };
+            }
+            throw new Error(`Timed out waiting for Codex turn ${turnId}`);
           }
-          if (hasUnsettledAssistantActivity(turn, progressState) && this.turnPollNow() + 1000 < deadline) {
-            await this.turnPollSleep(1000);
-            continue;
-          }
+          const previewText = resolveTurnPreviewText(turn, progressState);
           return {
             turnId,
             threadId,
             title: thread?.title ?? null,
             outputText: '',
-            outputState: progressState.finalAnswerText ? 'partial' : 'missing',
-            previewText: progressState.finalAnswerText,
-            finalSource: progressState.finalAnswerText ? 'progress_only' : 'none',
+            outputState: previewText ? 'partial' : 'missing',
+            previewText,
+            finalSource: progressState.finalAnswerText
+              ? 'progress_only'
+              : progressState.commentaryText
+                ? 'commentary_only'
+                : 'none',
             status: turn.status,
           };
         }
         await this.turnPollSleep(1000);
       }
+      const previewText = progressState.finalAnswerText || progressState.commentaryText;
+      if (previewText) {
+        return {
+          turnId,
+          threadId,
+          title: null,
+          outputText: '',
+          outputState: 'partial',
+          previewText,
+          finalSource: progressState.finalAnswerText ? 'progress_only' : 'commentary_only',
+          status: null,
+        };
+      }
       throw new Error(`Timed out waiting for Codex turn ${turnId}`);
     } finally {
       this.off('notification', onNotification);
+      this.off('approval_request', onApprovalEvent);
     }
   }
+}
+
+function mapPendingApproval(message: any): PendingApproval | null {
+  const rpcId = String(message?.id ?? '').trim();
+  const method = String(message?.method ?? '').trim();
+  if (!rpcId || !method) {
+    return null;
+  }
+  switch (method) {
+    case 'item/commandExecution/requestApproval':
+      return {
+        rpcId,
+        transportKind: 'v2_command',
+        request: mapCommandExecutionApprovalRequest(rpcId, message.params),
+      };
+    case 'item/fileChange/requestApproval':
+      return {
+        rpcId,
+        transportKind: 'v2_file_change',
+        request: mapFileChangeApprovalRequest(rpcId, message.params),
+      };
+    case 'item/permissions/requestApproval':
+      return {
+        rpcId,
+        transportKind: 'v2_permissions',
+        request: mapPermissionsApprovalRequest(rpcId, message.params),
+      };
+    case 'execCommandApproval':
+      return {
+        rpcId,
+        transportKind: 'legacy_exec',
+        request: mapLegacyExecApprovalRequest(rpcId, message.params),
+      };
+    case 'applyPatchApproval':
+      return {
+        rpcId,
+        transportKind: 'legacy_apply_patch',
+        request: mapLegacyApplyPatchApprovalRequest(rpcId, message.params),
+      };
+    default:
+      return null;
+  }
+}
+
+function mapCommandExecutionApprovalRequest(requestId: string, params: any): ProviderApprovalRequest {
+  return {
+    requestId,
+    kind: 'command',
+    threadId: String(params?.threadId ?? ''),
+    turnId: normalizeNullableString(params?.turnId),
+    itemId: normalizeNullableString(params?.itemId),
+    reason: normalizeNullableString(params?.reason),
+    command: normalizeNullableString(params?.command),
+    cwd: normalizeNullableString(params?.cwd),
+    availableDecisionKeys: Array.isArray(params?.availableDecisions)
+      ? params.availableDecisions.map(normalizeApprovalDecisionKey).filter(Boolean)
+      : [],
+    execPolicyAmendment: Array.isArray(params?.proposedExecpolicyAmendment)
+      ? params.proposedExecpolicyAmendment
+        .map((entry: unknown) => String(entry ?? '').trim())
+        .filter(Boolean)
+      : null,
+    networkPermission: normalizeBoolean(params?.additionalPermissions?.network?.enabled),
+    fileReadPermissions: normalizeStringList(params?.additionalPermissions?.fileSystem?.read),
+    fileWritePermissions: normalizeStringList(params?.additionalPermissions?.fileSystem?.write),
+  };
+}
+
+function mapFileChangeApprovalRequest(requestId: string, params: any): ProviderApprovalRequest {
+  return {
+    requestId,
+    kind: 'file_change',
+    threadId: String(params?.threadId ?? ''),
+    turnId: normalizeNullableString(params?.turnId),
+    itemId: normalizeNullableString(params?.itemId),
+    reason: normalizeNullableString(params?.reason),
+    grantRoot: normalizeNullableString(params?.grantRoot),
+    availableDecisionKeys: ['accept', 'acceptForSession', 'decline'],
+  };
+}
+
+function mapPermissionsApprovalRequest(requestId: string, params: any): ProviderApprovalRequest {
+  return {
+    requestId,
+    kind: 'permissions',
+    threadId: String(params?.threadId ?? ''),
+    turnId: normalizeNullableString(params?.turnId),
+    itemId: normalizeNullableString(params?.itemId),
+    reason: normalizeNullableString(params?.reason),
+    networkPermission: normalizeBoolean(params?.permissions?.network?.enabled),
+    fileReadPermissions: normalizeStringList(params?.permissions?.fileSystem?.read),
+    fileWritePermissions: normalizeStringList(params?.permissions?.fileSystem?.write),
+    availableDecisionKeys: ['accept', 'acceptForSession', 'decline'],
+  };
+}
+
+function mapLegacyExecApprovalRequest(requestId: string, params: any): ProviderApprovalRequest {
+  return {
+    requestId,
+    kind: 'command',
+    threadId: String(params?.conversationId ?? ''),
+    turnId: null,
+    itemId: normalizeNullableString(params?.approvalId) ?? normalizeNullableString(params?.callId),
+    reason: normalizeNullableString(params?.reason),
+    command: Array.isArray(params?.command)
+      ? params.command.map((entry: unknown) => String(entry ?? '').trim()).filter(Boolean).join(' ')
+      : null,
+    cwd: normalizeNullableString(params?.cwd),
+    availableDecisionKeys: ['accept', 'acceptForSession', 'decline'],
+  };
+}
+
+function mapLegacyApplyPatchApprovalRequest(requestId: string, params: any): ProviderApprovalRequest {
+  return {
+    requestId,
+    kind: 'file_change',
+    threadId: String(params?.conversationId ?? ''),
+    turnId: null,
+    itemId: normalizeNullableString(params?.callId),
+    reason: normalizeNullableString(params?.reason),
+    fileChanges: params?.fileChanges && typeof params.fileChanges === 'object'
+      ? Object.keys(params.fileChanges).filter(Boolean)
+      : [],
+    grantRoot: normalizeNullableString(params?.grantRoot),
+    availableDecisionKeys: ['accept', 'acceptForSession', 'decline'],
+  };
+}
+
+function buildApprovalResponseResult(pending: PendingApproval, option: 1 | 2 | 3): any {
+  switch (pending.transportKind) {
+    case 'v2_command':
+      return {
+        decision: buildV2CommandApprovalDecision(pending.request, option),
+      };
+    case 'v2_file_change':
+      return {
+        decision: buildV2FileChangeApprovalDecision(option),
+      };
+    case 'v2_permissions':
+      return buildV2PermissionsApprovalDecision(pending.request, option);
+    case 'legacy_exec':
+    case 'legacy_apply_patch':
+      return {
+        decision: buildLegacyReviewDecision(option),
+      };
+    default:
+      throw new Error(`Unsupported approval transport: ${pending.transportKind}`);
+  }
+}
+
+function buildV2CommandApprovalDecision(request: ProviderApprovalRequest, option: 1 | 2 | 3): any {
+  if (option === 1) {
+    return 'accept';
+  }
+  if (option === 2) {
+    if (
+      request.execPolicyAmendment
+      && request.execPolicyAmendment.length > 0
+      && request.availableDecisionKeys?.includes('acceptWithExecpolicyAmendment')
+    ) {
+      return {
+        acceptWithExecpolicyAmendment: {
+          execpolicy_amendment: request.execPolicyAmendment,
+        },
+      };
+    }
+    if (request.availableDecisionKeys?.includes('acceptForSession')) {
+      return 'acceptForSession';
+    }
+    throw new Error('Current approval request does not support session-wide approval');
+  }
+  if (request.availableDecisionKeys?.includes('decline')) {
+    return 'decline';
+  }
+  if (request.availableDecisionKeys?.includes('cancel')) {
+    return 'cancel';
+  }
+  throw new Error('Current approval request does not support denial');
+}
+
+function buildV2FileChangeApprovalDecision(option: 1 | 2 | 3): string {
+  if (option === 1) {
+    return 'accept';
+  }
+  if (option === 2) {
+    return 'acceptForSession';
+  }
+  return 'decline';
+}
+
+function buildV2PermissionsApprovalDecision(request: ProviderApprovalRequest, option: 1 | 2 | 3) {
+  return {
+    permissions: option === 3
+      ? {}
+      : {
+        ...(request.networkPermission != null ? {
+          network: {
+            enabled: request.networkPermission,
+          },
+        } : {}),
+        ...(request.fileReadPermissions?.length || request.fileWritePermissions?.length ? {
+          fileSystem: {
+            read: request.fileReadPermissions ?? [],
+            write: request.fileWritePermissions ?? [],
+          },
+        } : {}),
+      },
+    scope: option === 2 ? 'session' : 'turn',
+  };
+}
+
+function buildLegacyReviewDecision(option: 1 | 2 | 3): any {
+  if (option === 1) {
+    return 'approved';
+  }
+  if (option === 2) {
+    return 'approved_for_session';
+  }
+  return 'denied';
+}
+
+function normalizeApprovalDecisionKey(value: unknown): string {
+  if (typeof value === 'string') {
+    return value.trim();
+  }
+  if (!value || typeof value !== 'object') {
+    return '';
+  }
+  const entries = Object.entries(value);
+  if (entries.length !== 1) {
+    return '';
+  }
+  return String(entries[0]?.[0] ?? '').trim();
+}
+
+function normalizeNullableString(value: unknown): string | null {
+  const normalized = String(value ?? '').trim();
+  return normalized || null;
+}
+
+function normalizeStringList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.map((entry) => String(entry ?? '').trim()).filter(Boolean)
+    : [];
+}
+
+function normalizeBoolean(value: unknown): boolean | null {
+  return typeof value === 'boolean' ? value : null;
 }
 
 function serializeCollaborationMode({ collaborationMode, model, effort, developerInstructions = '' }: any) {
@@ -701,6 +1144,23 @@ export function createNoopLogger() {
     warn() {},
     error() {},
   };
+}
+
+function normalizeFeatureList(features: string[]): string[] {
+  const normalized = [];
+  const seen = new Set<string>();
+  for (const feature of features) {
+    if (typeof feature !== 'string') {
+      continue;
+    }
+    const value = feature.trim();
+    if (!value || seen.has(value)) {
+      continue;
+    }
+    seen.add(value);
+    normalized.push(value);
+  }
+  return normalized;
 }
 
 function mapThreadSummary(raw) {
@@ -748,6 +1208,8 @@ function mapTurnItem(raw) {
     role: typeof raw?.role === 'string' ? raw.role : null,
     phase: typeof raw?.phase === 'string' ? raw.phase : null,
     text: extractStructuredText(raw),
+    savedPath: extractStructuredString(raw?.savedPath),
+    result: extractStructuredString(raw?.result),
   };
 }
 
@@ -764,6 +1226,111 @@ function mapModel(raw) {
         .filter((value) => typeof value === 'string')
       : [],
     defaultReasoningEffort: typeof raw.defaultReasoningEffort === 'string' ? raw.defaultReasoningEffort : null,
+  };
+}
+
+function mapAppServerRateLimits(payload: CodexAppRateLimitsResponse | null | undefined): ProviderUsageReport | null {
+  if (!payload || typeof payload !== 'object') {
+    return null;
+  }
+  const report: ProviderUsageReport = {
+    provider: 'codex',
+    accountId: null,
+    userId: null,
+    email: null,
+    plan: null,
+    buckets: [],
+    credits: null,
+  };
+  const snapshots: CodexAppRateLimitSnapshot[] = [];
+  if (payload.rateLimitsByLimitId && typeof payload.rateLimitsByLimitId === 'object') {
+    const keys = Object.keys(payload.rateLimitsByLimitId).sort();
+    for (const key of keys) {
+      const snapshot = payload.rateLimitsByLimitId[key];
+      if (snapshot && typeof snapshot === 'object') {
+        snapshots.push(snapshot);
+      }
+    }
+  } else if (payload.rateLimits && typeof payload.rateLimits === 'object') {
+    if (payload.rateLimits.limitId || payload.rateLimits.primary || payload.rateLimits.secondary || payload.rateLimits.credits) {
+      snapshots.push(payload.rateLimits);
+    }
+  }
+
+  for (const snapshot of snapshots) {
+    if (!report.plan && typeof snapshot.planType === 'string' && snapshot.planType.trim()) {
+      report.plan = snapshot.planType.trim();
+    }
+    if (!report.credits && snapshot.credits && typeof snapshot.credits === 'object') {
+      report.credits = {
+        hasCredits: Boolean(snapshot.credits.hasCredits),
+        unlimited: Boolean(snapshot.credits.unlimited),
+        balance: typeof snapshot.credits.balance === 'string' && snapshot.credits.balance.trim()
+          ? snapshot.credits.balance.trim()
+          : null,
+      };
+    }
+    const windows = appServerUsageWindows(snapshot);
+    if (!windows.length) {
+      continue;
+    }
+    const limitReached = windows.some((window) => window.usedPercent >= 100);
+    report.buckets.push({
+      name: appServerBucketName(snapshot),
+      allowed: !limitReached,
+      limitReached,
+      windows,
+    });
+  }
+
+  return report;
+}
+
+function appServerBucketName(snapshot: CodexAppRateLimitSnapshot): string {
+  if (typeof snapshot.limitName === 'string' && snapshot.limitName.trim()) {
+    return snapshot.limitName.trim();
+  }
+  if (typeof snapshot.limitId === 'string' && snapshot.limitId.trim()) {
+    return snapshot.limitId.trim();
+  }
+  return 'Rate limit';
+}
+
+function appServerUsageWindows(snapshot: CodexAppRateLimitSnapshot) {
+  const windows = [] as Array<{
+    name: string;
+    usedPercent: number;
+    windowSeconds: number;
+    resetAfterSeconds: number;
+    resetAtUnix: number;
+  }>;
+  if (snapshot.primary) {
+    windows.push(appServerUsageWindow('Primary', snapshot.primary));
+  }
+  if (snapshot.secondary) {
+    windows.push(appServerUsageWindow('Secondary', snapshot.secondary));
+  }
+  return windows;
+}
+
+function appServerUsageWindow(name: string, window: CodexAppRateLimitWindow) {
+  const rawUsedPercent = Number(window?.usedPercent ?? 0);
+  const usedPercent = Number.isFinite(rawUsedPercent)
+    ? Math.max(0, Math.min(100, Math.round(rawUsedPercent)))
+    : 0;
+  const rawWindowMinutes = Number(window?.windowDurationMins ?? 0);
+  const windowSeconds = Number.isFinite(rawWindowMinutes)
+    ? Math.max(0, Math.round(rawWindowMinutes * 60))
+    : 0;
+  const resetAtUnix = Math.max(0, Math.floor(Number(window?.resetsAt ?? 0)));
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const resetAfterSeconds = resetAtUnix > 0 ? Math.max(0, resetAtUnix - nowSeconds) : 0;
+  return {
+    name,
+    usedPercent,
+    windowSeconds,
+    resetAfterSeconds,
+    resetAtUnix,
   };
 }
 
@@ -850,6 +1417,156 @@ function extractTurnOutputText(turn) {
     .trim();
 }
 
+function extractTurnCommentaryText(turn) {
+  return turn.items
+    .filter((item) =>
+      isAssistantVisibleItem(item)
+      && classifyAgentOutput(extractAgentPhase(item), true) !== 'final_answer')
+    .map((item) => item.text)
+    .filter(Boolean)
+    .join('\n\n')
+    .trim();
+}
+
+function resolveTurnPreviewText(turn, progressState: Partial<ProgressState> = {}) {
+  return progressState.finalAnswerText
+    || progressState.commentaryText
+    || extractTurnCommentaryText(turn);
+}
+
+function extractTurnOutputArtifacts(turn) {
+  const seen = new Set<string>();
+  return turn.items
+    .flatMap((item) => extractOutputArtifactFromItem(item))
+    .filter((item) => {
+      const key = `${item.kind}:${item.path}`;
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    });
+}
+
+function normalizeLegacyImageMedia(artifacts) {
+  return artifacts.filter((artifact) => artifact?.kind === 'image');
+}
+
+function extractOutputArtifactFromItem(item) {
+  const savedPath = typeof item?.savedPath === 'string' ? item.savedPath.trim() : '';
+  if (savedPath && fs.existsSync(savedPath)) {
+    return [buildArtifactFromFilePath(savedPath)];
+  }
+  const result = typeof item?.result === 'string' ? item.result.trim() : '';
+  if (result && isLocalFilePath(result) && fs.existsSync(result)) {
+    return [buildArtifactFromFilePath(result)];
+  }
+  if (isRemoteImageUrl(result)) {
+    return [{
+      kind: 'image' as const,
+      path: result,
+      displayName: path.basename(new URL(result).pathname) || null,
+      mimeType: inferMimeTypeFromPath(result),
+      sizeBytes: null,
+      caption: null,
+      source: 'provider_native' as const,
+      turnId: null,
+    }];
+  }
+  if (String(item?.type ?? '') === 'imageGeneration') {
+    const inlineImage = decodeInlineImagePayload(result);
+    if (inlineImage) {
+      const outputPath = materializeInlineImage(savedPath, inlineImage);
+      if (outputPath) {
+        return [buildArtifactFromFilePath(outputPath)];
+      }
+    }
+  }
+  return [];
+}
+
+function buildArtifactFromFilePath(filePath) {
+  const normalizedPath = String(filePath ?? '').trim();
+  const kind = inferArtifactKindFromPath(normalizedPath);
+  let sizeBytes = null;
+  try {
+    sizeBytes = fs.statSync(normalizedPath).size;
+  } catch {
+    sizeBytes = null;
+  }
+  return {
+    kind,
+    path: normalizedPath,
+    displayName: path.basename(normalizedPath) || null,
+    mimeType: inferMimeTypeFromPath(normalizedPath),
+    sizeBytes,
+    caption: null,
+    source: 'provider_native' as const,
+    turnId: null,
+  };
+}
+
+function inferArtifactKindFromPath(filePath) {
+  const extension = path.extname(String(filePath ?? '')).toLowerCase();
+  if (['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'].includes(extension)) {
+    return 'image';
+  }
+  if (['.mp4', '.mov', '.mkv', '.webm'].includes(extension)) {
+    return 'video';
+  }
+  if (['.mp3', '.wav', '.ogg', '.m4a', '.flac', '.amr'].includes(extension)) {
+    return 'audio';
+  }
+  return 'file';
+}
+
+function inferMimeTypeFromPath(filePath) {
+  const extension = path.extname(String(filePath ?? '')).toLowerCase();
+  return ({
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif',
+    '.webp': 'image/webp',
+    '.bmp': 'image/bmp',
+    '.pdf': 'application/pdf',
+    '.doc': 'application/msword',
+    '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    '.xls': 'application/vnd.ms-excel',
+    '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    '.csv': 'text/csv',
+    '.txt': 'text/plain',
+    '.md': 'text/markdown',
+    '.json': 'application/json',
+    '.html': 'text/html',
+    '.zip': 'application/zip',
+    '.tar': 'application/x-tar',
+    '.gz': 'application/gzip',
+    '.tgz': 'application/gzip',
+    '.mp4': 'video/mp4',
+    '.webm': 'video/webm',
+    '.mov': 'video/quicktime',
+    '.mp3': 'audio/mpeg',
+    '.wav': 'audio/wav',
+    '.ogg': 'audio/ogg',
+    '.m4a': 'audio/mp4',
+  })[extension] ?? null;
+}
+
+function isLocalFilePath(value) {
+  const normalized = String(value ?? '').trim();
+  if (!normalized) {
+    return false;
+  }
+  if (/^(?:https?:)?\/\//iu.test(normalized)) {
+    return false;
+  }
+  if (/^data:/iu.test(normalized)) {
+    return false;
+  }
+  return path.isAbsolute(normalized);
+}
+
 function extractAllAssistantVisibleText(turn) {
   return turn.items
     .filter((item) => isAssistantVisibleItem(item))
@@ -857,6 +1574,55 @@ function extractAllAssistantVisibleText(turn) {
     .filter(Boolean)
     .join('\n\n')
     .trim();
+}
+
+function isRemoteImageUrl(value) {
+  return /^https?:\/\/\S+/iu.test(String(value ?? ''));
+}
+
+function decodeInlineImagePayload(value) {
+  const raw = String(value ?? '').trim();
+  if (!raw) {
+    return null;
+  }
+  const dataUrlMatch = raw.match(/^data:(image\/[a-z0-9.+-]+);base64,([A-Za-z0-9+/=\r\n]+)$/iu);
+  const base64 = dataUrlMatch?.[2] ?? (looksLikeBase64Image(raw) ? raw : '');
+  if (!base64) {
+    return null;
+  }
+  try {
+    const buffer = Buffer.from(base64.replace(/\s+/g, ''), 'base64');
+    return buffer.length > 0 ? buffer : null;
+  } catch {
+    return null;
+  }
+}
+
+function looksLikeBase64Image(value) {
+  const normalized = String(value ?? '').replace(/\s+/g, '');
+  if (!normalized || normalized.length < 64 || normalized.length % 4 !== 0) {
+    return false;
+  }
+  return /^[A-Za-z0-9+/=]+$/u.test(normalized);
+}
+
+function materializeInlineImage(savedPath, buffer) {
+  if (savedPath) {
+    try {
+      fs.mkdirSync(path.dirname(savedPath), { recursive: true });
+      fs.writeFileSync(savedPath, buffer);
+      return savedPath;
+    } catch {
+      return null;
+    }
+  }
+  try {
+    const fallbackPath = path.join(os.tmpdir(), `codexbridge-inline-image-${Date.now()}.png`);
+    fs.writeFileSync(fallbackPath, buffer);
+    return fallbackPath;
+  } catch {
+    return null;
+  }
 }
 
 function inspectTurnCompletionFromSessionPath(sessionPath, turnId) {

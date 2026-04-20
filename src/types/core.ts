@@ -1,3 +1,5 @@
+import type { InboundAttachmentKind } from './platform.js';
+
 export interface PlatformScopeRef {
   platform: string;
   externalScopeId: string;
@@ -26,6 +28,27 @@ export interface SessionSettings {
   updatedAt: number;
 }
 
+export interface UploadBatchItem {
+  id: string;
+  kind: InboundAttachmentKind;
+  localPath: string;
+  originalPath: string;
+  fileName: string | null;
+  mimeType: string | null;
+  transcriptText: string | null;
+  durationSeconds: number | null;
+  sizeBytes: number | null;
+  receivedAt: number;
+}
+
+export interface UploadBatchState {
+  active: boolean;
+  batchId: string;
+  startedAt: number;
+  updatedAt: number;
+  items: UploadBatchItem[];
+}
+
 export interface ThreadMetadata {
   providerProfileId: string;
   threadId: string;
@@ -33,3 +56,85 @@ export interface ThreadMetadata {
   updatedAt: number;
 }
 
+export interface TurnArtifactIntent {
+  requested: boolean;
+  preferredKind: 'image' | 'file' | 'video' | 'audio' | null;
+  requestedFormat: string | null;
+  requestedExtension: string | null;
+  requestedFileName: string | null;
+  userDescription: string | null;
+  requiresClarification: boolean;
+}
+
+export interface TurnArtifactContext {
+  requestId: string;
+  bridgeSessionId: string;
+  artifactDir: string;
+  spoolDir: string;
+  turnId: string | null;
+  intent: TurnArtifactIntent;
+}
+
+export type TurnArtifactDeliveryStage =
+  | 'pending'
+  | 'ready'
+  | 'fallback_ready'
+  | 'limited'
+  | 'ambiguous'
+  | 'missing';
+
+export type TurnArtifactRejectionReason =
+  | 'path_outside_artifact_dir'
+  | 'missing_file'
+  | 'not_file'
+  | 'symlink'
+  | 'invalid_manifest'
+  | 'size_limit'
+  | 'count_limit'
+  | 'ambiguous_candidates';
+
+export type TurnArtifactNoticeCode =
+  | 'count_limited'
+  | 'size_limited'
+  | 'count_and_size_limited'
+  | 'ambiguous_candidates'
+  | 'missing_deliverable';
+
+export interface TurnArtifactDeliveredItem {
+  kind: 'image' | 'file' | 'video' | 'audio';
+  path: string;
+  displayName: string | null;
+  mimeType: string | null;
+  sizeBytes: number | null;
+  caption: string | null;
+  source: 'provider_native' | 'bridge_declared' | 'bridge_fallback';
+  turnId: string | null;
+}
+
+export interface TurnArtifactRejectedItem {
+  path: string | null;
+  displayName: string | null;
+  sizeBytes: number | null;
+  reason: TurnArtifactRejectionReason;
+}
+
+export interface TurnArtifactDeliveryState {
+  requestId: string;
+  bridgeSessionId: string;
+  turnId: string | null;
+  requestedByUser: boolean;
+  requestedFormat: string | null;
+  preferredKind: 'image' | 'file' | 'video' | 'audio' | null;
+  requestedByText: string | null;
+  artifactDir: string;
+  spoolDir: string;
+  stage: TurnArtifactDeliveryStage;
+  fallbackUsed: boolean;
+  manifestDeclaredCount: number;
+  scannedCandidateCount: number;
+  maxArtifactCount: number;
+  maxArtifactSizeBytes: number;
+  noticeCode: TurnArtifactNoticeCode | null;
+  deliveredArtifacts: TurnArtifactDeliveredItem[];
+  rejectedArtifacts: TurnArtifactRejectedItem[];
+}

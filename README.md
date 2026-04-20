@@ -39,7 +39,7 @@ Project bootstrap is now focused on:
 
 Current implemented bridge pieces:
 
-- Core session routing with WeChat-friendly slash commands, including `/helps`, `/status`, `/stop`, `/new`, `/provider`, `/models`, `/model`, `/threads`, `/search`, `/next`, `/prev`, `/open`, `/peek`, `/rename`, `/permissions`, `/reconnect`, `/restart`, and `/lang`
+- Core session routing with WeChat-friendly slash commands, including `/helps`, `/status`, `/usage`, `/stop`, `/new`, `/uploads`, `/provider`, `/models`, `/model`, `/threads`, `/search`, `/next`, `/prev`, `/open`, `/peek`, `/rename`, `/permissions`, `/allow`, `/deny`, `/reconnect`, `/retry`, `/restart`, and `/lang`
 - File-backed JSON repositories for persistent bridge state
 - WeChat platform skeleton for Hermes-compatible iLink config loading, QR account state reuse, inbound DM normalization, long-poll client/poller wiring, context-token persistence, text chunking, and outbound text/typing delivery
 - Codex profile loader and initial Codex app-server client/plugin path for shared thread execution
@@ -84,6 +84,14 @@ Recommended entrypoints:
 /lang
 /permissions
 /perm
+/allow
+/al
+/allow 1
+/allow 2
+/deny
+/dn
+/retry
+/rt
 ```
 
 ### `/models` and `/ms`
@@ -125,6 +133,8 @@ Best-practice rule:
 - use `/helps` for command discovery
 - use `/threads` and numeric indexes on WeChat instead of copying raw thread ids
 - use `/lang zh-CN` or `/lang en` to switch reply language for the current scope
+- use `/allow 1` or `/allow 2` to approve, and `/deny` to reject, when Codex asks for approval mid-turn
+- use `/retry` after an interrupted turn; it refreshes the current Codex session first, then reruns the previous request in the same thread
 - use `/helps <command>` when you need exact usage and examples
 
 See the full command reference in [docs/usage/weixin-slash-commands.md](./docs/usage/weixin-slash-commands.md).

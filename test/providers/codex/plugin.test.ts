@@ -205,6 +205,142 @@ test('CodexProviderPlugin turns inbound attachments into text prompt plus localI
   assert.match(String(seenInputText ?? ''), /Weixin attachments:/);
 });
 
+test('CodexProviderPlugin forwards media outputs from the app client', async () => {
+  const plugin = makePlugin(() => ({
+    async start() {},
+    async startThread() {
+      return { threadId: 'thread-1', cwd: null, title: null };
+    },
+    async readThread(threadId: string) {
+      return { threadId, title: null, cwd: null };
+    },
+    async listThreads() {
+      return { items: [], nextCursor: null };
+    },
+    async startTurn(params: any) {
+      return {
+        outputText: '',
+        outputMedia: [{
+          kind: 'image',
+          path: '/tmp/generated-dog.png',
+          caption: null,
+        }],
+        threadId: params.threadId,
+        title: null,
+      };
+    },
+    async interruptTurn() {},
+    async listModels() {
+      return [{
+        id: 'gpt-5.4',
+        model: 'gpt-5.4',
+        displayName: 'GPT-5.4',
+        description: '',
+        isDefault: true,
+        supportedReasoningEfforts: ['medium'],
+        defaultReasoningEffort: 'medium',
+      }];
+    },
+  }));
+
+  const result = await plugin.startTurn({
+    providerProfile: makeProfile(),
+    bridgeSession: makeBridgeSession(),
+    sessionSettings: makeSessionSettings(),
+    event: {
+      platform: 'weixin',
+      externalScopeId: 'wxid_1',
+      text: '画一只小狗',
+    },
+    inputText: '画一只小狗',
+  });
+
+  assert.deepEqual(result.outputMedia, [{
+    kind: 'image',
+    path: '/tmp/generated-dog.png',
+    caption: null,
+  }]);
+  assert.deepEqual(result.outputArtifacts, [{
+    kind: 'image',
+    path: '/tmp/generated-dog.png',
+    caption: null,
+  }]);
+});
+
+test('CodexProviderPlugin auto-injects artifact send-back instructions for file delivery turns', async () => {
+  let seenDeveloperInstructions = null;
+  const plugin = makePlugin(() => ({
+    async start() {},
+    async startThread() {
+      return { threadId: 'thread-1', cwd: null, title: null };
+    },
+    async readThread(threadId: string) {
+      return { threadId, title: null, cwd: null };
+    },
+    async listThreads() {
+      return { items: [], nextCursor: null };
+    },
+    async startTurn(params: any) {
+      seenDeveloperInstructions = params.developerInstructions;
+      return {
+        outputText: 'done',
+        threadId: params.threadId,
+        title: null,
+      };
+    },
+    async interruptTurn() {},
+    async listModels() {
+      return [{
+        id: 'gpt-5.4',
+        model: 'gpt-5.4',
+        displayName: 'GPT-5.4',
+        description: '',
+        isDefault: true,
+        supportedReasoningEfforts: ['medium'],
+        defaultReasoningEffort: 'medium',
+      }];
+    },
+  }));
+
+  await plugin.startTurn({
+    providerProfile: makeProfile(),
+    bridgeSession: makeBridgeSession(),
+    sessionSettings: makeSessionSettings(),
+    event: {
+      platform: 'weixin',
+      externalScopeId: 'wxid_1',
+      text: '把这次未提交修改整理成 Word 文档发我',
+      metadata: {
+        codexbridge: {
+          turnArtifactContext: {
+            requestId: 'req-1',
+            bridgeSessionId: 'session-1',
+            artifactDir: '/tmp/project/.codexbridge/turn-artifacts/req-1',
+            spoolDir: '/tmp/project/.codexbridge/artifact-spool/req-1',
+            turnId: null,
+            intent: {
+              requested: true,
+              preferredKind: 'file',
+              requestedFormat: 'docx',
+              requestedExtension: '.docx',
+              requestedFileName: null,
+              userDescription: '把这次未提交修改整理成 Word 文档发我',
+              requiresClarification: false,
+            },
+          },
+        },
+      },
+    },
+    inputText: '把这次未提交修改整理成 Word 文档发我',
+  });
+
+  assert.match(String(seenDeveloperInstructions ?? ''), /CodexBridge attachment delivery protocol/);
+  assert.match(String(seenDeveloperInstructions ?? ''), /\/tmp\/project\/\.codexbridge\/turn-artifacts\/req-1/);
+  assert.match(String(seenDeveloperInstructions ?? ''), /codexbridge-artifacts/);
+  assert.match(String(seenDeveloperInstructions ?? ''), /Choose a clear, semantic final filename yourself/i);
+  assert.match(String(seenDeveloperInstructions ?? ''), /your-chosen-file\.docx/);
+});
+
 test('CodexProviderPlugin resolves default model metadata from listModels when profile defaults are empty', async () => {
   const calls = [];
   const plugin = makePlugin(() => ({

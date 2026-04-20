@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 import { createCodexBridgeRuntime } from '../../src/runtime/bootstrap.js';
 
@@ -11,7 +14,9 @@ class FakeProviderPlugin {
   resumeThreadCalls: any[];
   startTurnCalls: any[];
   interruptTurnCalls: any[];
+  respondToApprovalCalls: any[];
   listModelsCalls: any[];
+  usageReport: any;
   threadCounter: number;
   baseTime: number;
   clock: number;
@@ -100,7 +105,9 @@ class FakeProviderPlugin {
     this.resumeThreadCalls = [];
     this.startTurnCalls = [];
     this.interruptTurnCalls = [];
+    this.respondToApprovalCalls = [];
     this.listModelsCalls = [];
+    this.usageReport = null;
     this.threadCounter = 0;
     this.baseTime = Date.now();
     this.clock = 0;
@@ -222,6 +229,10 @@ class FakeProviderPlugin {
     this.interruptTurnCalls.push({ providerProfile, threadId, turnId });
   }
 
+  async respondToApproval({ providerProfile, request, option }) {
+    this.respondToApprovalCalls.push({ providerProfile, request, option });
+  }
+
   async listModels() {
     this.listModelsCalls.push({});
     return this.models;
@@ -232,6 +243,10 @@ class FakeProviderPlugin {
       connected: true,
       accountIdentity: null,
     };
+  }
+
+  async getUsage() {
+    return this.usageReport ?? null;
   }
 }
 
@@ -265,6 +280,48 @@ function makeRuntime({ defaultCwd = null, restartBridge = null, locale = null, p
   return { runtime, openai, minimax };
 }
 
+function makeUsageReport(overrides = {}) {
+  return {
+    provider: 'codex',
+    accountId: 'acct-usage-1',
+    userId: null,
+    email: 'ganxing@example.com',
+    plan: 'pro',
+    buckets: [
+      {
+        name: 'Codex',
+        allowed: true,
+        limitReached: false,
+        windows: [
+          {
+            name: 'Primary',
+            usedPercent: 23,
+            windowSeconds: 18_000,
+            resetAfterSeconds: 3_600,
+            resetAtUnix: 0,
+          },
+          {
+            name: 'Secondary',
+            usedPercent: 42,
+            windowSeconds: 604_800,
+            resetAfterSeconds: 172_800,
+            resetAtUnix: 0,
+          },
+        ],
+      },
+    ],
+    credits: null,
+    ...overrides,
+  };
+}
+
+function createTempAttachment(fileName: string, content = 'attachment') {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-upload-test-'));
+  const filePath = path.join(directory, fileName);
+  fs.writeFileSync(filePath, content);
+  return filePath;
+}
+
 async function waitForCondition(predicate, { timeoutMs = 1000, intervalMs = 10 } = {}) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -291,6 +348,250 @@ test('bridge coordinator creates a default-provider session for normal text and 
   assert.equal(result.session?.providerProfileId, 'openai-default');
   assert.equal(openai.startThreadCalls.length, 1);
   assert.equal(openai.startTurnCalls.length, 1);
+});
+
+test('bridge coordinator returns generated image outputs as media messages', async () => {
+  const { runtime, openai } = makeRuntime();
+  const imagePath = createTempAttachment('generated-dog.png', 'png');
+  openai.startTurn = async ({ bridgeSession, inputText, onTurnStarted = null }) => {
+    const turnId = `${bridgeSession.codexThreadId}-turn-generated-image`;
+    if (typeof onTurnStarted === 'function') {
+      await onTurnStarted({
+        turnId,
+        threadId: bridgeSession.codexThreadId,
+      });
+    }
+    return {
+      outputText: `openai: ${inputText}`,
+      outputMedia: [{
+        kind: 'image',
+        path: imagePath,
+        caption: null,
+      }],
+      turnId,
+      threadId: bridgeSession.codexThreadId,
+      title: bridgeSession.title,
+    };
+  };
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-image-1',
+    text: '画一只小狗',
+  });
+
+  assert.equal(result.type, 'message');
+  assert.equal(result.messages[0]?.text, 'openai: 画一只小狗');
+  assert.equal(result.messages[1]?.mediaPath, imagePath);
+});
+
+test('bridge coordinator strips hidden artifact manifests and returns declared file attachments as media messages', async () => {
+  const { runtime, openai } = makeRuntime({ defaultCwd: '/tmp/codexbridge-artifact-manifest' });
+  openai.startTurn = async ({ bridgeSession, inputText, event, onTurnStarted = null }) => {
+    const turnId = `${bridgeSession.codexThreadId}-turn-artifact-1`;
+    if (typeof onTurnStarted === 'function') {
+      await onTurnStarted({
+        turnId,
+        threadId: bridgeSession.codexThreadId,
+      });
+    }
+    const artifactDir = String(event?.metadata?.codexbridge?.turnArtifactContext?.artifactDir ?? '').trim();
+    assert.ok(artifactDir);
+    const declaredPath = path.join(artifactDir, 'summary.docx');
+    fs.mkdirSync(path.dirname(declaredPath), { recursive: true });
+    fs.writeFileSync(declaredPath, 'word-output');
+    return {
+      outputText: `已整理成 Word 文档。\n\n\`\`\`codexbridge-artifacts\n[{"path":"${declaredPath}","kind":"file","displayName":"summary.docx","caption":"Word 文档"}]\n\`\`\``,
+      turnId,
+      threadId: bridgeSession.codexThreadId,
+      title: bridgeSession.title,
+    };
+  };
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-file-1',
+    text: '把这次未提交修改整理成 Word 文档发我',
+  });
+
+  assert.equal(result.type, 'message');
+  assert.equal(result.messages[0]?.text, '已整理成 Word 文档。');
+  assert.ok(result.messages[0]?.text?.includes('codexbridge-artifacts') === false);
+  assert.ok(typeof result.messages[1]?.mediaPath === 'string' && result.messages[1]?.mediaPath.endsWith('summary.docx'));
+  assert.match(String(result.messages[1]?.mediaPath ?? ''), /artifact-spool/);
+  assert.equal(fs.existsSync(String(result.messages[1]?.mediaPath ?? '')), true);
+});
+
+test('bridge coordinator recognizes "md 文件" requests and returns the markdown deliverable as media', async () => {
+  const { runtime, openai } = makeRuntime({ defaultCwd: '/tmp/codexbridge-artifact-markdown' });
+  openai.startTurn = async ({ bridgeSession, event, onTurnStarted = null }) => {
+    const turnId = `${bridgeSession.codexThreadId}-turn-artifact-md-1`;
+    if (typeof onTurnStarted === 'function') {
+      await onTurnStarted({
+        turnId,
+        threadId: bridgeSession.codexThreadId,
+      });
+    }
+    const artifactDir = String(event?.metadata?.codexbridge?.turnArtifactContext?.artifactDir ?? '').trim();
+    assert.ok(artifactDir);
+    const declaredPath = path.join(artifactDir, 'response.md');
+    fs.mkdirSync(path.dirname(declaredPath), { recursive: true });
+    fs.writeFileSync(declaredPath, '# Markdown Summary');
+    return {
+      outputText: `Markdown 已整理完成。\n\n\`\`\`codexbridge-artifacts\n[{"path":"${declaredPath}","kind":"file","displayName":"response.md","caption":"Markdown 文件"}]\n\`\`\``,
+      turnId,
+      threadId: bridgeSession.codexThreadId,
+      title: bridgeSession.title,
+    };
+  };
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-file-md-1',
+    text: '帮我整理成一个 md 文件发给我',
+  });
+
+  assert.equal(result.type, 'message');
+  assert.equal(result.messages[0]?.text, 'Markdown 已整理完成。');
+  assert.ok(result.messages[0]?.text?.includes('codexbridge-artifacts') === false);
+  assert.ok(typeof result.messages[1]?.mediaPath === 'string' && result.messages[1]?.mediaPath.endsWith('response.md'));
+  assert.match(String(result.messages[1]?.mediaPath ?? ''), /artifact-spool/);
+  assert.equal(fs.existsSync(String(result.messages[1]?.mediaPath ?? '')), true);
+});
+
+test('bridge coordinator clarification flow turns "把文件直接发送给我" + "Markdown" into a markdown attachment response', async () => {
+  const { runtime, openai } = makeRuntime({ defaultCwd: '/tmp/codexbridge-artifact-clarify-md' });
+  openai.startTurn = async ({ bridgeSession, event, onTurnStarted = null }) => {
+    const turnId = `${bridgeSession.codexThreadId}-turn-artifact-clarify-md-1`;
+    if (typeof onTurnStarted === 'function') {
+      await onTurnStarted({
+        turnId,
+        threadId: bridgeSession.codexThreadId,
+      });
+    }
+    const artifactDir = String(event?.metadata?.codexbridge?.turnArtifactContext?.artifactDir ?? '').trim();
+    assert.ok(artifactDir);
+    const declaredPath = path.join(artifactDir, 'deliverable.md');
+    fs.mkdirSync(path.dirname(declaredPath), { recursive: true });
+    fs.writeFileSync(declaredPath, '# Clarified Markdown');
+    return {
+      outputText: `已作为 \`.md\` 附件返回。\n\n\`\`\`codexbridge-artifacts\n[{"path":"${declaredPath}","kind":"file","displayName":"deliverable.md","caption":"final deliverable"}]\n\`\`\``,
+      turnId,
+      threadId: bridgeSession.codexThreadId,
+      title: bridgeSession.title,
+    };
+  };
+
+  const clarification = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-file-clarify-md-1',
+    text: '把文件直接发送给我',
+  });
+  assert.match(clarification.messages[0]?.text ?? '', /要导出成什么格式/);
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-file-clarify-md-1',
+    text: 'Markdown',
+  });
+
+  assert.equal(result.type, 'message');
+  assert.equal(result.messages[0]?.text, '已作为 `.md` 附件返回。');
+  assert.ok(result.messages[0]?.text?.includes('codexbridge-artifacts') === false);
+  assert.ok(typeof result.messages[1]?.mediaPath === 'string' && result.messages[1]?.mediaPath.endsWith('deliverable.md'));
+  assert.match(String(result.messages[1]?.mediaPath ?? ''), /artifact-spool/);
+  assert.equal(fs.existsSync(String(result.messages[1]?.mediaPath ?? '')), true);
+});
+
+test('bridge coordinator falls back to a single generated file in the turn artifact directory when the manifest is missing', async () => {
+  const { runtime, openai } = makeRuntime({ defaultCwd: '/tmp/codexbridge-artifact-fallback' });
+  openai.startTurn = async ({ bridgeSession, event, onTurnStarted = null }) => {
+    const turnId = `${bridgeSession.codexThreadId}-turn-artifact-2`;
+    if (typeof onTurnStarted === 'function') {
+      await onTurnStarted({
+        turnId,
+        threadId: bridgeSession.codexThreadId,
+      });
+    }
+    const artifactDir = String(event?.metadata?.codexbridge?.turnArtifactContext?.artifactDir ?? '').trim();
+    assert.ok(artifactDir);
+    const generatedPath = path.join(artifactDir, 'summary.pdf');
+    fs.mkdirSync(path.dirname(generatedPath), { recursive: true });
+    fs.writeFileSync(generatedPath, 'pdf-output');
+    return {
+      outputText: 'PDF 已生成。',
+      turnId,
+      threadId: bridgeSession.codexThreadId,
+      title: bridgeSession.title,
+    };
+  };
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-file-2',
+    text: '导出成 PDF 发我',
+  });
+
+  assert.equal(result.messages[0]?.text, 'PDF 已生成。');
+  assert.ok(typeof result.messages[1]?.mediaPath === 'string' && result.messages[1]?.mediaPath.endsWith('summary.pdf'));
+  assert.equal(fs.existsSync(String(result.messages[1]?.mediaPath ?? '')), true);
+});
+
+test('bridge coordinator asks once for the export format before starting a generic file-delivery turn', async () => {
+  const { runtime, openai } = makeRuntime({ defaultCwd: '/tmp/codexbridge-artifact-clarify' });
+
+  const first = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-file-clarify-1',
+    text: '把结果导出一下发我',
+  });
+
+  assert.match(first.messages[0]?.text ?? '', /什么格式|PDF|Word|Excel/);
+  assert.equal(openai.startTurnCalls.length, 0);
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-file-clarify-1',
+    text: 'pdf',
+  });
+
+  assert.equal(openai.startTurnCalls.length, 1);
+  assert.match(String(openai.startTurnCalls[0]?.inputText ?? ''), /Export the final deliverable as PDF/i);
+});
+
+test('bridge coordinator warns when multiple fallback candidates remain ambiguous instead of sending arbitrary attachments', async () => {
+  const { runtime, openai } = makeRuntime({ defaultCwd: '/tmp/codexbridge-artifact-ambiguous' });
+  openai.startTurn = async ({ bridgeSession, event, onTurnStarted = null }) => {
+    const turnId = `${bridgeSession.codexThreadId}-turn-artifact-3`;
+    if (typeof onTurnStarted === 'function') {
+      await onTurnStarted({
+        turnId,
+        threadId: bridgeSession.codexThreadId,
+      });
+    }
+    const artifactDir = String(event?.metadata?.codexbridge?.turnArtifactContext?.artifactDir ?? '').trim();
+    assert.ok(artifactDir);
+    fs.mkdirSync(artifactDir, { recursive: true });
+    fs.writeFileSync(path.join(artifactDir, 'summary-a.pdf'), 'a');
+    fs.writeFileSync(path.join(artifactDir, 'summary-b.pdf'), 'b');
+    return {
+      outputText: 'PDF 已生成。',
+      turnId,
+      threadId: bridgeSession.codexThreadId,
+      title: bridgeSession.title,
+    };
+  };
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-file-3',
+    text: '导出成 PDF 发我',
+  });
+
+  const lines = result.messages.map((message) => message.text ?? '').filter(Boolean);
+  assert.equal(result.messages.some((message) => Boolean(message.mediaPath)), false);
+  assert.equal(lines[0], 'PDF 已生成。');
+  assert.ok(lines.some((line) => /候选文件/.test(line)));
 });
 
 test('bridge coordinator uses the runtime default cwd for new sessions', async () => {
@@ -428,9 +729,13 @@ test('/status reports when no bridge session is bound yet', async () => {
     text: '/status',
   });
 
-  assert.match(result.messages[0]?.text ?? '', /当前 scope 尚未绑定 bridge session/);
-  assert.match(result.messages[1]?.text ?? '', /默认 Provider 配置：openai-default/);
-  assert.match(result.messages[2]?.text ?? '', /默认工作目录：（未设置）/);
+  const lines = result.messages.map((message) => message.text ?? '');
+  assert.ok(lines.includes('接口配置：openai-default'));
+  assert.ok(lines.includes('默认工作目录：（未设置）'));
+  assert.ok(lines.includes('模型：gpt-5.4'));
+  assert.ok(lines.includes('推理强度：'));
+  assert.ok(lines.includes('权限预设：'));
+  assert.ok(lines.includes('完整信息：/status details'));
 });
 
 test('/status uses English output when locale is set to en', async () => {
@@ -442,9 +747,13 @@ test('/status uses English output when locale is set to en', async () => {
     text: '/status',
   });
 
-  assert.match(result.messages[0]?.text ?? '', /No bridge session is currently bound to this scope/);
-  assert.match(result.messages[1]?.text ?? '', /Default provider profile: openai-default/);
-  assert.match(result.messages[2]?.text ?? '', /Default working directory: \(not set\)/);
+  const lines = result.messages.map((message) => message.text ?? '');
+  assert.ok(lines.includes('Interface profile: openai-default'));
+  assert.ok(lines.includes('Default working directory: (not set)'));
+  assert.ok(lines.includes('Model: gpt-5.4'));
+  assert.ok(lines.includes('Reasoning effort: '));
+  assert.ok(lines.includes('Access preset: '));
+  assert.ok(lines.includes('More details: /status details'));
 });
 
 test('/status includes weixin session pause state when the platform exposes it', async () => {
@@ -471,10 +780,10 @@ test('/status includes weixin session pause state when the platform exposes it',
   });
 
   const lines = result.messages.map((message) => message.text ?? '');
-  assert.ok(lines.some((line) => /微信账号：bot-account/.test(line)));
   assert.ok(lines.some((line) => /微信会话：冷却中/.test(line)));
-  assert.ok(lines.some((line) => /微信上下文 token：无/.test(line)));
-  assert.ok(lines.some((line) => /微信冷却剩余：42 分钟/.test(line)));
+  assert.ok(lines.every((line) => !/微信账号：/.test(line)));
+  assert.ok(lines.every((line) => !/微信上下文 token：/.test(line)));
+  assert.ok(lines.every((line) => !/微信冷却剩余：/.test(line)));
 });
 
 test('/status includes active-turn state when a session is idle', async () => {
@@ -492,8 +801,464 @@ test('/status includes active-turn state when a session is idle', async () => {
     text: '/status',
   });
 
-  assert.equal(result.messages[12]?.text ?? '', '当前 Turn：无');
-  assert.equal(result.messages[13]?.text ?? '', 'Turn 状态：空闲');
+  const lines = result.messages.map((message) => message.text ?? '');
+  assert.ok(lines.includes('接口配置：openai-default'));
+  assert.ok(lines.includes('会话标题：OpenAI Default thread 1'));
+  assert.ok(lines.includes('工作目录：/tmp/openai-default'));
+  assert.ok(lines.includes('模型：gpt-5.4'));
+  assert.ok(lines.includes('推理强度：'));
+  assert.ok(lines.includes('权限预设：'));
+  assert.ok(lines.includes('完整信息：/status details'));
+  assert.ok(lines.every((line) => !/Scope：/.test(line)));
+  assert.ok(lines.every((line) => !/当前 Turn：/.test(line)));
+  assert.ok(lines.every((line) => !/Turn 状态：/.test(line)));
+  assert.ok(lines.every((line) => !/Bridge 会话：/.test(line)));
+  assert.ok(lines.every((line) => !/Codex 线程：/.test(line)));
+});
+
+test('/status details includes full diagnostics for the current session', async () => {
+  const { runtime, openai } = makeRuntime();
+  openai.usageReport = makeUsageReport();
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-status-details-1',
+    text: 'hello',
+  });
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-status-details-1',
+    text: '/status details',
+  });
+
+  const lines = result.messages.map((message) => message.text ?? '');
+  assert.ok(lines.some((line) => /Bridge 会话：/.test(line)));
+  assert.ok(lines.some((line) => /会话标题：OpenAI Default thread 1/.test(line)));
+  assert.ok(lines.some((line) => /Codex 线程：/.test(line)));
+  assert.ok(lines.some((line) => /审批策略：/.test(line)));
+  assert.ok(lines.some((line) => /沙箱模式：/.test(line)));
+  assert.ok(lines.every((line) => !/完整信息：\/status details/.test(line)));
+});
+
+test('/status details includes the last artifact delivery status for the current session', async () => {
+  const { runtime, openai } = makeRuntime({ defaultCwd: '/tmp/codexbridge-status-artifacts' });
+  openai.startTurn = async ({ bridgeSession, event, onTurnStarted = null }) => {
+    const turnId = `${bridgeSession.codexThreadId}-turn-artifact-status-1`;
+    if (typeof onTurnStarted === 'function') {
+      await onTurnStarted({
+        turnId,
+        threadId: bridgeSession.codexThreadId,
+      });
+    }
+    const artifactDir = String(event?.metadata?.codexbridge?.turnArtifactContext?.artifactDir ?? '').trim();
+    const declaredPath = path.join(artifactDir, 'summary.docx');
+    fs.mkdirSync(artifactDir, { recursive: true });
+    fs.writeFileSync(declaredPath, 'word-output');
+    return {
+      outputText: `已整理成 Word 文档。\n\n\`\`\`codexbridge-artifacts\n[{"path":"${declaredPath}","kind":"file","displayName":"summary.docx"}]\n\`\`\``,
+      turnId,
+      threadId: bridgeSession.codexThreadId,
+      title: bridgeSession.title,
+    };
+  };
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-status-artifacts-1',
+    text: '把摘要整理成 Word 发我',
+  });
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-status-artifacts-1',
+    text: '/status details',
+  });
+
+  const lines = result.messages.map((message) => message.text ?? '');
+  assert.ok(lines.some((line) => /附件交付：已选定附件/.test(line)));
+  assert.ok(lines.some((line) => /请求格式：docx/.test(line)));
+  assert.ok(lines.some((line) => /附件结果：已选 1，拒绝 0/.test(line)));
+  assert.ok(lines.some((line) => /产物目录：/.test(line)));
+  assert.ok(lines.some((line) => /暂存目录：/.test(line)));
+});
+
+test('/status shows the renamed local thread title in simple mode', async () => {
+  const { runtime } = makeRuntime();
+
+  const original = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-status-title-1',
+    text: 'hello',
+  });
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-status-title-1',
+    text: `/rename ${original.session?.codexThreadId} 微信 Codex`,
+  });
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-status-title-1',
+    text: '/status',
+  });
+
+  const lines = result.messages.map((message) => message.text ?? '');
+  assert.ok(lines.includes('会话标题：微信 Codex'));
+});
+
+test('/status details includes weixin diagnostic lines', async () => {
+  const weixinPlatform = {
+    id: 'weixin',
+    getStatus() {
+      return {
+        data: {
+          accountId: 'bot-account',
+          sessionPaused: true,
+          remainingPauseMinutes: 42,
+          hasContextToken: false,
+        },
+      };
+    },
+  };
+  const { runtime } = makeRuntime({
+    platformPlugins: [weixinPlatform],
+  });
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-status-details-weixin-1',
+    text: '/status details',
+  });
+
+  const lines = result.messages.map((message) => message.text ?? '');
+  assert.ok(lines.some((line) => /微信上下文 token：无/.test(line)));
+  assert.ok(lines.some((line) => /微信冷却剩余：42 分钟/.test(line)));
+});
+
+test('/usage shows account plus 5-hour and weekly remaining quota', async () => {
+  const { runtime, openai } = makeRuntime();
+  openai.usageReport = makeUsageReport();
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-usage-1',
+    text: '/usage',
+  });
+
+  const lines = result.messages.map((message) => message.text ?? '');
+  assert.equal(lines[0], '用量 | openai-default');
+  assert.ok(lines.includes('账号：ganxing@example.com (pro)'));
+  assert.ok(lines.some((line) => /5 小时剩余：77%（1 小时后重置）/.test(line)));
+  assert.ok(lines.some((line) => /本周剩余：58%（2 天后重置）/.test(line)));
+});
+
+test('/status includes account and compact usage summary when usage is available', async () => {
+  const { runtime, openai } = makeRuntime();
+  openai.usageReport = makeUsageReport();
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-usage-status-1',
+    text: 'hello',
+  });
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-usage-status-1',
+    text: '/status',
+  });
+
+  const lines = result.messages.map((message) => message.text ?? '');
+  assert.ok(lines.includes('账号：ganxing@example.com (pro)'));
+  assert.ok(lines.some((line) => /5 小时剩余：77%（1 小时后重置）/.test(line)));
+  assert.ok(lines.some((line) => /本周剩余：58%（2 天后重置）/.test(line)));
+});
+
+test('/allow shows pending approval requests for the active turn', async () => {
+  const { runtime } = makeRuntime();
+
+  const initial = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-allow-list-1',
+    text: 'hello',
+  });
+  const session = initial.session;
+  const scopeRef = {
+    platform: 'weixin',
+    externalScopeId: 'wx-user-allow-list-1',
+  };
+
+  runtime.services.activeTurns.beginScopeTurn(scopeRef, {
+    bridgeSessionId: session.bridgeSessionId,
+    providerProfileId: session.providerProfileId,
+    threadId: session.codexThreadId,
+    turnId: `${session.codexThreadId}-turn-pending`,
+  });
+  runtime.services.activeTurns.addPendingApproval(scopeRef, {
+    requestId: 'approval-1',
+    kind: 'command',
+    threadId: session.codexThreadId,
+    turnId: `${session.codexThreadId}-turn-pending`,
+    itemId: 'item-1',
+    reason: 'command failed; retry without sandbox?',
+    command: 'npm run build',
+    cwd: '/home/ubuntu/dev/CodexBridge',
+    availableDecisionKeys: ['accept', 'acceptForSession', 'decline'],
+  });
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-allow-list-1',
+    text: '/allow',
+  });
+
+  const text = result.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(text, /审批请求 \| 1 项/);
+  assert.match(text, /command failed; retry without sandbox\?/);
+  assert.match(text, /\/allow 1：仅批准这一次/);
+  assert.match(text, /\/allow 2：在当前会话里记住这次批准/);
+  assert.match(text, /\/deny：拒绝这次请求/);
+});
+
+test('/allow 2 replies to the provider approval request and clears it from the active turn', async () => {
+  const { runtime, openai } = makeRuntime();
+
+  const initial = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-allow-approve-1',
+    text: 'hello',
+  });
+  const session = initial.session;
+  const scopeRef = {
+    platform: 'weixin',
+    externalScopeId: 'wx-user-allow-approve-1',
+  };
+
+  runtime.services.activeTurns.beginScopeTurn(scopeRef, {
+    bridgeSessionId: session.bridgeSessionId,
+    providerProfileId: session.providerProfileId,
+    threadId: session.codexThreadId,
+    turnId: `${session.codexThreadId}-turn-pending`,
+  });
+  runtime.services.activeTurns.addPendingApproval(scopeRef, {
+    requestId: 'approval-2',
+    kind: 'command',
+    threadId: session.codexThreadId,
+    turnId: `${session.codexThreadId}-turn-pending`,
+    itemId: 'item-2',
+    reason: 'command failed; retry without sandbox?',
+    command: 'npm run build',
+    cwd: '/home/ubuntu/dev/CodexBridge',
+    availableDecisionKeys: ['accept', 'acceptForSession', 'decline'],
+  });
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-allow-approve-1',
+    text: '/allow 2',
+  });
+
+  assert.equal(openai.respondToApprovalCalls.length, 1);
+  assert.equal(openai.respondToApprovalCalls[0]?.option, 2);
+  assert.equal(openai.respondToApprovalCalls[0]?.request?.requestId, 'approval-2');
+  assert.equal(runtime.services.activeTurns.resolveScopeTurn(scopeRef)?.pendingApprovals.length, 0);
+  assert.match(result.messages[0]?.text ?? '', /已对当前会话记住这次命令执行批准/);
+});
+
+test('/allow acknowledges when provider turn has already ended after approval', async () => {
+  const { runtime, openai } = makeRuntime();
+
+  const initial = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-allow-ended-1',
+    text: 'hello',
+  });
+  const session = initial.session;
+  const scopeRef = {
+    platform: 'weixin',
+    externalScopeId: 'wx-user-allow-ended-1',
+  };
+  const turnId = `${session.codexThreadId}-turn-pending`;
+  runtime.services.activeTurns.beginScopeTurn(scopeRef, {
+    bridgeSessionId: session.bridgeSessionId,
+    providerProfileId: session.providerProfileId,
+    threadId: session.codexThreadId,
+    turnId,
+  });
+  runtime.services.activeTurns.addPendingApproval(scopeRef, {
+    requestId: 'approval-ended-1',
+    kind: 'command',
+    threadId: session.codexThreadId,
+    turnId,
+    itemId: 'item-ended-1',
+    reason: 'command failed; retry without sandbox?',
+    command: 'npm run build',
+    cwd: '/home/ubuntu/dev/CodexBridge',
+    availableDecisionKeys: ['accept', 'acceptForSession', 'decline'],
+  });
+  const thread = openai.threads.get(session.codexThreadId);
+  assert.ok(thread);
+  thread.turns = [
+    {
+      id: turnId,
+      status: 'running',
+      error: null,
+      items: [],
+    },
+  ];
+  openai.respondToApproval = async ({ providerProfile, request, option }) => {
+    openai.respondToApprovalCalls.push({ providerProfile, request, option });
+    thread.turns = [
+      {
+        id: turnId,
+        status: 'interrupted',
+        error: 'Conversation interrupted',
+        items: [],
+      },
+    ];
+  };
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-allow-ended-1',
+    text: '/allow 2',
+  });
+
+  assert.equal(openai.respondToApprovalCalls.length, 1);
+  assert.equal(runtime.services.activeTurns.resolveScopeTurn(scopeRef), null);
+  assert.match(result.messages[0]?.text ?? '', /已对当前会话记住这次命令执行批准/);
+  assert.match(result.messages[1]?.text ?? '', /该回合已经结束/);
+});
+
+test('/deny rejects the provider approval request and clears it from the active turn', async () => {
+  const { runtime, openai } = makeRuntime();
+
+  const initial = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-deny-1',
+    text: 'hello',
+  });
+  const session = initial.session;
+  const scopeRef = {
+    platform: 'weixin',
+    externalScopeId: 'wx-user-deny-1',
+  };
+
+  runtime.services.activeTurns.beginScopeTurn(scopeRef, {
+    bridgeSessionId: session.bridgeSessionId,
+    providerProfileId: session.providerProfileId,
+    threadId: session.codexThreadId,
+    turnId: `${session.codexThreadId}-turn-pending`,
+  });
+  runtime.services.activeTurns.addPendingApproval(scopeRef, {
+    requestId: 'approval-deny-1',
+    kind: 'file_change',
+    threadId: session.codexThreadId,
+    turnId: `${session.codexThreadId}-turn-pending`,
+    itemId: 'item-deny-1',
+    reason: 'apply this patch?',
+    fileChanges: ['src/app.ts'],
+    availableDecisionKeys: ['accept', 'acceptForSession', 'decline'],
+  });
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-deny-1',
+    text: '/deny',
+  });
+
+  assert.equal(openai.respondToApprovalCalls.length, 1);
+  assert.equal(openai.respondToApprovalCalls[0]?.option, 3);
+  assert.equal(openai.respondToApprovalCalls[0]?.request?.requestId, 'approval-deny-1');
+  assert.equal(runtime.services.activeTurns.resolveScopeTurn(scopeRef)?.pendingApprovals.length, 0);
+  assert.match(result.messages[0]?.text ?? '', /已拒绝这次文件改动请求/);
+});
+
+test('commands are blocked by pending approvals until /allow is handled', async () => {
+  const { runtime } = makeRuntime();
+
+  const initial = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-allow-blocked-1',
+    text: 'hello',
+  });
+  const session = initial.session;
+  const scopeRef = {
+    platform: 'weixin',
+    externalScopeId: 'wx-user-allow-blocked-1',
+  };
+
+  runtime.services.activeTurns.beginScopeTurn(scopeRef, {
+    bridgeSessionId: session.bridgeSessionId,
+    providerProfileId: session.providerProfileId,
+    threadId: session.codexThreadId,
+    turnId: `${session.codexThreadId}-turn-pending`,
+  });
+  runtime.services.activeTurns.addPendingApproval(scopeRef, {
+    requestId: 'approval-3',
+    kind: 'permissions',
+    threadId: session.codexThreadId,
+    turnId: `${session.codexThreadId}-turn-pending`,
+    itemId: 'item-3',
+    reason: 'Would you like to make the following edits?',
+    networkPermission: true,
+    fileReadPermissions: ['/tmp'],
+    fileWritePermissions: ['/tmp'],
+    availableDecisionKeys: ['accept', 'acceptForSession', 'decline'],
+  });
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-allow-blocked-1',
+    text: '/permissions full-access',
+  });
+
+  const lines = result.messages.map((message) => message.text ?? '');
+  assert.ok(lines.some((line) => /当前有待处理的审批请求/.test(line)));
+  assert.ok(lines.some((line) => /先用 \/allow 查看，再用 \/allow 1、\/allow 2 或 \/deny 处理/.test(line)));
+});
+
+test('stale active turns are reconciled before starting a new conversation turn', async () => {
+  const { runtime, openai } = makeRuntime();
+
+  const initial = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-stale-active-1',
+    text: 'hello',
+  });
+  const session = initial.session;
+  const scopeRef = {
+    platform: 'weixin',
+    externalScopeId: 'wx-user-stale-active-1',
+  };
+  const staleTurnId = `${session.codexThreadId}-turn-stale`;
+  runtime.services.activeTurns.beginScopeTurn(scopeRef, {
+    bridgeSessionId: session.bridgeSessionId,
+    providerProfileId: session.providerProfileId,
+    threadId: session.codexThreadId,
+    turnId: staleTurnId,
+  });
+  const thread = openai.threads.get(session.codexThreadId);
+  assert.ok(thread);
+  thread.turns = [
+    {
+      id: staleTurnId,
+      status: 'interrupted',
+      error: 'Conversation interrupted',
+      items: [],
+    },
+  ];
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-stale-active-1',
+    text: 'hello again',
+  });
+
+  assert.match(result.messages[0]?.text ?? '', /openai: hello again/);
+  assert.equal(runtime.services.activeTurns.resolveScopeTurn(scopeRef), null);
 });
 
 test('/helps lists all supported slash commands and help entrypoints', async () => {
@@ -508,7 +1273,9 @@ test('/helps lists all supported slash commands and help entrypoints', async () 
   const text = result.messages[0]?.text ?? '';
   assert.match(text, /斜杠命令/);
   assert.match(text, /\/helps \(\/help, \/h\) 查看所有斜杠命令/);
+  assert.match(text, /\/usage \(\/us\) 查看当前 Codex 账号，以及 5 小时 \/ 本周剩余用量/);
   assert.match(text, /\/stop \(\/sp\) 请求中断当前正在执行的回复/);
+  assert.match(text, /\/uploads \(\/up, \/ul\) 开启上传暂存模式/);
   assert.match(text, /\/provider \(\/pd\) 查看可用 provider/);
   assert.match(text, /\/models \(\/ms\) 列出当前 provider 的可用模型/);
   assert.match(text, /\/model \(\/m\) 查看或切换当前 scope 的模型设置/);
@@ -517,6 +1284,9 @@ test('/helps lists all supported slash commands and help entrypoints', async () 
   assert.match(text, /\/next \(\/nx\) 翻到当前线程列表的下一页/);
   assert.match(text, /\/prev \(\/pv\) 翻到当前线程列表的上一页/);
   assert.match(text, /\/rename \(\/rn\) 给线程设置本地显示名/);
+  assert.match(text, /\/allow \(\/al\) 查看并批准当前回合中的审批请求/);
+  assert.match(text, /\/deny \(\/dn\) 拒绝当前回合中的审批请求/);
+  assert.match(text, /\/retry \(\/rt\) 在同一线程里重试上一条请求/);
   assert.match(text, /\/lang 查看\/切换当前会话的语言/);
   assert.match(text, /帮助：\/helps <命令>/);
   assert.match(text, /示例：\/helps threads  或  \/threads -h/);
@@ -534,10 +1304,210 @@ test('/helps renders English help text when locale is set to en', async () => {
   const text = result.messages[0]?.text ?? '';
   assert.match(text, /Slash Commands/);
   assert.match(text, /\/helps \(\/help, \/h\) Show all slash commands/);
+  assert.match(text, /\/usage \(\/us\) Show the current Codex account plus 5-hour and weekly remaining usage/);
+  assert.match(text, /\/uploads \(\/up, \/ul\) Enter upload staging mode/);
+  assert.match(text, /\/allow \(\/al\) Inspect and approve in-turn approval requests/);
+  assert.match(text, /\/deny \(\/dn\) Deny the current in-turn approval request/);
+  assert.match(text, /\/retry \(\/rt\) Retry the previous request in the same thread/);
   assert.match(text, /Help: \/helps <command>/);
   assert.match(text, /\/models \(\/ms\) List available models for the current provider/);
   assert.match(text, /\/model \(\/m\) View or switch model settings for the current scope/);
   assert.match(text, /\/lang Show or switch the current language used for text replies/);
+});
+
+test('/uploads starts upload mode and persists batch state without starting a turn', async () => {
+  const defaultCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-uploads-cwd-'));
+  const { runtime, openai } = makeRuntime({ defaultCwd });
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-uploads-1',
+    text: '/uploads',
+  });
+
+  const joined = result.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(joined, /已进入上传模式/);
+  assert.match(joined, /查看：\/up status/);
+  assert.equal(openai.startTurnCalls.length, 0);
+
+  const session = runtime.services.bridgeSessions.resolveScopeSession({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-uploads-1',
+  });
+  const settings = runtime.services.bridgeSessions.getSessionSettings(session.id);
+  const uploadsState = settings?.metadata?.uploads as any;
+  assert.equal(uploadsState?.active, true);
+});
+
+test('/uploads stages files, exposes status, and waits for text before starting a turn', async () => {
+  const defaultCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-uploads-stage-'));
+  const sourceFile = createTempAttachment('diagram.png', 'png-data');
+  const { runtime, openai } = makeRuntime({ defaultCwd });
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-uploads-2',
+    text: '/up',
+  });
+
+  const staged = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-uploads-2',
+    text: '',
+    attachments: [
+      {
+        kind: 'image',
+        localPath: sourceFile,
+        fileName: 'diagram.png',
+        mimeType: 'image/png',
+      },
+    ],
+  });
+
+  const stagedText = staged.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(stagedText, /已暂存 1 个文件/);
+  assert.equal(openai.startTurnCalls.length, 0);
+
+  const status = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-uploads-2',
+    text: '/up status',
+  });
+  const statusText = status.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(statusText, /上传暂存 \| 1 个文件/);
+  assert.match(statusText, /diagram\.png/);
+  assert.match(statusText, /\.codexbridge\/uploads\//);
+});
+
+test('/uploads submits staged files together with the next text prompt and clears staged state', async () => {
+  const defaultCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-uploads-submit-'));
+  const sourceFile = createTempAttachment('report.pdf', 'pdf-data');
+  const { runtime, openai } = makeRuntime({ defaultCwd });
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-uploads-3',
+    text: '/uploads',
+  });
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-uploads-3',
+    text: '',
+    attachments: [
+      {
+        kind: 'file',
+        localPath: sourceFile,
+        fileName: 'report.pdf',
+        mimeType: 'application/pdf',
+      },
+    ],
+  });
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-uploads-3',
+    text: '请根据资料总结重点',
+  });
+
+  assert.match(result.messages[0]?.text ?? '', /openai: 请根据资料总结重点/);
+  assert.equal(openai.startTurnCalls.length, 1);
+  assert.equal(openai.startTurnCalls[0]?.inputText, '请根据资料总结重点');
+  assert.equal(openai.startTurnCalls[0]?.event?.attachments?.length, 1);
+  assert.match(openai.startTurnCalls[0]?.event?.attachments?.[0]?.localPath ?? '', /\.codexbridge\/uploads\//);
+
+  const session = runtime.services.bridgeSessions.resolveScopeSession({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-uploads-3',
+  });
+  const settings = runtime.services.bridgeSessions.getSessionSettings(session.id);
+  assert.equal((settings?.metadata?.uploads as any) ?? null, null);
+});
+
+test('/uploads can be finalized by a voice attachment transcript when no text is present', async () => {
+  const defaultCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-uploads-voice-'));
+  const sourceFile = createTempAttachment('sheet.xlsx', 'xlsx-data');
+  const voiceFile = createTempAttachment('note.m4a', 'voice-data');
+  const { runtime, openai } = makeRuntime({ defaultCwd });
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-uploads-4',
+    text: '/ul',
+  });
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-uploads-4',
+    text: '',
+    attachments: [
+      {
+        kind: 'file',
+        localPath: sourceFile,
+        fileName: 'sheet.xlsx',
+        mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      },
+    ],
+  });
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-uploads-4',
+    text: '',
+    attachments: [
+      {
+        kind: 'voice',
+        localPath: voiceFile,
+        fileName: 'note.m4a',
+        mimeType: 'audio/mp4',
+        transcriptText: '请结合这些文件说明差异',
+        durationSeconds: 8,
+      },
+    ],
+  });
+
+  assert.equal(openai.startTurnCalls.length, 1);
+  assert.equal(openai.startTurnCalls[0]?.inputText, '请结合这些文件说明差异');
+  assert.equal(openai.startTurnCalls[0]?.event?.attachments?.length, 2);
+});
+
+test('/uploads cancel clears the staged batch', async () => {
+  const defaultCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-uploads-cancel-'));
+  const sourceFile = createTempAttachment('clip.mp4', 'video-data');
+  const { runtime } = makeRuntime({ defaultCwd });
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-uploads-5',
+    text: '/uploads',
+  });
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-uploads-5',
+    text: '',
+    attachments: [
+      {
+        kind: 'video',
+        localPath: sourceFile,
+        fileName: 'clip.mp4',
+        mimeType: 'video/mp4',
+      },
+    ],
+  });
+
+  const cancelled = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-uploads-5',
+    text: '/up cancel',
+  });
+  const cancelText = cancelled.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(cancelText, /已取消上传模式/);
+  assert.match(cancelText, /已清空 1 个暂存文件/);
+
+  const status = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-uploads-5',
+    text: '/up status',
+  });
+  assert.equal(status.messages[0]?.text ?? '', '当前没有进行中的上传暂存。先发送 /uploads。');
 });
 
 test('/models lists available models for the current provider', async () => {
@@ -727,9 +1697,11 @@ test('/lang persists command locale for scope and overrides env', async () => {
     text: '/status',
   });
 
-  assert.match(status.messages[0]?.text ?? '', /当前 scope 尚未绑定 bridge session/);
-  assert.match(status.messages[1]?.text ?? '', /默认 Provider 配置：openai-default/);
-  assert.match(status.messages[2]?.text ?? '', /默认工作目录：/);
+  const lines = status.messages.map((message) => message.text ?? '');
+  assert.ok(lines.includes('接口配置：openai-default'));
+  assert.ok(lines.includes('默认工作目录：（未设置）'));
+  assert.ok(lines.includes('模型：gpt-5.4'));
+  assert.ok(lines.includes('完整信息：/status details'));
 });
 
 test('/lang rejects invalid language values', async () => {
@@ -795,6 +1767,14 @@ test('slash command short aliases resolve to the same help and action targets', 
     text: '/perm',
   });
   assert.match(commandResult.messages[0]?.text ?? '', /当前还没有绑定会话/);
+
+  const uploadsHelpResult = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-1',
+    text: '/h up',
+  });
+  assert.match(uploadsHelpResult.messages[0]?.text ?? '', /命令：\/uploads/);
+  assert.match(uploadsHelpResult.messages[0]?.text ?? '', /别名：\/up \/ul/);
 
   const providerResult = await runtime.services.bridgeCoordinator.handleInboundEvent({
     platform: 'weixin',
@@ -997,12 +1977,13 @@ test('/status shows running active-turn details and control hint', async () => {
 
   const status = await runtime.services.bridgeCoordinator.handleInboundEvent({
     ...scopeRef,
-    text: '/status',
+    text: '/status details',
   });
 
-  assert.match(status.messages[12]?.text ?? '', /当前 Turn：.*turn-1/);
-  assert.equal(status.messages[13]?.text ?? '', 'Turn 状态：运行中');
-  assert.equal(status.messages[14]?.text ?? '', 'Turn 控制：/stop');
+  const lines = status.messages.map((message) => message.text ?? '');
+  assert.ok(lines.some((line) => /当前 Turn：.*turn-1/.test(line)));
+  assert.ok(lines.includes('Turn 状态：运行中'));
+  assert.ok(lines.includes('Turn 控制：/stop'));
 
   releaseTurn();
   await firstTurn;
@@ -1162,12 +2143,13 @@ test('command-specific blocked messages switch to wait-for-stop wording after in
 
   const status = await runtime.services.bridgeCoordinator.handleInboundEvent({
     ...scopeRef,
-    text: '/status',
+    text: '/status details',
   });
 
-  assert.match(status.messages[12]?.text ?? '', /当前 Turn：.*turn-1/);
-  assert.equal(status.messages[13]?.text ?? '', 'Turn 状态：已请求中断');
-  assert.equal(status.messages[14]?.text ?? '', 'Turn 控制：/stop');
+  const lines = status.messages.map((message) => message.text ?? '');
+  assert.ok(lines.some((line) => /当前 Turn：.*turn-1/.test(line)));
+  assert.ok(lines.includes('Turn 状态：已请求中断'));
+  assert.ok(lines.includes('Turn 控制：/stop'));
 
   releaseTurn();
   await firstTurn;
@@ -1253,6 +2235,46 @@ test('/threads renders a paged thread browser with previews and commands', async
   assert.match(text, /操作：\/open \d+  \/peek \d+  \/rename \d+ 新名字  \/search 关键词  \/threads/);
 });
 
+test('/threads shows thread id in current binding when the current thread has no title', async () => {
+  const { runtime, openai } = makeRuntime();
+
+  const first = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-threads-untitled-1',
+    text: 'first thread',
+  });
+
+  const currentSession = runtime.services.bridgeSessions.resolveScopeSession({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-threads-untitled-1',
+  });
+  runtime.services.bridgeSessions.updateSession(currentSession.id, {
+    title: null,
+  });
+  const currentThread = openai.threads.get(first.session?.codexThreadId);
+  openai.threads.set(first.session?.codexThreadId, {
+    ...currentThread,
+    title: null,
+  });
+
+  for (let index = 0; index < 5; index += 1) {
+    await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'telegram',
+      externalScopeId: `tg-topic-untitled-${index}`,
+      text: `newer thread ${index}`,
+    });
+  }
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-threads-untitled-1',
+    text: '/threads',
+  });
+
+  const text = result.messages[0]?.text ?? '';
+  assert.match(text, new RegExp(`当前绑定：未命名线程 \\(${first.session?.codexThreadId}\\)`));
+});
+
 test('/next and /prev paginate the current thread browser page', async () => {
   const { runtime } = makeRuntime();
 
@@ -1335,11 +2357,12 @@ test('/open binds the scope to an existing provider thread', async () => {
   const status = await runtime.services.bridgeCoordinator.handleInboundEvent({
     platform: 'weixin',
     externalScopeId: 'wx-user-2',
-    text: '/status',
+    text: '/status details',
   });
 
-  assert.match(status.messages[4]?.text ?? '', new RegExp(`Codex 线程：${original.session?.codexThreadId}`));
-  assert.match(status.messages[5]?.text ?? '', /工作目录：/);
+  const lines = status.messages.map((message) => message.text ?? '');
+  assert.ok(lines.some((line) => new RegExp(`Codex 线程：${original.session?.codexThreadId}`).test(line)));
+  assert.ok(lines.some((line) => /工作目录：/.test(line)));
 });
 
 test('/open accepts the current-page index in addition to raw thread ids', async () => {
@@ -1490,6 +2513,38 @@ test('/reconnect refreshes the current Codex session and keeps the same binding'
   assert.equal(result.messages[0]?.text ?? '', '当前 Codex 会话已刷新。');
   assert.equal(result.messages[1]?.text ?? '', '账号：ganxing@example.com');
   assert.equal(result.messages[2]?.text ?? '', '直接继续发消息即可。');
+  assert.equal(result.session?.bridgeSessionId, original.session?.bridgeSessionId);
+  assert.equal(result.session?.codexThreadId, original.session?.codexThreadId);
+});
+
+test('/retry reconnects and reruns the previous request on the same binding', async () => {
+  const { runtime, openai } = makeRuntime();
+
+  const original = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-retry-1',
+    text: 'hello retry',
+  });
+
+  let reconnectCalls = 0;
+  openai.reconnectProfile = async () => {
+    reconnectCalls += 1;
+    return {
+      connected: true,
+      accountIdentity: null,
+    };
+  };
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-retry-1',
+    text: '/retry',
+  });
+
+  assert.equal(reconnectCalls, 1);
+  assert.equal(openai.startTurnCalls.length, 2);
+  assert.equal(openai.startTurnCalls[1]?.inputText, 'hello retry');
+  assert.equal(result.messages[0]?.text ?? '', 'openai: hello retry');
   assert.equal(result.session?.bridgeSessionId, original.session?.bridgeSessionId);
   assert.equal(result.session?.codexThreadId, original.session?.codexThreadId);
 });

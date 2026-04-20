@@ -1,8 +1,10 @@
 import { CodexAppClient, createNoopLogger, readCodexAccountIdentity } from './app_client.js';
 import type { CodexTurnInput } from './app_client.js';
-import type { BridgeSession, SessionSettings } from '../../types/core.js';
+import { buildTurnArtifactDeveloperInstructions } from '../../core/turn_artifacts.js';
+import type { BridgeSession, SessionSettings, TurnArtifactContext } from '../../types/core.js';
 import type { InboundAttachment, InboundTextEvent } from '../../types/platform.js';
 import type {
+  ProviderApprovalRequest,
   ProviderProfile,
   ProviderThreadListResult,
   ProviderThreadStartResult,
@@ -10,6 +12,7 @@ import type {
   ProviderTurnProgress,
   ProviderTurnResult,
   ProviderModelInfo,
+  ProviderUsageReport,
 } from '../../types/provider.js';
 
 type CodexClientLike = any;
@@ -140,6 +143,7 @@ export class CodexProviderPlugin {
     inputText,
     onProgress = null,
     onTurnStarted = null,
+    onApprovalRequest = null,
   }: {
     providerProfile: ProviderProfile;
     bridgeSession: BridgeSession;
@@ -148,11 +152,16 @@ export class CodexProviderPlugin {
     inputText: string;
     onProgress?: ((progress: ProviderTurnProgress) => Promise<void> | void) | null;
     onTurnStarted?: ((meta: Record<string, unknown>) => Promise<void> | void) | null;
+    onApprovalRequest?: ((request: ProviderApprovalRequest) => Promise<void> | void) | null;
   }): Promise<ProviderTurnResult> {
     const client = await this.ensureClient(providerProfile);
     const modelInfo = await this.resolveModelInfo(providerProfile, client, sessionSettings?.model ?? null);
     const effort = this.resolveReasoningEffort(modelInfo, sessionSettings?.reasoningEffort ?? null);
     const turnInput = buildCodexTurnInput(event, inputText);
+    const developerInstructions = buildDeveloperInstructions({
+      baseInstructions: process.env.CODEXBRIDGE_CODEX_DEVELOPER_INSTRUCTIONS ?? '',
+      event,
+    });
     const result = await client.startTurn({
       threadId: bridgeSession.codexThreadId,
       inputText: turnInput[0]?.type === 'text' ? turnInput[0].text : inputText,
@@ -164,12 +173,15 @@ export class CodexProviderPlugin {
       approvalPolicy: sessionSettings?.approvalPolicy ?? 'on-request',
       sandboxMode: sessionSettings?.sandboxMode ?? 'workspace-write',
       collaborationMode: 'default',
-      developerInstructions: process.env.CODEXBRIDGE_CODEX_DEVELOPER_INSTRUCTIONS ?? '',
+      developerInstructions,
       onProgress,
       onTurnStarted,
+      onApprovalRequest,
     });
     return {
       outputText: result.outputText,
+      outputArtifacts: normalizeOutputArtifacts(result),
+      outputMedia: normalizeOutputMedia(result),
       outputState: result.outputState ?? 'complete',
       previewText: result.previewText ?? '',
       finalSource: result.finalSource ?? 'thread_items',
@@ -192,6 +204,22 @@ export class CodexProviderPlugin {
     return client.interruptTurn({ threadId, turnId });
   }
 
+  async respondToApproval({
+    providerProfile,
+    request,
+    option,
+  }: {
+    providerProfile: ProviderProfile;
+    request: ProviderApprovalRequest;
+    option: 1 | 2 | 3;
+  }): Promise<void> {
+    const client = await this.ensureClient(providerProfile);
+    await client.respondToApproval({
+      requestId: request.requestId,
+      option,
+    });
+  }
+
   async listModels({
     providerProfile,
   }: {
@@ -199,6 +227,35 @@ export class CodexProviderPlugin {
   }): Promise<ProviderModelInfo[]> {
     const client = await this.ensureClient(providerProfile);
     return client.listModels();
+  }
+
+  async getUsage({
+    providerProfile,
+  }: {
+    providerProfile: ProviderProfile;
+  }): Promise<ProviderUsageReport | null> {
+    const client = await this.ensureClient(providerProfile);
+    let report = null;
+    if (typeof client.readUsage === 'function') {
+      try {
+        report = await client.readUsage();
+      } catch {
+        report = null;
+      }
+    }
+    const identity = readCodexAccountIdentity();
+    if (!report && !identity) {
+      return null;
+    }
+    return {
+      provider: report?.provider ?? 'codex',
+      accountId: report?.accountId ?? identity?.accountId ?? null,
+      userId: report?.userId ?? null,
+      email: report?.email ?? identity?.email ?? null,
+      plan: report?.plan ?? null,
+      buckets: Array.isArray(report?.buckets) ? report.buckets : [],
+      credits: report?.credits ?? null,
+    };
   }
 
   getClient(profileId: string): any {
@@ -337,4 +394,62 @@ function describeAttachment(attachment: InboundAttachment): string {
     default:
       return 'attachment';
   }
+}
+
+function buildDeveloperInstructions({
+  baseInstructions,
+  event,
+}: {
+  baseInstructions: string;
+  event: InboundTextEvent;
+}): string {
+  const parts = [String(baseInstructions ?? '').trim()];
+  const artifactContext = resolveTurnArtifactContext(event);
+  const artifactInstructions = buildTurnArtifactDeveloperInstructions(artifactContext);
+  if (artifactInstructions) {
+    parts.push(artifactInstructions);
+  }
+  return parts.filter(Boolean).join('\n\n');
+}
+
+function resolveTurnArtifactContext(event: InboundTextEvent): TurnArtifactContext | null {
+  const metadata = event?.metadata;
+  if (!metadata || typeof metadata !== 'object') {
+    return null;
+  }
+  const codexbridge = (metadata as Record<string, unknown>).codexbridge;
+  if (!codexbridge || typeof codexbridge !== 'object') {
+    return null;
+  }
+  const context = (codexbridge as Record<string, unknown>).turnArtifactContext;
+  if (!context || typeof context !== 'object') {
+    return null;
+  }
+  return context as TurnArtifactContext;
+}
+
+function normalizeOutputArtifacts(result: ProviderTurnResult) {
+  const direct = Array.isArray(result?.outputArtifacts) ? result.outputArtifacts : [];
+  if (direct.length > 0) {
+    return direct.map((artifact) => ({
+      ...artifact,
+      source: artifact.source ?? 'provider_native',
+      turnId: artifact.turnId ?? result?.turnId ?? null,
+    }));
+  }
+  return normalizeOutputMedia(result);
+}
+
+function normalizeOutputMedia(result: ProviderTurnResult) {
+  const direct = Array.isArray(result?.outputArtifacts) ? result.outputArtifacts : [];
+  if (direct.length > 0) {
+    return direct
+      .filter((artifact) => artifact?.kind === 'image')
+      .map((artifact) => ({
+        kind: 'image' as const,
+        path: artifact.path,
+        caption: artifact.caption ?? null,
+      }));
+  }
+  return Array.isArray(result?.outputMedia) ? result.outputMedia : [];
 }

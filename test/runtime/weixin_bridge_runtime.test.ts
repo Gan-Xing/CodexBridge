@@ -11,6 +11,8 @@ interface RuntimeHarnessOptions {
   commitSyncCursor?: (syncCursor: string) => Promise<void> | void;
   previewSoftTargetBytes?: number;
   previewIntervalMs?: number;
+  inboundAttachmentMergeWindowMs?: number;
+  pollEvents?: any[];
 }
 
 function makeRuntime({
@@ -21,6 +23,8 @@ function makeRuntime({
   commitSyncCursor,
   previewSoftTargetBytes = 1,
   previewIntervalMs = 0,
+  inboundAttachmentMergeWindowMs = 3000,
+  pollEvents = null,
 }: RuntimeHarnessOptions) {
   return new WeixinBridgeRuntime({
     platformPlugin: {
@@ -29,7 +33,7 @@ function makeRuntime({
       async pollOnce() {
         return {
           syncCursor: 'cursor-1',
-          events: [{
+          events: pollEvents ?? [{
             platform: 'weixin',
             externalScopeId: 'wxid_1',
             text: 'hello',
@@ -67,6 +71,7 @@ function makeRuntime({
     bridgeCoordinator: coordinator,
     previewSoftTargetBytes,
     previewIntervalMs,
+    inboundAttachmentMergeWindowMs,
   });
 }
 
@@ -126,6 +131,99 @@ test('WeixinBridgeRuntime forwards poll events into the bridge coordinator and s
   assert.deepEqual(committed, ['cursor-1']);
 });
 
+test('WeixinBridgeRuntime merges an image-only inbound message with the next text message into one Codex turn', async () => {
+  const seen: Array<{ text: string; attachmentCount: number }> = [];
+  const sent: Array<{ externalScopeId: string; content: string }> = [];
+  const runtime = makeRuntime({
+    pollEvents: [
+      {
+        platform: 'weixin',
+        externalScopeId: 'wxid_1',
+        text: '',
+        attachments: [{
+          kind: 'image',
+          localPath: '/tmp/codexbridge-image-1.png',
+        }],
+      },
+      {
+        platform: 'weixin',
+        externalScopeId: 'wxid_1',
+        text: '帮我看看这张图是什么意思？',
+      },
+    ],
+    inboundAttachmentMergeWindowMs: 5,
+    previewSoftTargetBytes: 1024,
+    sendText: async ({ externalScopeId, content }) => {
+      sent.push({ externalScopeId, content });
+    },
+    coordinator: {
+      async handleInboundEvent(event: any) {
+        seen.push({
+          text: event.text,
+          attachmentCount: Array.isArray(event.attachments) ? event.attachments.length : 0,
+        });
+        return completeResponse('已收到图片和问题。');
+      },
+    },
+  });
+
+  await runtime.runOnce();
+
+  assert.deepEqual(seen, [
+    {
+      text: '帮我看看这张图是什么意思？',
+      attachmentCount: 1,
+    },
+  ]);
+  assert.deepEqual(sent, [
+    { externalScopeId: 'wxid_1', content: '已收到图片和问题。' },
+  ]);
+});
+
+test('WeixinBridgeRuntime flushes an image-only inbound message after the merge window when no follow-up text arrives', async () => {
+  const seen: Array<{ text: string; attachmentCount: number }> = [];
+  const sent: Array<{ externalScopeId: string; content: string }> = [];
+  const runtime = makeRuntime({
+    pollEvents: [
+      {
+        platform: 'weixin',
+        externalScopeId: 'wxid_1',
+        text: '',
+        attachments: [{
+          kind: 'image',
+          localPath: '/tmp/codexbridge-image-2.png',
+        }],
+      },
+    ],
+    inboundAttachmentMergeWindowMs: 5,
+    previewSoftTargetBytes: 1024,
+    sendText: async ({ externalScopeId, content }) => {
+      sent.push({ externalScopeId, content });
+    },
+    coordinator: {
+      async handleInboundEvent(event: any) {
+        seen.push({
+          text: event.text,
+          attachmentCount: Array.isArray(event.attachments) ? event.attachments.length : 0,
+        });
+        return completeResponse('已收到图片。');
+      },
+    },
+  });
+
+  await runtime.runOnce();
+
+  assert.deepEqual(seen, [
+    {
+      text: '',
+      attachmentCount: 1,
+    },
+  ]);
+  assert.deepEqual(sent, [
+    { externalScopeId: 'wxid_1', content: '已收到图片。' },
+  ]);
+});
+
 test('WeixinBridgeRuntime dispatches plain-text turns in the background so slash commands can run immediately', async () => {
   const sent: Array<{ externalScopeId: string; content: string }> = [];
   let releaseTurn: (value?: unknown) => void = () => {};
@@ -176,6 +274,41 @@ test('WeixinBridgeRuntime dispatches plain-text turns in the background so slash
   ]);
 });
 
+test('WeixinBridgeRuntime sends a WeChat approval prompt when Codex requests approval mid-turn', async () => {
+  const sent: Array<{ externalScopeId: string; content: string }> = [];
+  const seenEvents: string[] = [];
+  const runtime = makeRuntime({
+    sendText: async ({ externalScopeId, content }) => {
+      sent.push({ externalScopeId, content });
+    },
+    coordinator: {
+      async handleInboundEvent(event: any, options: any = {}) {
+        seenEvents.push(event.text);
+        if (event.text === '/allow') {
+          return completeResponse('审批请求 | 1 项\n/allow 1：仅批准这一次\n/deny：拒绝这次请求');
+        }
+        await options.onApprovalRequest?.({
+          requestId: 'approval-1',
+          kind: 'command',
+          threadId: 'thread-1',
+          turnId: 'turn-1',
+          itemId: 'item-1',
+          reason: 'command failed; retry without sandbox?',
+        });
+        return completeResponse('已继续执行。');
+      },
+    },
+  });
+
+  await runtime.runOnce();
+
+  assert.deepEqual(seenEvents, ['hello', '/allow']);
+  assert.deepEqual(sent, [
+    { externalScopeId: 'wxid_1', content: '审批请求 | 1 项\n/allow 1：仅批准这一次\n/deny：拒绝这次请求' },
+    { externalScopeId: 'wxid_1', content: '已继续执行。' },
+  ]);
+});
+
 test('WeixinBridgeRuntime sends media-only response messages through platform sendMedia', async () => {
   const sentMedia: Array<{ externalScopeId: string; filePath: string; caption?: string | null }> = [];
   const runtime = makeRuntime({
@@ -205,6 +338,85 @@ test('WeixinBridgeRuntime sends media-only response messages through platform se
       caption: '截图说明',
     },
   ]);
+});
+
+test('WeixinBridgeRuntime sends artifact-based response messages through platform sendMedia', async () => {
+  const sentMedia: Array<{ externalScopeId: string; filePath: string; caption?: string | null }> = [];
+  const runtime = makeRuntime({
+    sendText: async () => {},
+    sendMedia: async (payload) => {
+      sentMedia.push(payload);
+    },
+    coordinator: {
+      async handleInboundEvent() {
+        return {
+          type: 'message',
+          messages: [{
+            artifact: {
+              kind: 'file',
+              path: '/tmp/example.pdf',
+              displayName: 'example.pdf',
+              mimeType: 'application/pdf',
+              sizeBytes: 12,
+              caption: 'PDF 附件',
+              source: 'provider_native',
+              turnId: 'turn-1',
+            },
+          }],
+        };
+      },
+    },
+  });
+
+  await runtime.runOnce();
+
+  assert.deepEqual(sentMedia, [
+    {
+      externalScopeId: 'wxid_1',
+      filePath: '/tmp/example.pdf',
+      caption: 'PDF 附件',
+    },
+  ]);
+});
+
+test('WeixinBridgeRuntime sends complete media-only Codex turns without requiring final text', async () => {
+  const sentText: Array<{ externalScopeId: string; content: string }> = [];
+  const sentMedia: Array<{ externalScopeId: string; filePath: string; caption?: string | null }> = [];
+  const runtime = makeRuntime({
+    sendText: async ({ externalScopeId, content }) => {
+      sentText.push({ externalScopeId, content });
+    },
+    sendMedia: async (payload) => {
+      sentMedia.push(payload);
+    },
+    coordinator: {
+      async handleInboundEvent() {
+        return {
+          type: 'message',
+          messages: [{
+            mediaPath: '/tmp/generated-dog.png',
+            caption: null,
+          }],
+          meta: {
+            codexTurn: {
+              outputState: 'complete',
+              previewText: '',
+              finalSource: 'thread_items_media',
+            },
+          },
+        };
+      },
+    },
+  });
+
+  await runtime.runOnce();
+
+  assert.deepEqual(sentText, []);
+  assert.deepEqual(sentMedia, [{
+    externalScopeId: 'wxid_1',
+    filePath: '/tmp/generated-dog.png',
+    caption: null,
+  }]);
 });
 
 test('WeixinBridgeRuntime sends final text before media attachments in the same response', async () => {
@@ -503,7 +715,7 @@ test('WeixinBridgeRuntime sends an interrupted message when provider marks the t
   await runtime.runOnce();
 
   assert.deepEqual(sent, [
-    { externalScopeId: 'wxid_1', content: '本轮回复已在 Codex 侧中断，请重试或继续。' },
+    { externalScopeId: 'wxid_1', content: '本轮回复已在 Codex 侧中断。可用：/retry 重试上一条请求，/reconnect 刷新当前会话，/new 新开线程。' },
   ]);
 });
 
@@ -643,6 +855,36 @@ test('WeixinBridgeRuntime sends a timeout message when provider marks the turn a
 
   assert.deepEqual(sent, [
     { externalScopeId: 'wxid_1', content: '本轮回复等待 Codex 超时，请重试。' },
+  ]);
+});
+
+test('WeixinBridgeRuntime commits partial preview text instead of sending a generic failure', async () => {
+  const sent = [];
+  const runtime = makeRuntime({
+    sendText: async ({ externalScopeId, content }) => {
+      sent.push({ externalScopeId, content });
+    },
+    coordinator: {
+      async handleInboundEvent() {
+        return {
+          type: 'message',
+          messages: [{ text: '当前已整理出的修改摘要。' }],
+          meta: {
+            codexTurn: {
+              outputState: 'partial',
+              previewText: '当前已整理出的修改摘要。',
+              finalSource: 'commentary_only',
+            },
+          },
+        };
+      },
+    },
+  });
+
+  await runtime.runOnce();
+
+  assert.deepEqual(sent, [
+    { externalScopeId: 'wxid_1', content: '当前已整理出的修改摘要。' },
   ]);
 });
 

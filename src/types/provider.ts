@@ -1,4 +1,4 @@
-import type { BridgeSession, SessionSettings } from './core.js';
+import type { BridgeSession, SessionSettings, TurnArtifactDeliveryState } from './core.js';
 import type { InboundTextEvent } from './platform.js';
 
 export interface ProviderProfile {
@@ -15,6 +15,8 @@ export interface ProviderThreadTurnItem {
   role: string | null;
   phase: string | null;
   text: string;
+  savedPath?: string | null;
+  result?: string | null;
 }
 
 export interface ProviderThreadTurn {
@@ -56,10 +58,72 @@ export interface ProviderModelInfo {
   defaultReasoningEffort: string | null;
 }
 
+export interface ProviderUsageWindow {
+  name: string;
+  usedPercent: number;
+  windowSeconds: number;
+  resetAfterSeconds: number;
+  resetAtUnix: number;
+}
+
+export interface ProviderUsageBucket {
+  name: string;
+  allowed: boolean;
+  limitReached: boolean;
+  windows: ProviderUsageWindow[];
+}
+
+export interface ProviderUsageCredits {
+  hasCredits: boolean;
+  unlimited: boolean;
+  balance: string | null;
+}
+
+export interface ProviderUsageReport {
+  provider: string;
+  accountId: string | null;
+  userId: string | null;
+  email: string | null;
+  plan: string | null;
+  buckets: ProviderUsageBucket[];
+  credits?: ProviderUsageCredits | null;
+}
+
 export interface ProviderTurnProgress {
   text: string;
   delta: string;
   outputKind: string;
+}
+
+export type OutputArtifactKind = 'image' | 'file' | 'video' | 'audio';
+
+export interface OutputArtifact {
+  kind: OutputArtifactKind;
+  path: string;
+  displayName?: string | null;
+  mimeType?: string | null;
+  sizeBytes?: number | null;
+  caption?: string | null;
+  source?: 'provider_native' | 'bridge_declared' | 'bridge_fallback';
+  turnId?: string | null;
+}
+
+export interface ProviderApprovalRequest {
+  requestId: string;
+  kind: 'command' | 'file_change' | 'permissions';
+  threadId: string;
+  turnId: string | null;
+  itemId: string | null;
+  reason: string | null;
+  command?: string | null;
+  cwd?: string | null;
+  fileChanges?: string[];
+  grantRoot?: string | null;
+  networkPermission?: boolean | null;
+  fileReadPermissions?: string[];
+  fileWritePermissions?: string[];
+  availableDecisionKeys?: string[];
+  execPolicyAmendment?: string[] | null;
 }
 
 export interface ProviderTurnResult {
@@ -71,6 +135,13 @@ export interface ProviderTurnResult {
   threadId?: string | null;
   title?: string | null;
   status?: string | null;
+  outputArtifacts?: OutputArtifact[];
+  outputMedia?: Array<{
+    kind: 'image';
+    path: string;
+    caption?: string | null;
+  }>;
+  artifactDelivery?: TurnArtifactDeliveryState | null;
 }
 
 export interface ProviderPluginContract {
@@ -101,11 +172,17 @@ export interface ProviderPluginContract {
     inputText: string;
     onProgress?: ((progress: ProviderTurnProgress) => Promise<void> | void) | null;
     onTurnStarted?: ((meta: Record<string, unknown>) => Promise<void> | void) | null;
+    onApprovalRequest?: ((request: ProviderApprovalRequest) => Promise<void> | void) | null;
   }): Promise<ProviderTurnResult>;
   interruptTurn?(params: {
     providerProfile: ProviderProfile;
     threadId: string;
     turnId: string;
+  }): Promise<void>;
+  respondToApproval?(params: {
+    providerProfile: ProviderProfile;
+    request: ProviderApprovalRequest;
+    option: 1 | 2 | 3;
   }): Promise<void>;
   reconnectProfile?(params: {
     providerProfile: ProviderProfile;
@@ -113,4 +190,7 @@ export interface ProviderPluginContract {
   listModels?(params: {
     providerProfile: ProviderProfile;
   }): Promise<ProviderModelInfo[]>;
+  getUsage?(params: {
+    providerProfile: ProviderProfile;
+  }): Promise<ProviderUsageReport | null>;
 }

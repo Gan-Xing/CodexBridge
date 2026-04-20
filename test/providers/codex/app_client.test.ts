@@ -1,10 +1,24 @@
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { CodexAppClient } from '../../../src/providers/codex/app_client.js';
 import type { CodexTurnInput } from '../../../src/providers/codex/app_client.js';
+
+function expectedProviderNativeImageArtifact(imagePath: string, sizeBytes: number) {
+  return {
+    kind: 'image',
+    path: imagePath,
+    displayName: path.basename(imagePath),
+    mimeType: 'image/png',
+    sizeBytes,
+    caption: null,
+    source: 'provider_native' as const,
+    turnId: null,
+  };
+}
 
 test('CodexAppClient listThreads returns preview rows and nextCursor', async () => {
   const client = new CodexAppClient({
@@ -174,6 +188,284 @@ test('CodexAppClient startTurn forwards explicit local-image input arrays unchan
 
   const turnStart = calls.find(([method]) => method === 'turn/start')?.[1];
   assert.deepEqual(turnStart.input, input);
+});
+
+test('CodexAppClient startServer enables image generation when spawning app-server', async () => {
+  const calls = [];
+  const child = new EventEmitter() as EventEmitter & {
+    stderr: EventEmitter;
+    exitCode: number | null;
+  };
+  child.stderr = new EventEmitter();
+  child.exitCode = 0;
+
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+    spawnImpl: ((command, args, options) => {
+      calls.push({ command, args, options });
+      return child as any;
+    }) as any,
+  });
+
+  client.connectWebSocket = async () => {
+    client.connected = true;
+  };
+  client.initialize = async () => {};
+
+  await client.startServer();
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.command, 'codex');
+  assert.equal(calls[0]?.args?.[0], 'app-server');
+  assert.deepEqual(calls[0]?.args?.slice(1, 4), ['--enable', 'image_generation', '--listen']);
+  assert.match(String(calls[0]?.args?.[4]), /^ws:\/\/127\.0\.0\.1:\d+$/);
+});
+
+test('CodexAppClient stores command approval requests emitted by the app-server', async () => {
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+  });
+  const seen: any[] = [];
+  client.on('approval_request', (request) => {
+    seen.push(request);
+  });
+
+  client.handleMessage(JSON.stringify({
+    jsonrpc: '2.0',
+    id: 'approval-rpc-1',
+    method: 'item/commandExecution/requestApproval',
+    params: {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      itemId: 'item-1',
+      reason: 'command failed; retry without sandbox?',
+      command: 'npm run build',
+      cwd: '/home/ubuntu/dev/CodexBridge',
+      availableDecisions: ['accept', 'acceptForSession', 'decline'],
+    },
+  }));
+
+  assert.equal(seen.length, 1);
+  assert.deepEqual(seen[0], {
+    requestId: 'approval-rpc-1',
+    kind: 'command',
+    threadId: 'thread-1',
+    turnId: 'turn-1',
+    itemId: 'item-1',
+    reason: 'command failed; retry without sandbox?',
+    command: 'npm run build',
+    cwd: '/home/ubuntu/dev/CodexBridge',
+    availableDecisionKeys: ['accept', 'acceptForSession', 'decline'],
+    execPolicyAmendment: null,
+    networkPermission: null,
+    fileReadPermissions: [],
+    fileWritePermissions: [],
+  });
+});
+
+test('CodexAppClient responds to remembered command approvals with acceptForSession', async () => {
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+  });
+  const sent: any[] = [];
+  client.send = (payload: any) => {
+    sent.push(payload);
+  };
+
+  client.handleMessage(JSON.stringify({
+    jsonrpc: '2.0',
+    id: 'approval-rpc-2',
+    method: 'item/commandExecution/requestApproval',
+    params: {
+      threadId: 'thread-2',
+      turnId: 'turn-2',
+      itemId: 'item-2',
+      reason: 'command failed; retry without sandbox?',
+      command: 'npm run build',
+      cwd: '/home/ubuntu/dev/CodexBridge',
+      availableDecisions: ['accept', 'acceptForSession', 'decline'],
+    },
+  }));
+
+  await client.respondToApproval({
+    requestId: 'approval-rpc-2',
+    option: 2,
+  });
+
+  assert.deepEqual(sent, [{
+    jsonrpc: '2.0',
+    id: 'approval-rpc-2',
+    result: {
+      decision: 'acceptForSession',
+    },
+  }]);
+});
+
+test('CodexAppClient startTurn returns generated image outputs when thread items include saved paths', async () => {
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+  });
+
+  const imagePath = path.join(os.tmpdir(), `codexbridge-generated-${Date.now()}.png`);
+  fs.writeFileSync(imagePath, 'png');
+
+  client.request = async (method) => {
+    if (method === 'turn/start') {
+      return { turn: { id: 'turn-1' } };
+    }
+    if (method === 'thread/read') {
+      return {
+        thread: {
+          id: 'thread-1',
+          name: 'Thread 1',
+          turns: [{
+            id: 'turn-1',
+            status: 'completed',
+            items: [
+              {
+                type: 'assistant_message',
+                text: '小狗图片已生成。',
+              },
+              {
+                type: 'imageGeneration',
+                savedPath: imagePath,
+                result: 'https://cdn.example.com/generated-dog.png',
+              },
+            ],
+          }],
+        },
+      };
+    }
+    return {};
+  };
+
+  const result = await client.startTurn({
+    threadId: 'thread-1',
+    inputText: '画一只小狗',
+    timeoutMs: 10,
+  });
+
+  assert.equal(result.outputText, '小狗图片已生成。');
+  assert.deepEqual(result.outputArtifacts, [
+    expectedProviderNativeImageArtifact(imagePath, 3),
+  ]);
+  assert.deepEqual(result.outputMedia, [
+    expectedProviderNativeImageArtifact(imagePath, 3),
+  ]);
+
+  fs.unlinkSync(imagePath);
+});
+
+test('CodexAppClient startTurn materializes inline image payloads to the saved path when the file is not present yet', async () => {
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+  });
+
+  const imagePath = path.join(os.tmpdir(), `codexbridge-inline-generated-${Date.now()}.png`);
+  const inlinePngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5WQAAAAASUVORK5CYII=';
+
+  client.request = async (method) => {
+    if (method === 'turn/start') {
+      return { turn: { id: 'turn-1' } };
+    }
+    if (method === 'thread/read') {
+      return {
+        thread: {
+          id: 'thread-1',
+          name: 'Thread 1',
+          turns: [{
+            id: 'turn-1',
+            status: 'completed',
+            items: [{
+              type: 'imageGeneration',
+              savedPath: imagePath,
+              result: inlinePngBase64,
+            }],
+          }],
+        },
+      };
+    }
+    return {};
+  };
+
+  const result = await client.startTurn({
+    threadId: 'thread-1',
+    inputText: '画一只小狗',
+    timeoutMs: 10,
+  });
+
+  assert.equal(fs.existsSync(imagePath), true);
+  assert.deepEqual(result.outputArtifacts, [
+    expectedProviderNativeImageArtifact(imagePath, 68),
+  ]);
+  assert.deepEqual(result.outputMedia, [
+    expectedProviderNativeImageArtifact(imagePath, 68),
+  ]);
+
+  fs.unlinkSync(imagePath);
+});
+
+test('CodexAppClient startTurn returns provider-native file artifacts when thread items expose saved paths', async () => {
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+  });
+
+  const reportPath = path.join(os.tmpdir(), `codexbridge-generated-report-${Date.now()}.pdf`);
+  fs.writeFileSync(reportPath, 'pdf-output');
+
+  client.request = async (method) => {
+    if (method === 'turn/start') {
+      return { turn: { id: 'turn-1' } };
+    }
+    if (method === 'thread/read') {
+      return {
+        thread: {
+          id: 'thread-1',
+          name: 'Thread 1',
+          turns: [{
+            id: 'turn-1',
+            status: 'completed',
+            items: [
+              {
+                type: 'assistant_message',
+                text: '报告已生成。',
+              },
+              {
+                type: 'output_file',
+                savedPath: reportPath,
+              },
+            ],
+          }],
+        },
+      };
+    }
+    return {};
+  };
+
+  try {
+    const result = await client.startTurn({
+      threadId: 'thread-1',
+      inputText: '导出 PDF',
+      timeoutMs: 10,
+    });
+
+    assert.equal(result.outputText, '报告已生成。');
+    assert.deepEqual(result.outputArtifacts, [
+      {
+        kind: 'file',
+        path: reportPath,
+        displayName: path.basename(reportPath),
+        mimeType: 'application/pdf',
+        sizeBytes: 10,
+        caption: null,
+        source: 'provider_native',
+        turnId: null,
+      },
+    ]);
+    assert.deepEqual(result.outputMedia, []);
+  } finally {
+    fs.unlinkSync(reportPath);
+  }
 });
 
 test('CodexAppClient omits null reasoning effort from default collaboration settings', async () => {
@@ -680,6 +972,178 @@ test('CodexAppClient keeps waiting for task_complete when turn status is complet
 
   assert.equal(result.outputText, '1395 data files');
   assert.equal(result.outputState, 'complete');
+  assert.equal(readCount, 4);
+});
+
+test('CodexAppClient keeps waiting for imageGeneration after task_complete lands without final text', async () => {
+  const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-session-log-'));
+  const sessionPath = path.join(sessionDir, 'rollout.jsonl');
+  fs.writeFileSync(sessionPath, `${JSON.stringify({
+    timestamp: new Date().toISOString(),
+    type: 'event_msg',
+    payload: {
+      type: 'task_complete',
+      turn_id: 'turn-1',
+    },
+  })}\n`, 'utf8');
+
+  const imagePath = path.join(sessionDir, 'generated-dog.png');
+  fs.writeFileSync(imagePath, 'png');
+
+  let nowMs = 0;
+  let readCount = 0;
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+    turnPollNow: () => nowMs,
+    turnPollSleep: async () => {
+      nowMs += 15_000;
+    },
+  });
+
+  client.request = async (method) => {
+    if (method === 'turn/start') {
+      return { turn: { id: 'turn-1' } };
+    }
+    if (method === 'thread/read') {
+      readCount += 1;
+      if (readCount < 4) {
+        return {
+          thread: {
+            id: 'thread-1',
+            name: 'Thread 1',
+            path: sessionPath,
+            turns: [{
+              id: 'turn-1',
+              status: 'completed',
+              items: [{
+                type: 'userMessage',
+                text: '画一只小狗',
+              }],
+            }],
+          },
+        };
+      }
+      return {
+        thread: {
+          id: 'thread-1',
+          name: 'Thread 1',
+          path: sessionPath,
+          turns: [{
+            id: 'turn-1',
+            status: 'completed',
+            items: [
+              {
+                type: 'userMessage',
+                text: '画一只小狗',
+              },
+              {
+                type: 'imageGeneration',
+                savedPath: imagePath,
+              },
+            ],
+          }],
+        },
+      };
+    }
+    return {};
+  };
+
+  const result = await client.startTurn({
+    threadId: 'thread-1',
+    inputText: '画一只小狗',
+    model: 'gpt-5.4',
+    effort: null,
+    collaborationMode: 'default',
+    timeoutMs: 120_000,
+  });
+
+  assert.equal(result.outputText, '');
+  assert.equal(result.outputState, 'complete');
+  assert.equal(result.finalSource, 'thread_items_media');
+  assert.deepEqual(result.outputMedia, [expectedProviderNativeImageArtifact(imagePath, 3)]);
+  assert.equal(readCount, 4);
+});
+
+test('CodexAppClient keeps waiting for imageGeneration after task_complete lands with preview text', async () => {
+  const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-session-log-preview-image-'));
+  const sessionPath = path.join(sessionDir, 'rollout.jsonl');
+  fs.writeFileSync(sessionPath, '', 'utf8');
+
+  const imagePath = path.join(sessionDir, 'generated-dog.png');
+  fs.writeFileSync(imagePath, 'png');
+
+  let nowMs = 0;
+  let readCount = 0;
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+    turnPollNow: () => nowMs,
+    turnPollSleep: async () => {
+      nowMs += 15_000;
+    },
+  });
+
+  client.request = async (method) => {
+    if (method === 'turn/start') {
+      return { turn: { id: 'turn-1' } };
+    }
+    if (method === 'thread/read') {
+      readCount += 1;
+      if (readCount === 1) {
+        fs.writeFileSync(sessionPath, `${JSON.stringify({
+          timestamp: new Date().toISOString(),
+          type: 'event_msg',
+          payload: {
+            type: 'task_complete',
+            turn_id: 'turn-1',
+            last_agent_message: '继续生成一张新的可爱小狗图片。',
+          },
+        })}\n`, 'utf8');
+      }
+      return {
+        thread: {
+          id: 'thread-1',
+          name: 'Thread 1',
+          path: sessionPath,
+          turns: [{
+            id: 'turn-1',
+            status: 'completed',
+            items: readCount >= 4
+              ? [
+                {
+                  type: 'userMessage',
+                  text: '画一只小狗',
+                },
+                {
+                  type: 'imageGeneration',
+                  savedPath: imagePath,
+                },
+              ]
+              : [
+                {
+                  type: 'userMessage',
+                  text: '画一只小狗',
+                },
+              ],
+          }],
+        },
+      };
+    }
+    return {};
+  };
+
+  const result = await client.startTurn({
+    threadId: 'thread-1',
+    inputText: '画一只小狗',
+    model: 'gpt-5.4',
+    effort: null,
+    collaborationMode: 'default',
+    timeoutMs: 120_000,
+  });
+
+  assert.equal(result.outputText, '');
+  assert.equal(result.outputState, 'complete');
+  assert.equal(result.finalSource, 'thread_items_media');
+  assert.deepEqual(result.outputMedia, [expectedProviderNativeImageArtifact(imagePath, 3)]);
   assert.equal(readCount, 4);
 });
 
@@ -1348,7 +1812,7 @@ test('CodexAppClient returns missing when neither thread items nor progress expo
   assert.ok(readCount >= 3);
 });
 
-test('CodexAppClient keeps waiting and times out instead of returning missing when assistant activity exists without a final answer', async () => {
+test('CodexAppClient returns partial commentary instead of timing out when assistant activity exists without a final answer', async () => {
   const client = new CodexAppClient({
     codexCliBin: 'codex',
   });
@@ -1378,17 +1842,19 @@ test('CodexAppClient keeps waiting and times out instead of returning missing wh
     return {};
   };
 
-  await assert.rejects(
-    client.startTurn({
-      threadId: 'thread-1',
-      inputText: 'hello',
-      model: 'gpt-5.4',
-      effort: null,
-      collaborationMode: 'default',
-      timeoutMs: 2500,
-    }),
-    /Timed out waiting for Codex turn turn-1/,
-  );
+  const result = await client.startTurn({
+    threadId: 'thread-1',
+    inputText: 'hello',
+    model: 'gpt-5.4',
+    effort: null,
+    collaborationMode: 'default',
+    timeoutMs: 2500,
+  });
+
+  assert.equal(result.outputText, '');
+  assert.equal(result.outputState, 'partial');
+  assert.equal(result.previewText, '我先看一下。');
+  assert.equal(result.finalSource, 'commentary_only');
 });
 
 

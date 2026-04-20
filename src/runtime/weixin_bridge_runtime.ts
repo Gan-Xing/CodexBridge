@@ -5,7 +5,7 @@ import type {
   InboundTextEvent,
   PlatformMediaDeliveryResult,
 } from '../types/platform.js';
-import type { ProviderTurnProgress } from '../types/provider.js';
+import type { OutputArtifact, ProviderApprovalRequest, ProviderTurnProgress } from '../types/provider.js';
 
 interface DeliveryResult {
   success: boolean;
@@ -18,6 +18,7 @@ interface DeliveryResult {
 
 interface RuntimeResponseMessage {
   text?: string | null;
+  artifact?: OutputArtifact | null;
   mediaPath?: string | null;
   caption?: string | null;
 }
@@ -51,7 +52,10 @@ interface PlatformPluginLike {
 interface BridgeCoordinatorLike {
   handleInboundEvent(
     event: InboundTextEvent,
-    options: { onProgress?: ((progress: ProviderTurnProgress) => Promise<void>) | null },
+    options: {
+      onProgress?: ((progress: ProviderTurnProgress) => Promise<void>) | null;
+      onApprovalRequest?: ((request: ProviderApprovalRequest) => Promise<void>) | null;
+    },
   ): Promise<RuntimeResponse>;
   restartBridge?(params: { event: InboundTextEvent }): Promise<void>;
 }
@@ -81,6 +85,14 @@ interface FinalDelivery {
   sentContent: string;
 }
 
+interface PendingInboundMerge {
+  event: InboundTextEvent;
+  timer: ReturnType<typeof setTimeout> | null;
+  completion: Promise<RuntimeResponse>;
+  resolve: (response: RuntimeResponse) => void;
+  reject: (error: unknown) => void;
+}
+
 interface WeixinBridgeRuntimeOptions {
   platformPlugin: PlatformPluginLike;
   bridgeCoordinator: BridgeCoordinatorLike;
@@ -88,6 +100,7 @@ interface WeixinBridgeRuntimeOptions {
   previewSoftTargetBytes?: number;
   previewHardLimitBytes?: number;
   previewIntervalMs?: number;
+  inboundAttachmentMergeWindowMs?: number;
   locale?: string | null;
 }
 
@@ -104,6 +117,8 @@ export class WeixinBridgeRuntime {
 
   previewIntervalMs: number;
 
+  inboundAttachmentMergeWindowMs: number;
+
   i18n: Translator;
 
   poller: WeixinPoller | null;
@@ -112,6 +127,8 @@ export class WeixinBridgeRuntime {
 
   scopeChains: Map<string, Promise<RuntimeResponse>>;
 
+  pendingInboundMerges: Map<string, PendingInboundMerge>;
+
   constructor({
     platformPlugin,
     bridgeCoordinator,
@@ -119,6 +136,7 @@ export class WeixinBridgeRuntime {
     previewSoftTargetBytes = 2048,
     previewHardLimitBytes = 2048,
     previewIntervalMs = 3000,
+    inboundAttachmentMergeWindowMs = 3000,
     locale = null,
   }) {
     this.platformPlugin = platformPlugin;
@@ -127,10 +145,12 @@ export class WeixinBridgeRuntime {
     this.previewSoftTargetBytes = previewSoftTargetBytes;
     this.previewHardLimitBytes = previewHardLimitBytes;
     this.previewIntervalMs = previewIntervalMs;
+    this.inboundAttachmentMergeWindowMs = inboundAttachmentMergeWindowMs;
     this.i18n = createI18n(locale);
     this.poller = null;
     this.backgroundTasks = new Set();
     this.scopeChains = new Map();
+    this.pendingInboundMerges = new Map();
   }
 
   async start(): Promise<void> {
@@ -148,31 +168,35 @@ export class WeixinBridgeRuntime {
   async stop() {
     this.poller?.stop();
     this.poller = null;
+    await this.flushAllPendingInboundMerges();
     await this.waitForIdle();
     await this.platformPlugin.stop();
   }
 
   async runOnce(): Promise<{ syncCursor?: string | null; events: InboundTextEvent[] }> {
     const result = await this.platformPlugin.pollOnce();
-    for (const event of result.events) {
-      await this.handleInboundEvent(event);
-    }
+    const dispatch = await this.dispatchEvents(result.events ?? []);
+    await dispatch.completion;
     await this.platformPlugin.commitSyncCursor?.(result.syncCursor);
+    for (const afterCommit of dispatch.afterCommitActions) {
+      await afterCommit();
+    }
     return result;
   }
 
   async handleInboundEvent(event: InboundTextEvent): Promise<RuntimeResponse> {
-    return this.enqueueScopeWork(event.externalScopeId, async () => this.processInboundEvent(event));
+    return this.scheduleInboundEvent(event);
   }
 
   async dispatchInboundEvent(event: InboundTextEvent): Promise<any> {
     const command = parseSlashCommand(String(event?.text ?? ''));
     if (command) {
+      await this.flushPendingInboundMerge(event.externalScopeId);
       const response = await this.processInboundEventWithOptions(event, { deferPostResponseAction: true });
       const afterCommit = this.buildAfterCommitAction(response, event);
       return afterCommit ? { afterCommit } : undefined;
     }
-    const task = this.processInboundEvent(event)
+    const task = this.scheduleInboundEvent(event)
       .catch(async (error) => {
         await this.onError(error);
         throw error;
@@ -185,11 +209,125 @@ export class WeixinBridgeRuntime {
   }
 
   async waitForIdle(): Promise<void> {
+    await this.flushAllPendingInboundMerges();
     const tasks = [...this.backgroundTasks];
     if (tasks.length === 0) {
       return;
     }
     await Promise.allSettled(tasks);
+  }
+
+  async dispatchEvents(events: InboundTextEvent[]): Promise<{
+    completion: Promise<void>;
+    afterCommitActions: Array<() => Promise<void> | void>;
+  }> {
+    const completions: Promise<void>[] = [];
+    const afterCommitActions: Array<() => Promise<void> | void> = [];
+    for (const event of events) {
+      const outcome = await this.dispatchInboundEvent(event);
+      const completion = extractCompletionPromise(outcome);
+      if (completion) {
+        completions.push(completion);
+      }
+      const afterCommit = extractAfterCommitAction(outcome);
+      if (afterCommit) {
+        afterCommitActions.push(afterCommit);
+      }
+    }
+    return {
+      completion: completions.length === 0 ? Promise.resolve() : Promise.all(completions).then(() => {}),
+      afterCommitActions,
+    };
+  }
+
+  scheduleInboundEvent(event: InboundTextEvent): Promise<RuntimeResponse> {
+    const scopeId = String(event?.externalScopeId ?? '');
+    if (!scopeId) {
+      return this.processInboundEvent(event);
+    }
+
+    const pending = this.pendingInboundMerges.get(scopeId) ?? null;
+    if (pending) {
+      if (parseSlashCommand(String(event?.text ?? ''))) {
+        void this.flushPendingInboundMerge(scopeId);
+        return this.enqueueScopeWork(scopeId, async () => this.processInboundEvent(event));
+      }
+      const mergedEvent = mergeInboundEvents(pending.event, event);
+      if (shouldDelayInboundEvent(mergedEvent)) {
+        pending.event = mergedEvent;
+        debugRuntime('pending_inbound_merge_updated', {
+          scopeId,
+          attachmentCount: Array.isArray(mergedEvent.attachments) ? mergedEvent.attachments.length : 0,
+          hasText: Boolean(String(mergedEvent.text ?? '').trim()),
+        });
+        this.armPendingInboundMerge(scopeId, pending);
+        return pending.completion;
+      }
+      this.pendingInboundMerges.delete(scopeId);
+      this.clearPendingInboundTimer(pending);
+      const operation = this.enqueueScopeWork(scopeId, async () => this.processInboundEvent(mergedEvent));
+      operation.then(pending.resolve, pending.reject);
+      return operation;
+    }
+
+    if (shouldDelayInboundEvent(event)) {
+      const deferred = createPendingInboundMerge(event);
+      this.pendingInboundMerges.set(scopeId, deferred);
+      debugRuntime('pending_inbound_merge_started', {
+        scopeId,
+        attachmentCount: Array.isArray(event.attachments) ? event.attachments.length : 0,
+      });
+      this.armPendingInboundMerge(scopeId, deferred);
+      return deferred.completion;
+    }
+
+    return this.enqueueScopeWork(scopeId, async () => this.processInboundEvent(event));
+  }
+
+  armPendingInboundMerge(scopeId: string, pending: PendingInboundMerge): void {
+    this.clearPendingInboundTimer(pending);
+    pending.timer = setTimeout(() => {
+      void this.flushPendingInboundMerge(scopeId);
+    }, this.inboundAttachmentMergeWindowMs);
+  }
+
+  clearPendingInboundTimer(pending: PendingInboundMerge): void {
+    if (!pending.timer) {
+      return;
+    }
+    clearTimeout(pending.timer);
+    pending.timer = null;
+  }
+
+  async flushPendingInboundMerge(externalScopeId: string): Promise<void> {
+    const scopeId = String(externalScopeId ?? '');
+    if (!scopeId) {
+      return;
+    }
+    const pending = this.pendingInboundMerges.get(scopeId);
+    if (!pending) {
+      return;
+    }
+    this.pendingInboundMerges.delete(scopeId);
+    this.clearPendingInboundTimer(pending);
+    debugRuntime('pending_inbound_merge_flushed', {
+      scopeId,
+      attachmentCount: Array.isArray(pending.event.attachments) ? pending.event.attachments.length : 0,
+      hasText: Boolean(String(pending.event.text ?? '').trim()),
+    });
+    const operation = this.enqueueScopeWork(scopeId, async () => this.processInboundEvent(pending.event));
+    operation.then(pending.resolve, pending.reject);
+    await operation.catch(() => {});
+  }
+
+  async flushAllPendingInboundMerges(): Promise<void> {
+    const scopeIds = [...this.pendingInboundMerges.keys()];
+    if (scopeIds.length === 0) {
+      return;
+    }
+    await Promise.all(scopeIds.map(async (scopeId) => {
+      await this.flushPendingInboundMerge(scopeId);
+    }));
   }
 
   async processInboundEvent(event: InboundTextEvent): Promise<RuntimeResponse> {
@@ -207,6 +345,9 @@ export class WeixinBridgeRuntime {
         onProgress: async (progress) => {
           await this.handleProgressUpdate(event, streamState, progress);
         },
+        onApprovalRequest: async () => {
+          await this.notifyApprovalPrompt(event);
+        },
       });
       debugRuntime('coordinator_response', {
         scopeId: event.externalScopeId,
@@ -215,6 +356,8 @@ export class WeixinBridgeRuntime {
         messages: Array.isArray(response?.messages)
           ? response.messages.map((message) => ({
             text: truncateDebugText(message?.text),
+            artifactKind: message?.artifact?.kind ?? null,
+            artifactPath: String(message?.artifact?.path ?? ''),
             mediaPath: String(message?.mediaPath ?? ''),
             caption: truncateDebugText(message?.caption),
           }))
@@ -229,8 +372,24 @@ export class WeixinBridgeRuntime {
       }
       const codexTurnMeta = response?.meta?.codexTurn ?? null;
       const finalText = extractResponseMessageText(response);
-      const mediaMessages = extractResponseMediaMessages(response);
-      if (normalizeComparableText(finalText) || codexTurnMeta) {
+      const artifactMessages = extractResponseArtifactMessages(response);
+      const hasComparableFinalText = Boolean(normalizeComparableText(finalText));
+      const hasCompleteMediaOnlyFinal = !hasComparableFinalText
+        && artifactMessages.length > 0
+        && (codexTurnMeta?.outputState ?? 'complete') === 'complete';
+      if (hasCompleteMediaOnlyFinal) {
+        await this.stopPreviewStreaming(streamState);
+        debugRuntime('final_delivery_decision', {
+          scopeId: event.externalScopeId,
+          outputState: codexTurnMeta?.outputState ?? null,
+          finalSource: codexTurnMeta?.finalSource ?? 'thread_items_media',
+          finalText: '',
+          streamedPreview: truncateDebugText(streamState.streamedText),
+          previewChunkCount: streamState.sentChunkCount,
+          completionMode: 'media_only_final',
+          deliveryContent: '',
+        });
+      } else if (hasComparableFinalText || codexTurnMeta) {
         const finalDelivery = await this.ensureFinalDelivered(event, streamState, response, codexTurnMeta);
         debugRuntime('final_delivery_decision', {
           scopeId: event.externalScopeId,
@@ -245,8 +404,8 @@ export class WeixinBridgeRuntime {
       } else {
         await this.stopPreviewStreaming(streamState);
       }
-      if (mediaMessages.length > 0) {
-        await this.deliverMediaMessages(event, mediaMessages);
+      if (artifactMessages.length > 0) {
+        await this.deliverArtifactMessages(event, artifactMessages);
       }
       if (!options.deferPostResponseAction) {
         await this.runPostResponseAction(response, event);
@@ -406,8 +565,33 @@ export class WeixinBridgeRuntime {
     const outputState = codexTurnMeta?.outputState ?? 'complete';
     const errorMessage = String(codexTurnMeta?.errorMessage ?? '').trim();
     const finalText = extractResponseMessageText(response);
+    const artifactMessages = extractResponseArtifactMessages(response);
     const normalizedFinal = normalizeComparableText(finalText);
     if (outputState !== 'complete') {
+      if (outputState === 'partial' && normalizedFinal) {
+        const previewText = isComparablePrefix(streamState.streamedText, finalText) ? streamState.streamedText : '';
+        const commitContent = resolveFinalCommitContent(finalText, previewText);
+        if (!commitContent) {
+          return {
+            source: codexTurnMeta?.finalSource ?? 'progress_only',
+            mode: 'partial_preview_already_sent',
+            finalText,
+            sentContent: '',
+          };
+        }
+        const delivery = await this.sendTextWithRetry({
+          externalScopeId: event.externalScopeId,
+          content: commitContent,
+        });
+        if (delivery.success) {
+          return {
+            source: codexTurnMeta?.finalSource ?? 'progress_only',
+            mode: 'partial_preview_commit',
+            finalText,
+            sentContent: delivery.deliveredText || commitContent,
+          };
+        }
+      }
       const failureMessage = errorMessage
         ? this.i18n.t('runtime.error.codex', { error: errorMessage })
         : outputState === 'interrupted'
@@ -440,6 +624,14 @@ export class WeixinBridgeRuntime {
       };
     }
     if (!normalizedFinal) {
+      if (artifactMessages.length > 0) {
+        return {
+          source: codexTurnMeta?.finalSource ?? 'thread_items_media',
+          mode: 'media_only_complete',
+          finalText: '',
+          sentContent: '',
+        };
+      }
       throw new Error(this.i18n.t('runtime.error.finalTextMissing', { scopeId: event.externalScopeId }));
     }
 
@@ -548,15 +740,19 @@ export class WeixinBridgeRuntime {
     };
   }
 
-  async deliverMediaMessages(
+  async deliverArtifactMessages(
     event: InboundTextEvent,
-    messages: Array<{ mediaPath: string; caption?: string | null }>,
+    artifacts: OutputArtifact[],
   ): Promise<void> {
-    for (const message of messages) {
+    for (const artifact of artifacts) {
+      const filePath = String(artifact?.path ?? '').trim();
+      if (!filePath) {
+        continue;
+      }
       const result = await this.sendMediaWithRetry({
         externalScopeId: event.externalScopeId,
-        filePath: message.mediaPath,
-        caption: message.caption ?? null,
+        filePath,
+        caption: artifact.caption ?? null,
       });
       if (!result.success) {
         throw new Error(`media delivery failed: ${result.error || result.sentPath}`);
@@ -613,6 +809,25 @@ export class WeixinBridgeRuntime {
         this.backgroundTasks.delete(task);
       });
   }
+
+  async notifyApprovalPrompt(event: InboundTextEvent): Promise<void> {
+    try {
+      const response = await this.bridgeCoordinator.handleInboundEvent({
+        ...event,
+        text: '/allow',
+      }, {});
+      const content = extractResponseMessageText(response);
+      if (!content) {
+        return;
+      }
+      await this.sendTextWithRetry({
+        externalScopeId: event.externalScopeId,
+        content,
+      });
+    } catch (error) {
+      await this.onError(error);
+    }
+  }
 }
 
 function createStreamState(): StreamState {
@@ -632,7 +847,7 @@ function createStreamState(): StreamState {
 function extractResponseMessageText(response: RuntimeResponse): string {
   return Array.isArray(response?.messages)
     ? response.messages
-      .filter((message) => !String(message?.mediaPath ?? '').trim())
+      .filter((message) => !String(message?.artifact?.path ?? message?.mediaPath ?? '').trim())
       .map((message) => String(message?.text ?? '').trim())
       .filter(Boolean)
       .join('\n\n')
@@ -640,16 +855,47 @@ function extractResponseMessageText(response: RuntimeResponse): string {
     : '';
 }
 
-function extractResponseMediaMessages(response: RuntimeResponse): Array<{ mediaPath: string; caption?: string | null }> {
+function extractResponseArtifactMessages(response: RuntimeResponse): OutputArtifact[] {
   if (!Array.isArray(response?.messages)) {
     return [];
   }
   return response.messages
-    .map((message) => ({
-      mediaPath: String(message?.mediaPath ?? '').trim(),
-      caption: typeof message?.caption === 'string' ? message.caption : null,
-    }))
-    .filter((message) => Boolean(message.mediaPath));
+    .map((message) => normalizeResponseArtifact(message))
+    .filter(Boolean) as OutputArtifact[];
+}
+
+function normalizeResponseArtifact(message: RuntimeResponseMessage): OutputArtifact | null {
+  const direct = message?.artifact && typeof message.artifact === 'object'
+    ? message.artifact
+    : null;
+  const artifactPath = String(direct?.path ?? message?.mediaPath ?? '').trim();
+  if (!artifactPath) {
+    return null;
+  }
+  return {
+    kind: direct?.kind ?? inferRuntimeArtifactKind(artifactPath),
+    path: artifactPath,
+    displayName: direct?.displayName ?? null,
+    mimeType: direct?.mimeType ?? null,
+    sizeBytes: direct?.sizeBytes ?? null,
+    caption: typeof message?.caption === 'string' ? message.caption : (direct?.caption ?? null),
+    source: direct?.source ?? 'provider_native',
+    turnId: direct?.turnId ?? null,
+  };
+}
+
+function inferRuntimeArtifactKind(filePath: string): OutputArtifact['kind'] {
+  const normalized = String(filePath ?? '').toLowerCase();
+  if (/\.(png|jpe?g|gif|webp|bmp)(?:$|\?)/iu.test(normalized)) {
+    return 'image';
+  }
+  if (/\.(mp4|mov|mkv|webm)(?:$|\?)/iu.test(normalized)) {
+    return 'video';
+  }
+  if (/\.(mp3|wav|ogg|m4a|flac|amr)(?:$|\?)/iu.test(normalized)) {
+    return 'audio';
+  }
+  return 'file';
 }
 
 function resolveFinalCommitContent(finalText: string, previewText: string): string {
@@ -758,6 +1004,121 @@ function sleep(ms) {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+function createPendingInboundMerge(event: InboundTextEvent): PendingInboundMerge {
+  let resolve: (response: RuntimeResponse) => void = () => {};
+  let reject: (error: unknown) => void = () => {};
+  const completion = new Promise<RuntimeResponse>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return {
+    event,
+    timer: null,
+    completion,
+    resolve,
+    reject,
+  };
+}
+
+function shouldDelayInboundEvent(event: InboundTextEvent): boolean {
+  return !parseSlashCommand(String(event?.text ?? ''))
+    && hasAttachments(event)
+    && !String(event?.text ?? '').trim();
+}
+
+function hasAttachments(event: InboundTextEvent | null | undefined): boolean {
+  return Array.isArray(event?.attachments) && event.attachments.length > 0;
+}
+
+function mergeInboundEvents(baseEvent: InboundTextEvent, nextEvent: InboundTextEvent): InboundTextEvent {
+  return {
+    ...baseEvent,
+    ...nextEvent,
+    text: combineEventText(baseEvent.text, nextEvent.text),
+    attachments: [
+      ...(Array.isArray(baseEvent.attachments) ? baseEvent.attachments : []),
+      ...(Array.isArray(nextEvent.attachments) ? nextEvent.attachments : []),
+    ],
+    cwd: nextEvent.cwd ?? baseEvent.cwd ?? null,
+    locale: nextEvent.locale ?? baseEvent.locale ?? null,
+    metadata: mergeEventMetadata(baseEvent.metadata, nextEvent.metadata),
+  };
+}
+
+function combineEventText(baseText: string, nextText: string): string {
+  const current = String(baseText ?? '').trim();
+  const incoming = String(nextText ?? '').trim();
+  if (!current) {
+    return incoming;
+  }
+  if (!incoming) {
+    return current;
+  }
+  return `${current}\n\n${incoming}`;
+}
+
+function mergeEventMetadata(
+  baseMetadata: Record<string, unknown> | undefined,
+  nextMetadata: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (!baseMetadata && !nextMetadata) {
+    return undefined;
+  }
+  const merged = {
+    ...(baseMetadata ?? {}),
+    ...(nextMetadata ?? {}),
+  } as Record<string, unknown>;
+  const baseWeixin = isRecord(baseMetadata?.weixin) ? baseMetadata?.weixin : null;
+  const nextWeixin = isRecord(nextMetadata?.weixin) ? nextMetadata?.weixin : null;
+  if (baseWeixin || nextWeixin) {
+    const weixin = {
+      ...(baseWeixin ?? {}),
+      ...(nextWeixin ?? {}),
+    } as Record<string, unknown>;
+    const attachmentCount = Number(baseWeixin?.attachmentCount ?? 0) + Number(nextWeixin?.attachmentCount ?? 0);
+    if (attachmentCount > 0) {
+      weixin.attachmentCount = attachmentCount;
+    }
+    const attachmentErrors = [
+      ...extractStringArray(baseWeixin?.attachmentErrors),
+      ...extractStringArray(nextWeixin?.attachmentErrors),
+    ];
+    if (attachmentErrors.length > 0) {
+      weixin.attachmentErrors = attachmentErrors;
+    }
+    merged.weixin = weixin;
+  }
+  return merged;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function extractStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item) => String(item ?? '').trim())
+    .filter(Boolean);
+}
+
+function extractCompletionPromise(outcome: any): Promise<void> | null {
+  const completion = outcome?.completion;
+  if (!completion || typeof completion.then !== 'function') {
+    return null;
+  }
+  return Promise.resolve(completion).then(() => {});
+}
+
+function extractAfterCommitAction(outcome: any): (() => Promise<void> | void) | null {
+  if (!outcome || typeof outcome.afterCommit !== 'function') {
+    return null;
+  }
+  return outcome.afterCommit;
 }
 
 function normalizeComparableText(value) {

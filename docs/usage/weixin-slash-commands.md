@@ -29,7 +29,7 @@ It borrows the most useful CLI help conventions while staying chat-friendly:
 - `/helps` shows the full command catalog
 - `/helps <command>` shows one command in detail
 - every slash command supports `-h`, `--help`, `-help`, and `-helps`
-- every slash command also supports a short alias such as `/h`, `/st`, `/sp`, `/n`, `/pd`, `/th`, `/se`, `/nx`, `/pv`, `/o`, `/pk`, `/rn`, `/m`, `/ms`, `/perm`, `/rc`, and `/rs`
+- every slash command also supports a short alias such as `/h`, `/st`, `/us`, `/sp`, `/n`, `/up`, `/pd`, `/ms`, `/m`, `/th`, `/se`, `/nx`, `/pv`, `/o`, `/pk`, `/rn`, `/perm`, `/al`, `/dn`, `/rc`, `/rt`, and `/rs`
 - `/lang` and `/lang <zh|en>` to switch reply language for this scope (higher priority than env).
 - thread browsing is index-first on WeChat, so `/open 2` is preferred over copying raw thread ids
 
@@ -66,6 +66,14 @@ It borrows the most useful CLI help conventions while staying chat-friendly:
 /lang zh
 /permissions
 /perm
+/allow
+/al
+/allow 1
+/allow 2
+/deny
+/dn
+/retry
+/rt
 ```
 
 ## Command Catalog
@@ -264,6 +272,49 @@ Examples:
 /perm full-access
 ```
 
+### `/allow [1|2] [index]` and `/al [1|2] [index]`
+
+Handle the approval request that is currently pending during an active turn.
+This mirrors the Codex CLI/App-style `1 / 2 / 3` approval flow on WeChat.
+
+- `/allow` shows the current pending approval list
+- `/allow 1` approves the first pending request once
+- `/allow 2` approves and remembers it for the current session when supported
+- if multiple requests are pending, use `/allow 2 2` to answer request `#2`
+
+Examples:
+
+```text
+/allow
+/al
+/allow 1
+/allow 2
+/allow 2 2
+```
+
+Notes:
+
+- use `/permissions` to change the default preset for the next turn
+- use `/allow` only for the approval request that is pending right now
+- `/allow 2` is session-scoped remembered approval, not a replacement for `/permissions full-access`
+
+### `/deny [index]` and `/dn [index]`
+
+Deny the approval request that is currently pending during an active turn.
+This is the clearer replacement for the old `/allow 3` wording.
+
+- `/deny` denies the first pending request
+- `/deny 2` denies request `#2` when multiple approvals are pending
+- old `/allow 3` remains supported for compatibility, but it is no longer the recommended form
+
+Examples:
+
+```text
+/deny
+/dn
+/deny 2
+```
+
 ### `/reconnect` and `/rc`
 
 Refresh the current Codex provider session.
@@ -273,6 +324,22 @@ Example:
 ```text
 /reconnect
 /rc
+```
+
+### `/retry` and `/rt`
+
+Retry the previous non-command user request in the same thread.
+The bridge refreshes the current Codex session first, then starts a new turn with the previous request snapshot.
+
+- use this after a turn becomes `interrupted`
+- this does not resume the old turn in place; it reruns the previous request as a new turn
+- if the previous request depended on local attachments that no longer exist, the bridge will refuse the retry and show the missing path
+
+Examples:
+
+```text
+/retry
+/rt
 ```
 
 ### `/restart` and `/rs`
@@ -331,5 +398,7 @@ For day-to-day use on WeChat:
 4. Use `/rename 1 <alias>` if you want a stable, readable name
 5. Use `/stop` if the current reply needs to be interrupted
 6. Use `/permissions` when you need to inspect or change the next-turn access preset
+7. Use `/allow` to approve and `/deny` to reject when Codex asks for approval during the current turn
+8. Use `/retry` after an interrupted turn; use `/reconnect` only when you want to refresh the session without rerunning the previous request
 
 This workflow avoids copying raw thread ids and works well in a chat UI without buttons.
