@@ -164,6 +164,7 @@ test('WeixinOfficialTransport.sendMediaFile uploads image media and sends the im
     assert.equal(uploadPayload.thumb_rawsize, undefined);
     assert.equal(uploadPayload.thumb_rawfilemd5, undefined);
     assert.equal(uploadPayload.thumb_filesize, undefined);
+    assert.equal(Number(uploadPayload.rawsize), fs.statSync(imagePath).size);
 
     const cdnUploads = requests.filter((entry) => entry.url.includes('/upload?'));
     assert.equal(cdnUploads.length, 1);
@@ -183,6 +184,123 @@ test('WeixinOfficialTransport.sendMediaFile uploads image media and sends the im
     assert.equal(payload.msg.item_list?.[0]?.image_item?.thumb_media, undefined);
     assert.equal(payload.msg.item_list?.[0]?.image_item?.thumb_size, undefined);
     assert.equal(payload.msg.item_list?.[0]?.image_item?.hd_size, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('WeixinOfficialTransport.sendMediaFile falls back to JPEG only after raw image delivery fails', async (t) => {
+  if (!hasFfmpeg()) {
+    t.skip('ffmpeg/ffprobe not available');
+    return;
+  }
+
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-weixin-media-fallback-'));
+  const imagePath = path.join(tempDir, 'sample.png');
+  const ffmpeg = spawnSync('ffmpeg', [
+    '-hide_banner',
+    '-loglevel',
+    'error',
+    '-y',
+    '-f',
+    'lavfi',
+    '-i',
+    'testsrc2=s=320x240:d=1',
+    '-frames:v',
+    '1',
+    imagePath,
+  ], { encoding: 'utf8' });
+  assert.equal(ffmpeg.status, 0, ffmpeg.stderr || ffmpeg.stdout);
+
+  const originalFetch = globalThis.fetch;
+  const requests: Array<{ url: string; method: string; body?: string | Uint8Array | null }> = [];
+  let uploadParamIndex = 0;
+  let imageSendAttempt = 0;
+
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    requests.push({
+      url,
+      method: init?.method ?? 'GET',
+      body: typeof init?.body === 'string'
+        ? init.body
+        : init?.body instanceof Uint8Array
+          ? init.body
+          : null,
+    });
+
+    if (url.includes('/ilink/bot/getuploadurl')) {
+      uploadParamIndex += 1;
+      return new Response(JSON.stringify({
+        upload_param: `upload-param-${uploadParamIndex}`,
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (url.includes('/upload?')) {
+      return new Response('', {
+        status: 200,
+        headers: {
+          'x-encrypted-param': url.includes('upload-param-2') ? 'download-param-2' : 'download-param-1',
+        },
+      });
+    }
+
+    if (url.includes('/ilink/bot/sendmessage')) {
+      const payload = JSON.parse(String(init?.body ?? '{}'));
+      const itemType = Number(payload?.msg?.item_list?.[0]?.type ?? 0);
+      if (itemType === 2) {
+        imageSendAttempt += 1;
+        if (imageSendAttempt === 1) {
+          return new Response(JSON.stringify({ ret: 1, errcode: 5001 }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+      }
+      return new Response(JSON.stringify({ ret: 0 }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    throw new Error(`unexpected fetch url: ${url}`);
+  }) as typeof globalThis.fetch;
+
+  try {
+    const transport = createWeixinOfficialTransport({
+      baseUrl: 'https://ilinkai.weixin.qq.com',
+      token: 'token',
+    });
+
+    const result = await transport.sendMediaFile({
+      filePath: imagePath,
+      toUserId: 'wxid_sender',
+      text: 'PNG fallback test',
+      contextToken: 'ctx-1',
+      cdnBaseUrl: 'https://novac2c.cdn.weixin.qq.com/c2c',
+    });
+
+    assert.ok(result.messageId);
+
+    const cdnUploads = requests.filter((entry) => entry.url.includes('/upload?'));
+    assert.equal(cdnUploads.length, 2);
+    const uploadCalls = requests
+      .filter((entry) => entry.url.includes('/ilink/bot/getuploadurl'))
+      .map((entry) => JSON.parse(String(entry.body ?? '{}')));
+    assert.equal(uploadCalls.length, 2);
+    assert.equal(Number(uploadCalls[0]?.rawsize), fs.statSync(imagePath).size);
+    assert.notEqual(String(uploadCalls[1]?.rawfilemd5 ?? ''), String(uploadCalls[0]?.rawfilemd5 ?? ''));
+    assert.notEqual(Number(uploadCalls[1]?.rawsize), Number(uploadCalls[0]?.rawsize));
+
+    const sendCalls = requests.filter((entry) => entry.url.includes('/ilink/bot/sendmessage'));
+    assert.equal(sendCalls.length, 3);
+    const sendPayloads = sendCalls.map((entry) => JSON.parse(String(entry.body ?? '{}')));
+    assert.equal(sendPayloads.filter((payload) => payload.msg.item_list?.[0]?.type === 1).length, 1);
+    assert.equal(sendPayloads.filter((payload) => payload.msg.item_list?.[0]?.type === 2).length, 2);
+    assert.equal(sendPayloads[0]?.msg?.item_list?.[0]?.text_item?.text, 'PNG fallback test');
   } finally {
     globalThis.fetch = originalFetch;
   }
