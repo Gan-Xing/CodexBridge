@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { getUploadUrl, type WeixinOfficialApiOptions } from '../api.js';
+import { getUploadUrl, type WeixinOfficialApiOptions, type WeixinOfficialFetch } from '../api.js';
 import { UploadMediaType } from '../types.js';
 import { aesEcbPaddedSize } from './aes_ecb.js';
 import { uploadBufferToCdn } from './cdn_upload.js';
@@ -31,14 +31,27 @@ export type UploadedFileInfo = {
   thumb: UploadedThumbInfo | null;
 };
 
-export async function downloadRemoteImageToTemp(url: string, destDir: string): Promise<string> {
-  const res = await fetch(url);
+export async function downloadRemoteImageToTemp(
+  url: string,
+  destDir: string,
+  fetchImpl?: WeixinOfficialFetch,
+): Promise<string> {
+  const effectiveFetch = fetchImpl ?? (globalThis.fetch as WeixinOfficialFetch | undefined);
+  if (typeof effectiveFetch !== 'function') {
+    throw new Error(`remote media download missing fetch implementation: ${url}`);
+  }
+  const res = await effectiveFetch(url);
   if (!res.ok) {
-    throw new Error(`remote media download failed: ${res.status} ${res.statusText} url=${url}`);
+    const statusText = typeof res.statusText === 'string' ? res.statusText : '';
+    throw new Error(`remote media download failed: ${res.status} ${statusText} url=${url}`.trim());
+  }
+  if (typeof res.arrayBuffer !== 'function') {
+    throw new Error(`remote media download missing arrayBuffer() response support: ${url}`);
   }
   const buf = Buffer.from(await res.arrayBuffer());
   await fs.mkdir(destDir, { recursive: true });
-  const ext = getExtensionFromContentTypeOrUrl(res.headers.get('content-type'), url);
+  const contentType = typeof res.headers?.get === 'function' ? res.headers.get('content-type') : null;
+  const ext = getExtensionFromContentTypeOrUrl(contentType, url);
   const name = `weixin-remote-${crypto.randomUUID()}${ext}`;
   const filePath = path.join(destDir, name);
   await fs.writeFile(filePath, buf);
@@ -93,6 +106,7 @@ async function uploadMediaToCdn(params: {
     cdnBaseUrl: params.cdnBaseUrl,
     aeskey,
     label: `${params.label}[orig filekey=${filekey}]`,
+    fetchImpl: params.opts.fetchImpl as typeof globalThis.fetch | undefined,
   });
 
   try {
@@ -104,6 +118,7 @@ async function uploadMediaToCdn(params: {
         cdnBaseUrl: params.cdnBaseUrl,
         aeskey,
         label: `${params.label}[thumb filekey=${filekey}]`,
+        fetchImpl: params.opts.fetchImpl as typeof globalThis.fetch | undefined,
       })
       : null;
 
@@ -229,6 +244,7 @@ async function uploadThumbToCdn(params: {
   cdnBaseUrl: string;
   aeskey: Buffer;
   label: string;
+  fetchImpl?: typeof globalThis.fetch;
 }): Promise<UploadedThumbInfo> {
   if (!params.uploadParam) {
     throw new Error(`${params.label}: thumbnail upload URL missing (need thumb_upload_param)`);
@@ -240,6 +256,7 @@ async function uploadThumbToCdn(params: {
     cdnBaseUrl: params.cdnBaseUrl,
     aeskey: params.aeskey,
     label: params.label,
+    fetchImpl: params.fetchImpl,
   });
   return {
     downloadEncryptedQueryParam: downloadParam,

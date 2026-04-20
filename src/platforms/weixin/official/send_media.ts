@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { getMimeFromFilename } from './media/mime.js';
 import {
+  isWeixinSendResponseError,
   sendFileMessageWeixin,
   sendImageMessageWeixin,
   sendMessageWeixin,
@@ -23,8 +24,13 @@ export async function sendWeixinMediaFile(params: {
   text: string;
   opts: WeixinOfficialApiOptions & { contextToken?: string | null };
   cdnBaseUrl: string;
-}): Promise<{ messageId: string }> {
-  const materialized = await materializeMediaInput(params.filePath);
+}): Promise<{
+  messageId: string;
+  captionMessageId?: string | null;
+  captionError?: string | null;
+  captionErrorCode?: number | null;
+}> {
+  const materialized = await materializeMediaInput(params.filePath, params.opts.fetchImpl);
   const uploadOpts: WeixinOfficialApiOptions = {
     baseUrl: params.opts.baseUrl,
     token: params.opts.token,
@@ -42,12 +48,13 @@ export async function sendWeixinMediaFile(params: {
         opts: uploadOpts,
         cdnBaseUrl: params.cdnBaseUrl,
       });
-      return sendVideoMessageWeixin({
+      const mediaResult = await sendVideoMessageWeixin({
         to: params.to,
-        text: params.text,
+        text: '',
         uploaded,
         opts: params.opts,
       });
+      return attachCaptionResult(mediaResult, params);
     }
 
     if (mime.startsWith('image/')) {
@@ -69,13 +76,14 @@ export async function sendWeixinMediaFile(params: {
       opts: uploadOpts,
       cdnBaseUrl: params.cdnBaseUrl,
     });
-    return sendFileMessageWeixin({
+    const mediaResult = await sendFileMessageWeixin({
       to: params.to,
-      text: params.text,
+      text: '',
       fileName,
       uploaded,
       opts: params.opts,
     });
+    return attachCaptionResult(mediaResult, params);
   } finally {
     await materialized.cleanup?.();
   }
@@ -88,46 +96,50 @@ async function sendWeixinImageFile(params: {
   opts: WeixinOfficialApiOptions & { contextToken?: string | null };
   uploadOpts: WeixinOfficialApiOptions;
   cdnBaseUrl: string;
-}): Promise<{ messageId: string }> {
-  let textDelivered = false;
-  const deliverUploadedImage = async (uploaded: Awaited<ReturnType<typeof uploadFileToWeixin>>) => {
-    if (!textDelivered && params.text) {
-      await sendMessageWeixin({
-        to: params.to,
-        text: params.text,
-        opts: params.opts,
-      });
-      textDelivered = true;
-    }
-    return sendImageMessageWeixin({
+}): Promise<{
+  messageId: string;
+  captionMessageId?: string | null;
+  captionError?: string | null;
+  captionErrorCode?: number | null;
+}> {
+  const uploaded = await uploadFileToWeixin({
+    filePath: params.filePath,
+    toUserId: params.to,
+    opts: params.uploadOpts,
+    cdnBaseUrl: params.cdnBaseUrl,
+  });
+  try {
+    const mediaResult = await sendImageMessageWeixin({
       to: params.to,
       text: '',
       uploaded,
       opts: params.opts,
     });
-  };
-
-  try {
-    const uploaded = await uploadFileToWeixin({
-      filePath: params.filePath,
-      toUserId: params.to,
-      opts: params.uploadOpts,
-      cdnBaseUrl: params.cdnBaseUrl,
-    });
-    return await deliverUploadedImage(uploaded);
-  } catch (originalError) {
+    return attachCaptionResult(mediaResult, params);
+  } catch (rawSendError) {
+    if (!shouldRetryWithJpegFallback(rawSendError)) {
+      throw rawSendError;
+    }
     const fallbackImage = await prepareImageFallbackForWeixin(params.filePath);
     if (!fallbackImage) {
-      throw originalError;
+      throw rawSendError;
     }
     try {
-      const uploaded = await uploadFileToWeixin({
+      const fallbackUploaded = await uploadFileToWeixin({
         filePath: fallbackImage.filePath,
         toUserId: params.to,
         opts: params.uploadOpts,
         cdnBaseUrl: params.cdnBaseUrl,
       });
-      return await deliverUploadedImage(uploaded);
+      const mediaResult = await sendImageMessageWeixin({
+        to: params.to,
+        text: '',
+        uploaded: fallbackUploaded,
+        opts: params.opts,
+      });
+      return attachCaptionResult(mediaResult, params);
+    } catch (fallbackError) {
+      throw buildImageFallbackError(rawSendError, fallbackError);
     } finally {
       await fallbackImage.cleanup?.();
     }
@@ -149,7 +161,10 @@ async function prepareImageFallbackForWeixin(filePath: string): Promise<{
   return transcoded;
 }
 
-async function materializeMediaInput(filePath: string): Promise<{
+async function materializeMediaInput(
+  filePath: string,
+  fetchImpl?: WeixinOfficialApiOptions['fetchImpl'],
+): Promise<{
   filePath: string;
   cleanup?: (() => Promise<void>) | null;
 }> {
@@ -161,7 +176,7 @@ async function materializeMediaInput(filePath: string): Promise<{
     };
   }
   const tempDir = path.join(os.tmpdir(), 'codexbridge-weixin-remote-media');
-  const downloadedPath = await downloadRemoteImageToTemp(normalized, tempDir);
+  const downloadedPath = await downloadRemoteImageToTemp(normalized, tempDir, fetchImpl);
   const mime = getMimeFromFilename(downloadedPath);
   if (!mime.startsWith('image/')) {
     await fs.unlink(downloadedPath).catch(() => {});
@@ -177,4 +192,61 @@ async function materializeMediaInput(filePath: string): Promise<{
 
 function isRemoteHttpUrl(value: string): boolean {
   return /^https?:\/\//iu.test(value);
+}
+
+function buildImageFallbackError(rawSendError: unknown, fallbackError: unknown): Error {
+  const rawMessage = rawSendError instanceof Error ? rawSendError.message : String(rawSendError);
+  const fallbackMessage = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
+  return new Error(`raw image send failed: ${rawMessage}; jpeg fallback failed: ${fallbackMessage}`);
+}
+
+async function attachCaptionResult(
+  mediaResult: { messageId: string },
+  params: {
+    to: string;
+    text: string;
+    opts: WeixinOfficialApiOptions & { contextToken?: string | null };
+  },
+): Promise<{
+  messageId: string;
+  captionMessageId?: string | null;
+  captionError?: string | null;
+  captionErrorCode?: number | null;
+}> {
+  const caption = String(params.text ?? '').trim();
+  if (!caption) {
+    return {
+      messageId: mediaResult.messageId,
+      captionMessageId: null,
+      captionError: null,
+      captionErrorCode: null,
+    };
+  }
+  try {
+    const captionResult = await sendMessageWeixin({
+      to: params.to,
+      text: caption,
+      opts: params.opts,
+    });
+    return {
+      messageId: mediaResult.messageId,
+      captionMessageId: captionResult.messageId,
+      captionError: null,
+      captionErrorCode: null,
+    };
+  } catch (error) {
+    return {
+      messageId: mediaResult.messageId,
+      captionMessageId: null,
+      captionError: error instanceof Error ? error.message : String(error),
+      captionErrorCode: isWeixinSendResponseError(error) ? error.code : null,
+    };
+  }
+}
+
+function shouldRetryWithJpegFallback(error: unknown): boolean {
+  if (!isWeixinSendResponseError(error)) {
+    return false;
+  }
+  return error.label === 'sendMediaItems' && Number.isFinite(error.code) && error.code > 0;
 }

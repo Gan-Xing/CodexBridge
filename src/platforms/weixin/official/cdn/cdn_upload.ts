@@ -11,6 +11,7 @@ export async function uploadBufferToCdn(params: {
   cdnBaseUrl: string;
   label: string;
   aeskey: Buffer;
+  fetchImpl?: typeof globalThis.fetch;
 }): Promise<{ downloadParam: string }> {
   const ciphertext = encryptAesEcb(params.buf, params.aeskey);
   const trimmedFull = params.uploadFullUrl?.trim();
@@ -30,10 +31,14 @@ export async function uploadBufferToCdn(params: {
 
   let downloadParam: string | undefined;
   let lastError: unknown;
+  const fetchImpl = params.fetchImpl ?? globalThis.fetch;
+  if (typeof fetchImpl !== 'function') {
+    throw new Error(`${params.label}: fetch implementation missing for CDN upload`);
+  }
 
   for (let attempt = 1; attempt <= UPLOAD_MAX_RETRIES; attempt += 1) {
     try {
-      const res = await fetch(cdnUrl, {
+      const res = await fetchImpl(cdnUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/octet-stream' },
         body: new Uint8Array(ciphertext),

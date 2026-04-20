@@ -300,7 +300,175 @@ test('WeixinOfficialTransport.sendMediaFile falls back to JPEG only after raw im
     const sendPayloads = sendCalls.map((entry) => JSON.parse(String(entry.body ?? '{}')));
     assert.equal(sendPayloads.filter((payload) => payload.msg.item_list?.[0]?.type === 1).length, 1);
     assert.equal(sendPayloads.filter((payload) => payload.msg.item_list?.[0]?.type === 2).length, 2);
-    assert.equal(sendPayloads[0]?.msg?.item_list?.[0]?.text_item?.text, 'PNG fallback test');
+    assert.equal(sendPayloads[0]?.msg?.item_list?.[0]?.type, 2);
+    assert.equal(sendPayloads[1]?.msg?.item_list?.[0]?.type, 2);
+    assert.equal(sendPayloads[2]?.msg?.item_list?.[0]?.text_item?.text, 'PNG fallback test');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('WeixinOfficialTransport.sendMediaFile keeps media success when caption delivery fails after image send', async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-weixin-caption-failure-'));
+  const imagePath = path.join(tempDir, 'sample.png');
+  fs.writeFileSync(imagePath, Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9WnH0KsAAAAASUVORK5CYII=',
+    'base64',
+  ));
+
+  const originalFetch = globalThis.fetch;
+  const requests: Array<{ url: string; method: string; body?: string | Uint8Array | null }> = [];
+
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    requests.push({
+      url,
+      method: init?.method ?? 'GET',
+      body: typeof init?.body === 'string'
+        ? init.body
+        : init?.body instanceof Uint8Array
+          ? init.body
+          : null,
+    });
+
+    if (url.includes('/ilink/bot/getuploadurl')) {
+      return new Response(JSON.stringify({
+        upload_param: 'upload-param-1',
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (url.includes('/upload?')) {
+      return new Response('', {
+        status: 200,
+        headers: { 'x-encrypted-param': 'download-param-1' },
+      });
+    }
+
+    if (url.includes('/ilink/bot/sendmessage')) {
+      const payload = JSON.parse(String(init?.body ?? '{}'));
+      const itemType = Number(payload?.msg?.item_list?.[0]?.type ?? 0);
+      if (itemType === 1) {
+        return new Response(JSON.stringify({ ret: 1, errcode: 5002 }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (itemType === 2) {
+        return new Response(JSON.stringify({ ret: 0 }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      throw new Error(`unexpected send item type after caption failure: ${itemType}`);
+    }
+
+    throw new Error(`unexpected fetch url: ${url}`);
+  }) as typeof globalThis.fetch;
+
+  try {
+    const transport = createWeixinOfficialTransport({
+      baseUrl: 'https://ilinkai.weixin.qq.com',
+      token: 'token',
+    });
+
+    const result = await transport.sendMediaFile({
+      filePath: imagePath,
+      toUserId: 'wxid_sender',
+      text: 'caption after image',
+      contextToken: 'ctx-1',
+      cdnBaseUrl: 'https://novac2c.cdn.weixin.qq.com/c2c',
+    });
+
+    assert.ok(result.messageId);
+    assert.equal(result.captionMessageId, null);
+    assert.match(String(result.captionError ?? ''), /sendMessageWeixin: 5002/);
+    assert.equal(result.captionErrorCode, 5002);
+    const uploadCalls = requests.filter((entry) => entry.url.includes('/ilink/bot/getuploadurl'));
+    const cdnUploads = requests.filter((entry) => entry.url.includes('/upload?'));
+    const sendCalls = requests.filter((entry) => entry.url.includes('/ilink/bot/sendmessage'));
+    assert.equal(uploadCalls.length, 1);
+    assert.equal(cdnUploads.length, 1);
+    assert.equal(sendCalls.length, 2);
+    const sendPayloads = sendCalls.map((entry) => JSON.parse(String(entry.body ?? '{}')));
+    assert.equal(sendPayloads[0]?.msg?.item_list?.[0]?.type, 2);
+    assert.equal(sendPayloads[1]?.msg?.item_list?.[0]?.type, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('WeixinOfficialTransport.sendMediaFile does not trigger JPEG fallback on negative raw image send codes', async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-weixin-negative-code-'));
+  const imagePath = path.join(tempDir, 'sample.png');
+  fs.writeFileSync(imagePath, Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9WnH0KsAAAAASUVORK5CYII=',
+    'base64',
+  ));
+
+  const originalFetch = globalThis.fetch;
+  const requests: Array<{ url: string; method: string; body?: string | Uint8Array | null }> = [];
+
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    requests.push({
+      url,
+      method: init?.method ?? 'GET',
+      body: typeof init?.body === 'string'
+        ? init.body
+        : init?.body instanceof Uint8Array
+          ? init.body
+          : null,
+    });
+
+    if (url.includes('/ilink/bot/getuploadurl')) {
+      return new Response(JSON.stringify({
+        upload_param: 'upload-param-1',
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (url.includes('/upload?')) {
+      return new Response('', {
+        status: 200,
+        headers: { 'x-encrypted-param': 'download-param-1' },
+      });
+    }
+
+    if (url.includes('/ilink/bot/sendmessage')) {
+      return new Response(JSON.stringify({ ret: -14, errcode: -14 }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    throw new Error(`unexpected fetch url: ${url}`);
+  }) as typeof globalThis.fetch;
+
+  try {
+    const transport = createWeixinOfficialTransport({
+      baseUrl: 'https://ilinkai.weixin.qq.com',
+      token: 'token',
+    });
+
+    await assert.rejects(async () => transport.sendMediaFile({
+      filePath: imagePath,
+      toUserId: 'wxid_sender',
+      text: '',
+      contextToken: 'ctx-1',
+      cdnBaseUrl: 'https://novac2c.cdn.weixin.qq.com/c2c',
+    }), /sendMediaItems: -14/);
+
+    const uploadCalls = requests.filter((entry) => entry.url.includes('/ilink/bot/getuploadurl'));
+    const cdnUploads = requests.filter((entry) => entry.url.includes('/upload?'));
+    const sendCalls = requests.filter((entry) => entry.url.includes('/ilink/bot/sendmessage'));
+    assert.equal(uploadCalls.length, 1);
+    assert.equal(cdnUploads.length, 1);
+    assert.equal(sendCalls.length, 1);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -309,8 +477,11 @@ test('WeixinOfficialTransport.sendMediaFile falls back to JPEG only after raw im
 test('WeixinOfficialTransport.sendMediaFile accepts remote image URLs by downloading them first', async () => {
   const originalFetch = globalThis.fetch;
   const requests: Array<{ url: string; method: string; body?: string | Uint8Array | null }> = [];
+  globalThis.fetch = (async () => {
+    throw new Error('global fetch should not be used in this test');
+  }) as typeof globalThis.fetch;
 
-  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+  const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
     requests.push({
       url,
@@ -360,6 +531,7 @@ test('WeixinOfficialTransport.sendMediaFile accepts remote image URLs by downloa
     const transport = createWeixinOfficialTransport({
       baseUrl: 'https://ilinkai.weixin.qq.com',
       token: 'token',
+      fetchImpl,
     });
 
     const result = await transport.sendMediaFile({
@@ -374,11 +546,86 @@ test('WeixinOfficialTransport.sendMediaFile accepts remote image URLs by downloa
     assert.ok(requests.some((entry) => entry.url === 'https://cdn.example.com/image.png'));
     const sendCalls = requests.filter((entry) => entry.url.includes('/ilink/bot/sendmessage'));
     assert.equal(sendCalls.length, 2);
-    const textPayload = JSON.parse(String(sendCalls[0]?.body ?? '{}'));
-    const mediaPayload = JSON.parse(String(sendCalls[1]?.body ?? '{}'));
+    const mediaPayload = JSON.parse(String(sendCalls[0]?.body ?? '{}'));
+    const textPayload = JSON.parse(String(sendCalls[1]?.body ?? '{}'));
+    assert.equal(mediaPayload.msg.item_list?.[0]?.type, 2);
     assert.equal(textPayload.msg.item_list?.[0]?.type, 1);
     assert.equal(textPayload.msg.item_list?.[0]?.text_item?.text, '远程图片');
-    assert.equal(mediaPayload.msg.item_list?.[0]?.type, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('WeixinOfficialTransport.sendMediaFile sends file attachments before caption text', async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-weixin-file-caption-'));
+  const filePath = path.join(tempDir, 'report.pdf');
+  fs.writeFileSync(filePath, Buffer.from('fake-pdf-content'));
+
+  const originalFetch = globalThis.fetch;
+  const requests: Array<{ url: string; method: string; body?: string | Uint8Array | null }> = [];
+
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    requests.push({
+      url,
+      method: init?.method ?? 'GET',
+      body: typeof init?.body === 'string'
+        ? init.body
+        : init?.body instanceof Uint8Array
+          ? init.body
+          : null,
+    });
+
+    if (url.includes('/ilink/bot/getuploadurl')) {
+      return new Response(JSON.stringify({
+        upload_param: 'upload-param-file',
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (url.includes('/upload?')) {
+      return new Response('', {
+        status: 200,
+        headers: { 'x-encrypted-param': 'download-param-file' },
+      });
+    }
+
+    if (url.includes('/ilink/bot/sendmessage')) {
+      return new Response(JSON.stringify({ ret: 0 }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    throw new Error(`unexpected fetch url: ${url}`);
+  }) as typeof globalThis.fetch;
+
+  try {
+    const transport = createWeixinOfficialTransport({
+      baseUrl: 'https://ilinkai.weixin.qq.com',
+      token: 'token',
+    });
+
+    const result = await transport.sendMediaFile({
+      filePath,
+      toUserId: 'wxid_sender',
+      text: 'PDF 附件',
+      contextToken: 'ctx-1',
+      cdnBaseUrl: 'https://novac2c.cdn.weixin.qq.com/c2c',
+    });
+
+    assert.ok(result.messageId);
+    assert.equal(result.captionErrorCode, null);
+    const sendCalls = requests.filter((entry) => entry.url.includes('/ilink/bot/sendmessage'));
+    assert.equal(sendCalls.length, 2);
+    const filePayload = JSON.parse(String(sendCalls[0]?.body ?? '{}'));
+    const textPayload = JSON.parse(String(sendCalls[1]?.body ?? '{}'));
+    assert.equal(filePayload.msg.item_list?.[0]?.type, 4);
+    assert.equal(filePayload.msg.item_list?.[0]?.file_item?.file_name, 'report.pdf');
+    assert.equal(textPayload.msg.item_list?.[0]?.type, 1);
+    assert.equal(textPayload.msg.item_list?.[0]?.text_item?.text, 'PDF 附件');
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -488,7 +735,8 @@ test('WeixinOfficialTransport.sendMediaFile uploads video media with thumbnail m
 
     const sendCalls = requests.filter((entry) => entry.url.includes('/ilink/bot/sendmessage'));
     assert.equal(sendCalls.length, 2);
-    const mediaPayload = JSON.parse(String(sendCalls[1]?.body ?? '{}'));
+    const mediaPayload = JSON.parse(String(sendCalls[0]?.body ?? '{}'));
+    const captionPayload = JSON.parse(String(sendCalls[1]?.body ?? '{}'));
     assert.equal(mediaPayload.msg.item_list?.[0]?.type, 5);
     assert.equal(mediaPayload.msg.item_list?.[0]?.video_item?.media?.encrypt_query_param, 'video-download-param');
     assert.equal(
@@ -503,6 +751,8 @@ test('WeixinOfficialTransport.sendMediaFile uploads video media with thumbnail m
     assert.ok(Number(mediaPayload.msg.item_list?.[0]?.video_item?.thumb_size) > 0);
     assert.ok(Number(mediaPayload.msg.item_list?.[0]?.video_item?.play_length) > 0);
     assert.ok(typeof mediaPayload.msg.item_list?.[0]?.video_item?.video_md5 === 'string');
+    assert.equal(captionPayload.msg.item_list?.[0]?.type, 1);
+    assert.equal(captionPayload.msg.item_list?.[0]?.text_item?.text, '视频说明');
   } finally {
     globalThis.fetch = originalFetch;
   }

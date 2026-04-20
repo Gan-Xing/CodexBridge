@@ -28,6 +28,7 @@ import { WeixinConfigManager } from './official/config_cache.js';
 import { downloadMediaFromItem } from './official/media/media_download.js';
 import { getExtensionFromMime, getMimeFromFilename } from './official/media/mime.js';
 import { buildTextMessageReq } from './official/send.js';
+import { isWeixinSendResponseError } from './official/send.js';
 import { loadWeixinConfig, validateWeixinConfig, type WeixinConfig } from './config.js';
 import { formatWeixinText, splitWeixinText } from './formatting.js';
 import { createI18n, type Translator } from '../../i18n/index.js';
@@ -615,55 +616,70 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
         error: this.i18n.t('platform.weixin.plugin.contextTokenMissing', { externalScopeId }),
       };
     }
-    let lastError: unknown = null;
 
-    for (let attempt = 1; attempt <= 3; attempt += 1) {
-      debugWeixin('send_media', {
-        scopeId: externalScopeId,
+    debugWeixin('send_media', {
+      scopeId: externalScopeId,
+      filePath: normalizedPath,
+      caption: normalizedCaption,
+      attempt: 1,
+    });
+    try {
+      const result = await this.runWithMessageSendGate(async () => this.client?.sendMediaFile({
         filePath: normalizedPath,
-        caption: normalizedCaption,
-        attempt,
-      });
-      try {
-        const result = await this.runWithMessageSendGate(async () => this.client?.sendMediaFile({
-          filePath: normalizedPath,
-          toUserId: externalScopeId,
-          text: normalizedCaption,
-          contextToken,
-          cdnBaseUrl: this.config.cdnBaseUrl,
-        }) ?? { messageId: null });
-        return {
-          success: true,
-          messageId: typeof result?.messageId === 'string' ? result.messageId : null,
-          sentPath: normalizedPath,
-          sentCaption: normalizedCaption,
-          error: '',
-        };
-      } catch (error) {
-        lastError = error;
-        const message = error instanceof Error ? error.message : String(error);
-        debugWeixin('send_media_failed', {
+        toUserId: externalScopeId,
+        text: normalizedCaption,
+        contextToken,
+        cdnBaseUrl: this.config.cdnBaseUrl,
+      }) ?? { messageId: null });
+      const messageId = typeof result?.messageId === 'string' ? result.messageId.trim() : '';
+      if (!messageId) {
+        throw new Error('sendMediaFile returned no messageId');
+      }
+      const captionError = typeof (result as { captionError?: unknown } | null)?.captionError === 'string'
+        ? (result as { captionError: string }).captionError
+        : '';
+      const captionErrorCode = typeof (result as { captionErrorCode?: unknown } | null)?.captionErrorCode === 'number'
+        ? (result as { captionErrorCode: number }).captionErrorCode
+        : null;
+      if (captionErrorCode === SESSION_EXPIRED_ERRCODE
+        || (captionError && captionError.includes(String(SESSION_EXPIRED_ERRCODE)))) {
+        pauseSession(this.config.accountId);
+      }
+      if (captionError) {
+        debugWeixin('send_media_caption_failed', {
           scopeId: externalScopeId,
           filePath: normalizedPath,
-          attempt,
-          error: message,
+          messageId,
+          error: captionError,
         });
-        if (message.includes(String(SESSION_EXPIRED_ERRCODE))) {
-          pauseSession(this.config.accountId);
-          break;
-        }
       }
+      return {
+        success: true,
+        messageId,
+        sentPath: normalizedPath,
+        sentCaption: captionError ? '' : normalizedCaption,
+        error: captionError,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      debugWeixin('send_media_failed', {
+        scopeId: externalScopeId,
+        filePath: normalizedPath,
+        attempt: 1,
+        error: message,
+      });
+      if ((isWeixinSendResponseError(error) && error.code === SESSION_EXPIRED_ERRCODE)
+        || message.includes(String(SESSION_EXPIRED_ERRCODE))) {
+        pauseSession(this.config.accountId);
+      }
+      return {
+        success: false,
+        messageId: null,
+        sentPath: normalizedPath,
+        sentCaption: normalizedCaption,
+        error: message || this.i18n.t('runtime.error.unknownDeliveryFailure'),
+      };
     }
-
-    return {
-      success: false,
-      messageId: null,
-      sentPath: normalizedPath,
-      sentCaption: normalizedCaption,
-      error: lastError instanceof Error
-        ? lastError.message
-        : this.i18n.t('runtime.error.unknownDeliveryFailure'),
-    };
   }
 
   getStatus({ externalScopeId = null }: { externalScopeId?: string | null } = {}): PlatformStatusInfo {

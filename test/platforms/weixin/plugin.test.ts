@@ -661,6 +661,177 @@ test('WeixinPlatformPlugin sendMedia returns a clear error when context token is
   assert.equal(sentCount, 0);
 });
 
+test('WeixinPlatformPlugin sendMedia does not blindly retry failed media sends', async () => {
+  const rootDir = makeTempAccountsDir();
+  const accountStore = new WeixinAccountStore({ rootDir });
+  accountStore.setContextToken('bot-account', 'wxid_sender', 'ctx-1');
+  const plugin = makePlugin({
+    accountStore,
+    config: {
+      enabled: true,
+      accountId: 'bot-account',
+      token: 'token',
+      baseUrl: 'https://ilinkai.weixin.qq.com',
+      cdnBaseUrl: 'https://novac2c.cdn.weixin.qq.com/c2c',
+      dmPolicy: 'open',
+      groupPolicy: 'disabled',
+      allowFrom: [],
+      groupAllowFrom: [],
+      stateDir: path.dirname(path.dirname(rootDir)),
+      accountsDir: rootDir,
+      maxMessageLength: 4000,
+    },
+  });
+  let attempts = 0;
+  (plugin as any).client = {
+    async sendMediaFile() {
+      attempts += 1;
+      throw new Error('sendMediaItems: 5001');
+    },
+  };
+
+  const result = await plugin.sendMedia({
+    externalScopeId: 'wxid_sender',
+    filePath: '/tmp/example.png',
+    caption: '截图说明',
+  });
+
+  assert.equal(result.success, false);
+  assert.equal(result.messageId, null);
+  assert.equal(attempts, 1);
+  assert.match(result.error, /5001/);
+});
+
+test('WeixinPlatformPlugin sendMedia keeps media success when caption delivery fails after media send', async () => {
+  const rootDir = makeTempAccountsDir();
+  const accountStore = new WeixinAccountStore({ rootDir });
+  accountStore.setContextToken('bot-account', 'wxid_sender', 'ctx-1');
+  const plugin = makePlugin({
+    accountStore,
+    config: {
+      enabled: true,
+      accountId: 'bot-account',
+      token: 'token',
+      baseUrl: 'https://ilinkai.weixin.qq.com',
+      cdnBaseUrl: 'https://novac2c.cdn.weixin.qq.com/c2c',
+      dmPolicy: 'open',
+      groupPolicy: 'disabled',
+      allowFrom: [],
+      groupAllowFrom: [],
+      stateDir: path.dirname(path.dirname(rootDir)),
+      accountsDir: rootDir,
+      maxMessageLength: 4000,
+    },
+  });
+  (plugin as any).client = {
+    async sendMediaFile() {
+      return {
+        messageId: 'media-1',
+        captionMessageId: null,
+        captionError: 'sendMessageWeixin: 5002',
+        captionErrorCode: 5002,
+      };
+    },
+  };
+
+  const result = await plugin.sendMedia({
+    externalScopeId: 'wxid_sender',
+    filePath: '/tmp/example.png',
+    caption: '截图说明',
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(result.messageId, 'media-1');
+  assert.equal(result.sentCaption, '');
+  assert.match(result.error, /5002/);
+});
+
+test('WeixinPlatformPlugin sendMedia pauses the session when caption delivery reports session expiry', async () => {
+  const rootDir = makeTempAccountsDir();
+  const accountStore = new WeixinAccountStore({ rootDir });
+  accountStore.setContextToken('bot-account', 'wxid_sender', 'ctx-1');
+  const plugin = makePlugin({
+    accountStore,
+    config: {
+      enabled: true,
+      accountId: 'bot-account',
+      token: 'token',
+      baseUrl: 'https://ilinkai.weixin.qq.com',
+      cdnBaseUrl: 'https://novac2c.cdn.weixin.qq.com/c2c',
+      dmPolicy: 'open',
+      groupPolicy: 'disabled',
+      allowFrom: [],
+      groupAllowFrom: [],
+      stateDir: path.dirname(path.dirname(rootDir)),
+      accountsDir: rootDir,
+      maxMessageLength: 4000,
+    },
+  });
+  (plugin as any).client = {
+    async sendMediaFile() {
+      return {
+        messageId: 'media-1',
+        captionMessageId: null,
+        captionError: 'sendMessageWeixin: -14',
+        captionErrorCode: -14,
+      };
+    },
+  };
+
+  const result = await plugin.sendMedia({
+    externalScopeId: 'wxid_sender',
+    filePath: '/tmp/example.png',
+    caption: '截图说明',
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(result.messageId, 'media-1');
+  assert.equal((plugin.getStatus().data as Record<string, unknown> | null)?.sessionPaused, true);
+});
+
+test('WeixinPlatformPlugin sendMedia rejects results without a message id', async () => {
+  const rootDir = makeTempAccountsDir();
+  const accountStore = new WeixinAccountStore({ rootDir });
+  accountStore.setContextToken('bot-account', 'wxid_sender', 'ctx-1');
+  const plugin = makePlugin({
+    accountStore,
+    config: {
+      enabled: true,
+      accountId: 'bot-account',
+      token: 'token',
+      baseUrl: 'https://ilinkai.weixin.qq.com',
+      cdnBaseUrl: 'https://novac2c.cdn.weixin.qq.com/c2c',
+      dmPolicy: 'open',
+      groupPolicy: 'disabled',
+      allowFrom: [],
+      groupAllowFrom: [],
+      stateDir: path.dirname(path.dirname(rootDir)),
+      accountsDir: rootDir,
+      maxMessageLength: 4000,
+    },
+  });
+  (plugin as any).client = {
+    async sendMediaFile() {
+      return {
+        messageId: '',
+        captionMessageId: null,
+        captionError: null,
+        captionErrorCode: null,
+      };
+    },
+  };
+
+  const result = await plugin.sendMedia({
+    externalScopeId: 'wxid_sender',
+    filePath: '/tmp/example.png',
+    caption: '截图说明',
+  });
+
+  assert.equal(result.success, false);
+  assert.equal(result.messageId, null);
+  assert.match(result.error, /no messageId/i);
+});
+
 
 test('WeixinPlatformPlugin sendText returns a structured failure when iLink sendmessage keeps returning a non-zero ret code', async () => {
   const rootDir = makeTempAccountsDir();

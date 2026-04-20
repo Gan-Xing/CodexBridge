@@ -25,7 +25,12 @@ const DEFAULT_CHANNEL_VERSION = '2.2.0';
 interface WeixinFetchResponse {
   ok: boolean;
   status: number;
+  statusText?: string;
+  headers?: {
+    get(name: string): string | null;
+  };
   text(): Promise<string>;
+  arrayBuffer?(): Promise<ArrayBuffer>;
 }
 
 export type WeixinOfficialFetch = (

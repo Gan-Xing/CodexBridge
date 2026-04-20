@@ -8,6 +8,22 @@ const MESSAGE_TYPE_BOT = 2;
 const MESSAGE_STATE_FINISH = 2;
 const TEXT_ITEM = 1;
 
+export class WeixinSendResponseError extends Error {
+  code: number;
+  label: string;
+
+  constructor(label: string, code: number) {
+    super(`${label}: ${code}`);
+    this.name = 'WeixinSendResponseError';
+    this.code = code;
+    this.label = label;
+  }
+}
+
+export function isWeixinSendResponseError(error: unknown): error is WeixinSendResponseError {
+  return error instanceof WeixinSendResponseError;
+}
+
 export function buildTextMessageReq(params: {
   to: string;
   text: string;
@@ -42,7 +58,7 @@ function assertSuccessfulSendResponse(result: unknown, label: string): void {
   if (code === 0) {
     return;
   }
-  throw new Error(`${label}: ${code}`);
+  throw new WeixinSendResponseError(label, code);
 }
 
 export async function sendMessageWeixin(params: {

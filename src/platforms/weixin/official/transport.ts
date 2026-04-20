@@ -46,7 +46,12 @@ export interface WeixinOfficialTransport {
     text?: string;
     contextToken?: string | null;
     cdnBaseUrl: string;
-  }): Promise<{ messageId: string }>;
+  }): Promise<{
+    messageId: string;
+    captionMessageId?: string | null;
+    captionError?: string | null;
+    captionErrorCode?: number | null;
+  }>;
 }
 
 export function createWeixinOfficialTransport({
