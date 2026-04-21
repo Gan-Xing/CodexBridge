@@ -1,4 +1,4 @@
-import { CodexAppClient, createNoopLogger, readCodexAccountIdentity } from './app_client.js';
+import { CodexAppClient, createStderrLogger, readCodexAccountIdentity } from './app_client.js';
 import type { CodexTurnInput } from './app_client.js';
 import { buildTurnArtifactDeveloperInstructions } from '../../core/turn_artifacts.js';
 import type { BridgeSession, SessionSettings, TurnArtifactContext } from '../../types/core.js';
@@ -50,7 +50,7 @@ export class CodexProviderPlugin {
       autolaunch: profile.config.autolaunch ?? false,
       modelCatalog: profile.config.modelCatalog ?? [],
       modelCatalogMode: profile.config.modelCatalogMode ?? 'merge',
-      logger: createNoopLogger(),
+      logger: createStderrLogger(),
     }),
   }: CodexProviderPluginOptions = {}) {
     this.kind = 'codex';

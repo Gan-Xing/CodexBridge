@@ -1,4 +1,5 @@
 import { parseSlashCommand } from '../core/command_parser.js';
+import { writeSequencedDebugLog } from '../core/sequenced_stderr.js';
 import { WeixinPoller } from '../platforms/weixin/poller.js';
 import { createI18n, type Translator } from '../i18n/index.js';
 import type {
@@ -369,6 +370,12 @@ export class WeixinBridgeRuntime {
     options: { deferPostResponseAction?: boolean } = {},
   ): Promise<RuntimeResponse> {
     const streamState = createStreamState();
+    debugRuntime('process_inbound_event_start', {
+      scopeId: event.externalScopeId,
+      deferPostResponseAction: Boolean(options.deferPostResponseAction),
+      textPreview: truncateDebugText(event?.text),
+      attachmentCount: Array.isArray(event?.attachments) ? event.attachments.length : 0,
+    });
     const typingStart = this.safeSendTyping(event.externalScopeId, 'start');
     try {
       const response = await this.bridgeCoordinator.handleInboundEvent(event, {
@@ -460,6 +467,14 @@ export class WeixinBridgeRuntime {
     ) {
       return;
     }
+    debugRuntime('progress_update_received', {
+      scopeId: event.externalScopeId,
+      outputKind: progress.outputKind,
+      deltaPreview: truncateDebugText(progress.delta, 120),
+      textLength: String(progress.text ?? '').length,
+      pendingPreviewLength: streamState.pendingPreview.length,
+      streamedLength: streamState.streamedText.length,
+    });
     if (progress.outputKind === 'final_answer') {
       const nextText = String(progress.text ?? '');
       if (nextText) {
@@ -597,6 +612,16 @@ export class WeixinBridgeRuntime {
     const finalText = extractResponseMessageText(response);
     const artifactMessages = extractResponseArtifactMessages(response);
     const normalizedFinal = normalizeComparableText(finalText);
+    debugRuntime('final_delivery_begin', {
+      scopeId: event.externalScopeId,
+      outputState,
+      finalSource: codexTurnMeta?.finalSource ?? null,
+      errorMessage,
+      finalTextPreview: truncateDebugText(finalText),
+      artifactCount: artifactMessages.length,
+      streamedPreview: truncateDebugText(streamState.streamedText),
+      previewChunkCount: streamState.sentChunkCount,
+    });
     if (outputState !== 'complete') {
       if (outputState === 'partial' && normalizedFinal) {
         const previewText = isComparablePrefix(streamState.streamedText, finalText) ? streamState.streamedText : '';
@@ -687,6 +712,11 @@ export class WeixinBridgeRuntime {
         };
       }
       lastAttemptedContent = commitContent;
+      debugRuntime('final_delivery_attempt', {
+        scopeId: event.externalScopeId,
+        attempt,
+        contentPreview: truncateDebugText(commitContent),
+      });
       const delivery = await this.sendTextWithRetry({
         externalScopeId: event.externalScopeId,
         content: commitContent,
@@ -699,6 +729,13 @@ export class WeixinBridgeRuntime {
           sentContent: delivery.deliveredText || commitContent,
         };
       }
+      debugRuntime('final_delivery_attempt_failed', {
+        scopeId: event.externalScopeId,
+        attempt,
+        deliveredText: truncateDebugText(delivery.deliveredText),
+        failedText: truncateDebugText(delivery.failedText),
+        error: delivery.error,
+      });
     }
 
     return {
@@ -756,10 +793,24 @@ export class WeixinBridgeRuntime {
         error: this.i18n.t('runtime.error.unknownDeliveryFailure'),
       };
     }
+    debugRuntime('artifact_delivery_attempt', {
+      scopeId: externalScopeId,
+      filePath: String(filePath ?? ''),
+      caption: truncateDebugText(caption),
+    });
     const result = await this.platformPlugin.sendMedia({
       externalScopeId,
       filePath,
       caption,
+    });
+    debugRuntime('artifact_delivery_result', {
+      scopeId: externalScopeId,
+      filePath: String(filePath ?? ''),
+      success: Boolean(result?.success),
+      messageId: result?.messageId ?? null,
+      sentPath: result?.sentPath ?? null,
+      sentCaption: truncateDebugText(result?.sentCaption),
+      error: result?.error ?? null,
     });
     return result ?? {
       success: false,
@@ -774,6 +825,15 @@ export class WeixinBridgeRuntime {
     event: InboundTextEvent,
     artifacts: OutputArtifact[],
   ): Promise<void> {
+    debugRuntime('artifact_delivery_begin', {
+      scopeId: event.externalScopeId,
+      artifactCount: artifacts.length,
+      artifacts: artifacts.map((artifact) => ({
+        kind: artifact?.kind ?? null,
+        path: String(artifact?.path ?? ''),
+        caption: truncateDebugText(artifact?.caption),
+      })),
+    });
     const deliveryErrors: string[] = [];
     for (const artifact of artifacts) {
       const filePath = String(artifact?.path ?? '').trim();
@@ -797,11 +857,29 @@ export class WeixinBridgeRuntime {
           filePath,
           error: errorMessage,
         });
+      } else {
+        debugRuntime('artifact_delivery_succeeded', {
+          scopeId: event.externalScopeId,
+          filePath,
+          messageId: result.messageId ?? null,
+          sentPath: result.sentPath ?? null,
+        });
       }
     }
     if (deliveryErrors.length === 0) {
+      debugRuntime('artifact_delivery_complete', {
+        scopeId: event.externalScopeId,
+        artifactCount: artifacts.length,
+        errorCount: 0,
+      });
       return;
     }
+    debugRuntime('artifact_delivery_complete', {
+      scopeId: event.externalScopeId,
+      artifactCount: artifacts.length,
+      errorCount: deliveryErrors.length,
+      firstError: deliveryErrors[0] ?? null,
+    });
     await this.sendTextWithRetry({
       externalScopeId: event.externalScopeId,
       content: this.i18n.t('runtime.error.attachmentDeliveryFailed', {
@@ -1034,12 +1112,7 @@ function utf8ByteLength(text: string): number {
 }
 
 function debugRuntime(event, payload) {
-  try {
-    const serialized = JSON.stringify(payload);
-    console.error(`[weixin-runtime] ${event} ${serialized}`);
-  } catch {
-    console.error(`[weixin-runtime] ${event}`);
-  }
+  writeSequencedDebugLog('weixin-runtime', event, payload, { envVar: null });
 }
 
 function truncateDebugText(value, limit = 240) {

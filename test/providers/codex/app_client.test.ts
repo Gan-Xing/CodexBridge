@@ -903,6 +903,85 @@ test('CodexAppClient falls back to the session log task_complete message when th
   assert.equal(result.finalSource, 'session_task_complete');
 });
 
+test('CodexAppClient falls back to session-log image generation artifacts when thread output stays empty', async () => {
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+  });
+  const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-session-log-image-'));
+  const sessionPath = path.join(sessionDir, 'rollout.jsonl');
+  const imagePath = path.join(sessionDir, 'generated-dog.png');
+  fs.writeFileSync(imagePath, 'png');
+  fs.writeFileSync(sessionPath, [
+    JSON.stringify({
+      timestamp: new Date().toISOString(),
+      type: 'event_msg',
+      payload: {
+        type: 'task_started',
+        turn_id: 'turn-1',
+      },
+    }),
+    JSON.stringify({
+      timestamp: new Date().toISOString(),
+      type: 'event_msg',
+      payload: {
+        type: 'image_generation_end',
+        call_id: 'ig-1',
+        status: 'generating',
+        revised_prompt: 'a cute dog',
+        result: 'inline-image',
+        saved_path: imagePath,
+      },
+    }),
+    JSON.stringify({
+      timestamp: new Date().toISOString(),
+      type: 'event_msg',
+      payload: {
+        type: 'task_complete',
+        turn_id: 'turn-1',
+        last_agent_message: null,
+      },
+    }),
+  ].join('\n') + '\n', 'utf8');
+
+  client.request = async (method) => {
+    if (method === 'turn/start') {
+      return { turn: { id: 'turn-1' } };
+    }
+    if (method === 'thread/read') {
+      return {
+        thread: {
+          id: 'thread-1',
+          name: 'Thread 1',
+          path: sessionPath,
+          turns: [{
+            id: 'turn-1',
+            status: 'completed',
+            items: [{
+              type: 'userMessage',
+              text: '给我一张小狗图',
+            }],
+          }],
+        },
+      };
+    }
+    return {};
+  };
+
+  const result = await client.startTurn({
+    threadId: 'thread-1',
+    inputText: '给我一张小狗图',
+    model: 'gpt-5.4',
+    effort: null,
+    collaborationMode: 'default',
+    timeoutMs: 2500,
+  });
+
+  assert.equal(result.outputText, '');
+  assert.equal(result.outputState, 'complete');
+  assert.equal(result.finalSource, 'session_task_complete_media');
+  assert.deepEqual(result.outputMedia, [expectedProviderNativeImageArtifact(imagePath, 3)]);
+});
+
 test('CodexAppClient keeps waiting for task_complete when turn status is completed early', async () => {
   const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-session-log-'));
   const sessionPath = path.join(sessionDir, 'rollout.jsonl');
@@ -1810,6 +1889,116 @@ test('CodexAppClient returns missing when neither thread items nor progress expo
   assert.equal(result.previewText, '');
   assert.equal(result.finalSource, 'none');
   assert.ok(readCount >= 3);
+});
+
+test('CodexAppClient waits for task_complete before returning missing for terminal turns backed by a session log', async () => {
+  const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-session-log-missing-wait-'));
+  const sessionPath = path.join(sessionDir, 'rollout.jsonl');
+  fs.writeFileSync(sessionPath, '', 'utf8');
+
+  let nowMs = 0;
+  let readCount = 0;
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+    turnPollNow: () => nowMs,
+    turnPollSleep: async () => {
+      nowMs += 1000;
+    },
+  });
+
+  client.request = async (method) => {
+    if (method === 'turn/start') {
+      return { turn: { id: 'turn-1' } };
+    }
+    if (method === 'thread/read') {
+      readCount += 1;
+      return {
+        thread: {
+          id: 'thread-1',
+          name: 'Thread 1',
+          path: sessionPath,
+          turns: [{
+            id: 'turn-1',
+            status: 'completed',
+            items: [{
+              type: 'userMessage',
+              text: 'hello',
+            }],
+          }],
+        },
+      };
+    }
+    return {};
+  };
+
+  await assert.rejects(
+    client.startTurn({
+      threadId: 'thread-1',
+      inputText: 'hello',
+      model: 'gpt-5.4',
+      effort: null,
+      collaborationMode: 'default',
+      timeoutMs: 2500,
+    }),
+    /Timed out waiting for Codex turn turn-1/,
+  );
+
+  assert.ok(readCount >= 2);
+});
+
+test('CodexAppClient returns missing only after session task_complete lands without final text or artifacts', async () => {
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+  });
+  const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-session-log-empty-complete-'));
+  const sessionPath = path.join(sessionDir, 'rollout.jsonl');
+  fs.writeFileSync(sessionPath, `${JSON.stringify({
+    timestamp: new Date().toISOString(),
+    type: 'event_msg',
+    payload: {
+      type: 'task_complete',
+      turn_id: 'turn-1',
+      last_agent_message: null,
+    },
+  })}\n`, 'utf8');
+
+  client.request = async (method) => {
+    if (method === 'turn/start') {
+      return { turn: { id: 'turn-1' } };
+    }
+    if (method === 'thread/read') {
+      return {
+        thread: {
+          id: 'thread-1',
+          name: 'Thread 1',
+          path: sessionPath,
+          turns: [{
+            id: 'turn-1',
+            status: 'completed',
+            items: [{
+              type: 'userMessage',
+              text: 'hello',
+            }],
+          }],
+        },
+      };
+    }
+    return {};
+  };
+
+  const result = await client.startTurn({
+    threadId: 'thread-1',
+    inputText: 'hello',
+    model: 'gpt-5.4',
+    effort: null,
+    collaborationMode: 'default',
+    timeoutMs: 2500,
+  });
+
+  assert.equal(result.outputText, '');
+  assert.equal(result.outputState, 'missing');
+  assert.equal(result.previewText, '');
+  assert.equal(result.finalSource, 'session_task_complete_empty');
 });
 
 test('CodexAppClient returns partial commentary instead of timing out when assistant activity exists without a final answer', async () => {

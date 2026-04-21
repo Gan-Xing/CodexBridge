@@ -14,6 +14,7 @@ import {
   ensureTurnArtifactDirectories,
   finalizeTurnArtifacts,
 } from './turn_artifacts.js';
+import { writeSequencedDebugLog } from './sequenced_stderr.js';
 import {
   createI18n,
   formatRelativeTimeLocalized,
@@ -172,18 +173,39 @@ export class BridgeCoordinator {
 
   async handleConversationTurn(event, options = {}) {
     const scopeRef = toScopeRef(event);
+    debugCoordinator('conversation_turn_begin', {
+      platform: scopeRef.platform,
+      scopeId: scopeRef.externalScopeId,
+      textPreview: truncateCoordinatorText(event?.text, 160),
+      attachmentCount: Array.isArray(event?.attachments) ? event.attachments.length : 0,
+    });
     const clarification = this.resolveArtifactClarification(scopeRef, event);
     if (clarification.response) {
+      debugCoordinator('conversation_turn_clarification_requested', {
+        platform: scopeRef.platform,
+        scopeId: scopeRef.externalScopeId,
+      });
       return clarification.response;
     }
     const effectiveEvent = clarification.event ?? event;
     const currentSession = this.bridgeSessions.resolveScopeSession(scopeRef);
     const uploadState = currentSession ? this.getUploadsStateForSession(currentSession.id) : null;
     if (uploadState?.active) {
+      debugCoordinator('conversation_turn_blocked_uploads', {
+        platform: scopeRef.platform,
+        scopeId: scopeRef.externalScopeId,
+        bridgeSessionId: currentSession?.id ?? null,
+        uploadState,
+      });
       return this.handleUploadsConversationTurn(effectiveEvent, scopeRef, currentSession, uploadState, options);
     }
     const activeTurn = await this.reconcileActiveTurn(scopeRef);
     if (activeTurn) {
+      debugCoordinator('conversation_turn_blocked_active_turn', {
+        platform: scopeRef.platform,
+        scopeId: scopeRef.externalScopeId,
+        activeTurn,
+      });
       return this.buildActiveTurnBlockedResponse(effectiveEvent, activeTurn);
     }
     this.activeTurns?.beginScopeTurn(scopeRef);
@@ -200,6 +222,14 @@ export class BridgeCoordinator {
           sourcePlatform: effectiveEvent.platform,
         },
       });
+      debugCoordinator('conversation_turn_session_resolved', {
+        platform: scopeRef.platform,
+        scopeId: scopeRef.externalScopeId,
+        bridgeSessionId: session.id,
+        providerProfileId: session.providerProfileId,
+        threadId: session.codexThreadId,
+        cwd: session.cwd ?? null,
+      });
       this.activeTurns?.updateScopeTurn(scopeRef, {
         bridgeSessionId: session.id,
         providerProfileId: session.providerProfileId,
@@ -207,6 +237,18 @@ export class BridgeCoordinator {
       });
       this.storeRetryableRequest(session.id, effectiveEvent);
       const { result, session: nextSession } = await this.startTurnWithRecovery(scopeRef, session, effectiveEvent, options);
+      debugCoordinator('conversation_turn_result', {
+        platform: scopeRef.platform,
+        scopeId: scopeRef.externalScopeId,
+        bridgeSessionId: nextSession?.id ?? session?.id ?? null,
+        threadId: nextSession?.codexThreadId ?? session?.codexThreadId ?? null,
+        turnId: result?.turnId ?? null,
+        outputState: result?.outputState ?? null,
+        finalSource: result?.finalSource ?? null,
+        outputTextPreview: truncateCoordinatorText(result?.outputText, 160),
+        previewTextPreview: truncateCoordinatorText(result?.previewText, 160),
+        outputArtifactCount: Array.isArray(result?.outputArtifacts) ? result.outputArtifacts.length : 0,
+      });
       const response = turnResponse(result, this.currentI18n, buildSessionMeta(nextSession));
       response.meta = {
         ...(response.meta ?? {}),
@@ -219,6 +261,14 @@ export class BridgeCoordinator {
       return response;
     } catch (error) {
       const failure = classifyTurnFailure(error, this.currentI18n);
+      debugCoordinator('conversation_turn_failure', {
+        platform: scopeRef.platform,
+        scopeId: scopeRef.externalScopeId,
+        bridgeSessionId: session?.id ?? null,
+        threadId: session?.codexThreadId ?? null,
+        error: error instanceof Error ? error.message : String(error),
+        failure: failure ?? null,
+      });
       if (!failure) {
         throw error;
       }
@@ -1883,9 +1933,25 @@ export class BridgeCoordinator {
   }
 
   async startTurnWithRecovery(scopeRef, session, event, options: StartTurnOptions = {}) {
+    debugCoordinator('turn_recovery_start', {
+      platform: scopeRef.platform,
+      scopeId: scopeRef.externalScopeId,
+      bridgeSessionId: session?.id ?? null,
+      threadId: session?.codexThreadId ?? null,
+      textPreview: truncateCoordinatorText(event?.text, 160),
+    });
     try {
       return await this.startTurnOnSession(session, event, options);
     } catch (error) {
+      debugCoordinator('turn_recovery_error', {
+        platform: scopeRef.platform,
+        scopeId: scopeRef.externalScopeId,
+        bridgeSessionId: session?.id ?? null,
+        threadId: session?.codexThreadId ?? null,
+        error: error instanceof Error ? error.message : String(error),
+        resumeRetryable: isResumeRetryableError(error),
+        staleThread: isStaleThreadError(error),
+      });
       if (isResumeRetryableError(error)) {
         return this.retryTurnOnSameSession(session, event, options, error);
       }
@@ -1915,6 +1981,24 @@ export class BridgeCoordinator {
       threadId: session.codexThreadId,
       artifactDelivery: pendingArtifactDelivery,
     });
+    debugCoordinator('turn_start_on_session', {
+      platform: scopeRef.platform,
+      scopeId: scopeRef.externalScopeId,
+      bridgeSessionId: session.id,
+      providerProfileId: session.providerProfileId,
+      threadId: session.codexThreadId,
+      cwd: session.cwd ?? null,
+      textPreview: truncateCoordinatorText(event?.text, 160),
+      attachmentCount: Array.isArray(event?.attachments) ? event.attachments.length : 0,
+      artifactContext: turnArtifactContext
+        ? {
+          bridgeSessionId: turnArtifactContext.bridgeSessionId ?? null,
+          turnId: turnArtifactContext.turnId ?? null,
+          artifactDir: turnArtifactContext.artifactDir ?? null,
+          spoolDir: turnArtifactContext.spoolDir ?? null,
+        }
+        : null,
+    });
     const result = await providerPlugin.startTurn({
       providerProfile,
       bridgeSession: session,
@@ -1923,6 +2007,14 @@ export class BridgeCoordinator {
       inputText: event.text,
       onProgress: options.onProgress ?? null,
       onTurnStarted: async (meta: { turnId?: string | null; threadId?: string | null } = {}) => {
+        debugCoordinator('turn_started', {
+          platform: scopeRef.platform,
+          scopeId: scopeRef.externalScopeId,
+          bridgeSessionId: session.id,
+          providerProfileId: session.providerProfileId,
+          threadId: meta.threadId ?? session.codexThreadId,
+          turnId: meta.turnId ?? null,
+        });
         if (turnArtifactContext) {
           turnArtifactContext.turnId = meta.turnId ?? null;
         }
@@ -1960,6 +2052,19 @@ export class BridgeCoordinator {
     const finalizedResult = finalizeTurnArtifacts({
       result,
       context: turnArtifactContext,
+    });
+    debugCoordinator('turn_result_finalized', {
+      platform: scopeRef.platform,
+      scopeId: scopeRef.externalScopeId,
+      bridgeSessionId: session.id,
+      threadId: finalizedResult?.threadId ?? session.codexThreadId,
+      turnId: finalizedResult?.turnId ?? null,
+      outputState: finalizedResult?.outputState ?? null,
+      finalSource: finalizedResult?.finalSource ?? null,
+      outputTextPreview: truncateCoordinatorText(finalizedResult?.outputText, 160),
+      previewTextPreview: truncateCoordinatorText(finalizedResult?.previewText, 160),
+      outputArtifactCount: Array.isArray(finalizedResult?.outputArtifacts) ? finalizedResult.outputArtifacts.length : 0,
+      artifactDelivery: finalizedResult?.artifactDelivery ?? null,
     });
     this.activeTurns?.updateScopeTurn(scopeRef, {
       artifactDelivery: finalizedResult.artifactDelivery ?? pendingArtifactDelivery ?? null,
@@ -3780,4 +3885,16 @@ function formatApprovalKind(kind: ProviderApprovalRequest['kind'], i18n: Transla
     return i18n.t('coordinator.allow.kind.fileChange');
   }
   return i18n.t('coordinator.allow.kind.command');
+}
+
+function debugCoordinator(event: string, payload: unknown) {
+  writeSequencedDebugLog('bridge-coordinator', event, payload);
+}
+
+function truncateCoordinatorText(value: unknown, limit = 240): string {
+  const text = String(value ?? '').replace(/\s+/gu, ' ').trim();
+  if (!text) {
+    return '';
+  }
+  return text.length <= limit ? text : `${text.slice(0, limit)}...`;
 }

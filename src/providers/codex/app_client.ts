@@ -4,6 +4,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { writeSequencedStderrLine } from '../../core/sequenced_stderr.js';
 import type {
   ProviderApprovalRequest,
   ProviderUsageReport,
@@ -197,6 +198,14 @@ export class CodexAppClient extends EventEmitter {
     this.startPromise = null;
   }
 
+  logDebug(event: string, payload: unknown = null): void {
+    try {
+      this.logger.debug?.(`[codex-app] ${event} ${JSON.stringify(payload)}`);
+    } catch {
+      this.logger.debug?.(`[codex-app] ${event}`);
+    }
+  }
+
   isConnected(): boolean {
     return this.connected;
   }
@@ -353,6 +362,27 @@ export class CodexAppClient extends EventEmitter {
     onApprovalRequest?: ((request: ProviderApprovalRequest) => Promise<void> | void) | null;
     timeoutMs?: number;
   }): Promise<ProviderTurnResult> {
+    this.logDebug('turn_start_requested', {
+      threadId,
+      cwd,
+      model,
+      effort,
+      serviceTier,
+      approvalPolicy,
+      sandboxMode,
+      collaborationMode,
+      timeoutMs,
+      inputCount: Array.isArray(input) ? input.length : 1,
+      inputSummary: summarizeTurnInput(
+        Array.isArray(input) && input.length > 0
+          ? input
+          : [{
+            type: 'text',
+            text: inputText,
+            text_elements: [],
+          }],
+      ),
+    });
     const result: any = await this.request('turn/start', {
       threadId,
       input: Array.isArray(input) && input.length > 0
@@ -382,6 +412,11 @@ export class CodexAppClient extends EventEmitter {
     if (!turn?.id) {
       throw new Error('Codex turn/start returned no turn id');
     }
+    this.logDebug('turn_start_acknowledged', {
+      threadId,
+      turnId: String(turn.id),
+      status: String(turn.status ?? ''),
+    });
     if (typeof onTurnStarted === 'function') {
       await onTurnStarted({
         turnId: String(turn.id),
@@ -479,8 +514,15 @@ export class CodexAppClient extends EventEmitter {
     this.child = this.spawnImpl(this.codexCliBin, ['app-server', ...featureArgs, '--listen', `ws://127.0.0.1:${this.port}`], {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    this.logDebug('app_server_spawned', {
+      command: this.codexCliBin,
+      port: this.port,
+      enabledFeatures: this.enabledFeatures,
+      autolaunch: this.autolaunch,
+      launchCommand: this.launchCommand,
+    });
     this.child.stderr?.on('data', (chunk) => {
-      this.logger.debug?.(`codex.stderr ${String(chunk).trim()}`);
+      this.logger.debug?.(`[codex-app] codex.stderr ${String(chunk).trim()}`);
     });
     this.child.on('exit', () => {
       this.connected = false;
@@ -542,21 +584,45 @@ export class CodexAppClient extends EventEmitter {
       await this.start();
     }
     const id = String(++this.requestId);
+    const startedAt = this.turnPollNow();
+    this.logDebug('rpc_request_start', {
+      id,
+      method,
+      timeoutMs,
+      params: summarizeRpcParams(method, params),
+    });
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         if (!this.pending.has(id)) {
           return;
         }
         this.pending.delete(id);
+        this.logDebug('rpc_request_timeout', {
+          id,
+          method,
+          elapsedMs: this.turnPollNow() - startedAt,
+        });
         reject(new Error(`Timed out waiting for Codex JSON-RPC response to ${method}`));
       }, timeoutMs);
       this.pending.set(id, {
         resolve: (result) => {
           clearTimeout(timer);
+          this.logDebug('rpc_request_result', {
+            id,
+            method,
+            elapsedMs: this.turnPollNow() - startedAt,
+            result: summarizeRpcResult(method, result),
+          });
           resolve(result);
         },
         reject: (error) => {
           clearTimeout(timer);
+          this.logDebug('rpc_request_error', {
+            id,
+            method,
+            elapsedMs: this.turnPollNow() - startedAt,
+            error: error instanceof Error ? error.message : String(error),
+          });
           reject(error);
         },
       });
@@ -593,6 +659,7 @@ export class CodexAppClient extends EventEmitter {
     }
 
     if ('method' in message) {
+      this.logDebug('rpc_notification', summarizeNotificationMessage(message));
       if ('id' in message && this.handleServerRequest(message)) {
         return;
       }
@@ -635,6 +702,7 @@ export class CodexAppClient extends EventEmitter {
     let firstTerminalWithoutOutputAt = null;
     let lastTurnSnapshotKey = null;
     let stableTerminalReadCount = 0;
+    let pollCount = 0;
     const terminalSettleMs = computeTerminalSettleMs(timeoutMs);
     const progressState: ProgressState = {
       commentaryText: '',
@@ -678,28 +746,58 @@ export class CodexAppClient extends EventEmitter {
     };
     this.on('notification', onNotification);
     this.on('approval_request', onApprovalEvent);
+    this.logDebug('turn_wait_start', {
+      threadId,
+      turnId,
+      timeoutMs,
+      deadline,
+      terminalSettleMs,
+    });
     try {
       while (this.turnPollNow() < deadline) {
+        pollCount += 1;
         let thread = null;
         try {
           thread = await this.readThread(threadId, true);
         } catch (error) {
           if (isThreadMaterializationPendingError(error)) {
+            this.logDebug('turn_poll_retry', {
+              threadId,
+              turnId,
+              pollCount,
+              reason: 'thread_materialization_pending',
+            });
             await this.turnPollSleep(1000);
             continue;
           }
           if (isRequestTimeoutError(error)) {
+            this.logDebug('turn_poll_retry', {
+              threadId,
+              turnId,
+              pollCount,
+              reason: 'thread_read_timeout',
+            });
             await this.turnPollSleep(1000);
             continue;
           }
           throw error;
         }
         const turn = thread?.turns?.find((entry) => entry.id === turnId) ?? null;
+        this.logDebug('turn_poll_snapshot', {
+          threadId,
+          turnId,
+          pollCount,
+          elapsedMs: timeoutMs - Math.max(0, deadline - this.turnPollNow()),
+          threadFound: Boolean(thread),
+          threadPath: thread?.path ?? null,
+          turn: summarizeTurnSnapshot(turn),
+          progress: summarizeProgressState(progressState),
+        });
         if (turn && isTurnTerminal(turn.status)) {
           const outputText = extractTurnOutputText(turn);
           if (outputText) {
             const outputArtifacts = extractTurnOutputArtifacts(turn);
-            return {
+            const result = {
               turnId,
               threadId,
               title: thread?.title ?? null,
@@ -711,10 +809,12 @@ export class CodexAppClient extends EventEmitter {
               finalSource: 'thread_items',
               status: turn.status,
             };
+            this.logDebug('turn_wait_return', summarizeTurnResultForDebug(result));
+            return result;
           }
           const outputArtifacts = extractTurnOutputArtifacts(turn);
           if (outputArtifacts.length > 0) {
-            return {
+            const result = {
               turnId,
               threadId,
               title: thread?.title ?? null,
@@ -726,12 +826,24 @@ export class CodexAppClient extends EventEmitter {
               finalSource: 'thread_items_media',
               status: turn.status,
             };
+            this.logDebug('turn_wait_return', summarizeTurnResultForDebug(result));
+            return result;
           }
           const sessionState = inspectTurnCompletionFromSessionPath(thread?.path ?? null, turnId);
           const hasAssistantVisibleItems = turn.items.some((item) => isAssistantVisibleItem(item));
           const completionState = classifyTurnCompletionState(turn);
+          this.logDebug('turn_terminal_state', {
+            threadId,
+            turnId,
+            pollCount,
+            turn: summarizeTurnSnapshot(turn),
+            hasAssistantVisibleItems,
+            completionState,
+            sessionState: summarizeSessionState(thread?.path ?? null, sessionState),
+            progress: summarizeProgressState(progressState),
+          });
           if (completionState === 'interrupted') {
-            return {
+            const result = {
               turnId,
               threadId,
               title: thread?.title ?? null,
@@ -741,23 +853,34 @@ export class CodexAppClient extends EventEmitter {
               finalSource: progressState.finalAnswerText ? 'progress_only' : 'none',
               status: turn.status,
             };
+            this.logDebug('turn_wait_return', summarizeTurnResultForDebug(result));
+            return result;
           }
           if (turn.error) {
+            this.logDebug('turn_wait_error', {
+              threadId,
+              turnId,
+              pollCount,
+              error: turn.error,
+            });
             throw new Error(turn.error);
           }
           if (sessionState.lastAgentMessage && hasAssistantVisibleItems) {
-            return {
+            const result = buildSessionTaskCompleteResult({
               turnId,
               threadId,
               title: thread?.title ?? null,
-              outputText: sessionState.lastAgentMessage,
-              outputState: 'complete',
-              previewText: progressState.finalAnswerText,
-              finalSource: 'session_task_complete',
               status: turn.status,
-            };
+              previewText: progressState.finalAnswerText,
+              sessionState,
+            });
+            this.logDebug('turn_wait_return', summarizeTurnResultForDebug(result));
+            return result;
           }
-          const sessionTaskCompleteNeedsMaterializationWait = sessionState.hasTaskComplete && !hasAssistantVisibleItems;
+          const sessionTaskCompleteNeedsMaterializationWait = shouldWaitForSessionTaskMaterialization(
+            sessionState,
+            hasAssistantVisibleItems,
+          );
           if (shouldWaitForSettledOutputAfterTerminalTurn(turn, progressState) || sessionTaskCompleteNeedsMaterializationWait) {
             const snapshotKey = buildTurnSnapshotKey(turn);
             if (snapshotKey === lastTurnSnapshotKey) {
@@ -774,25 +897,36 @@ export class CodexAppClient extends EventEmitter {
               )
               && this.turnPollNow() + 1000 < deadline
             ) {
+              this.logDebug('turn_wait_continue', {
+                threadId,
+                turnId,
+                pollCount,
+                reason: sessionTaskCompleteNeedsMaterializationWait
+                  ? 'session_task_materialization_wait'
+                  : 'terminal_settle_wait',
+                stableTerminalReadCount,
+                terminalElapsedMs: this.turnPollNow() - firstTerminalWithoutOutputAt,
+                terminalSettleMs,
+              });
               await this.turnPollSleep(1000);
               continue;
             }
           }
-          if (sessionState.lastAgentMessage) {
-            return {
+          if (sessionState.lastAgentMessage || sessionState.outputArtifacts.length > 0) {
+            const result = buildSessionTaskCompleteResult({
               turnId,
               threadId,
               title: thread?.title ?? null,
-              outputText: sessionState.lastAgentMessage,
-              outputState: 'complete',
-              previewText: progressState.finalAnswerText,
-              finalSource: 'session_task_complete',
               status: turn.status,
-            };
+              previewText: progressState.finalAnswerText,
+              sessionState,
+            });
+            this.logDebug('turn_wait_return', summarizeTurnResultForDebug(result));
+            return result;
           }
           if (sessionState.hasTaskComplete) {
             const previewText = resolveTurnPreviewText(turn, progressState);
-            return {
+            const result = {
               turnId,
               threadId,
               title: thread?.title ?? null,
@@ -806,15 +940,24 @@ export class CodexAppClient extends EventEmitter {
                   : 'session_task_complete_empty',
               status: turn.status,
             };
+            this.logDebug('turn_wait_return', summarizeTurnResultForDebug(result));
+            return result;
           }
-          if (hasUnsettledAssistantActivity(turn, progressState)) {
+          if (shouldWaitForTaskCompleteBeforeMissing(thread?.path ?? null, sessionState)) {
             if (this.turnPollNow() + 1000 < deadline) {
+              this.logDebug('turn_wait_continue', {
+                threadId,
+                turnId,
+                pollCount,
+                reason: 'waiting_for_session_task_complete',
+                sessionPath: thread?.path ?? null,
+              });
               await this.turnPollSleep(1000);
               continue;
             }
             const previewText = resolveTurnPreviewText(turn, progressState);
             if (previewText) {
-              return {
+              const result = {
                 turnId,
                 threadId,
                 title: thread?.title ?? null,
@@ -824,11 +967,54 @@ export class CodexAppClient extends EventEmitter {
                 finalSource: progressState.finalAnswerText ? 'progress_only' : 'commentary_only',
                 status: turn.status,
               };
+              this.logDebug('turn_wait_return', summarizeTurnResultForDebug(result));
+              return result;
             }
+            this.logDebug('turn_wait_error', {
+              threadId,
+              turnId,
+              pollCount,
+              reason: 'task_complete_timeout_without_preview',
+            });
+            throw new Error(`Timed out waiting for Codex turn ${turnId}`);
+          }
+          if (hasUnsettledAssistantActivity(turn, progressState)) {
+            if (this.turnPollNow() + 1000 < deadline) {
+              this.logDebug('turn_wait_continue', {
+                threadId,
+                turnId,
+                pollCount,
+                reason: 'unsettled_assistant_activity',
+                progress: summarizeProgressState(progressState),
+              });
+              await this.turnPollSleep(1000);
+              continue;
+            }
+            const previewText = resolveTurnPreviewText(turn, progressState);
+            if (previewText) {
+              const result = {
+                turnId,
+                threadId,
+                title: thread?.title ?? null,
+                outputText: '',
+                outputState: 'partial',
+                previewText,
+                finalSource: progressState.finalAnswerText ? 'progress_only' : 'commentary_only',
+                status: turn.status,
+              };
+              this.logDebug('turn_wait_return', summarizeTurnResultForDebug(result));
+              return result;
+            }
+            this.logDebug('turn_wait_error', {
+              threadId,
+              turnId,
+              pollCount,
+              reason: 'assistant_activity_timeout_without_preview',
+            });
             throw new Error(`Timed out waiting for Codex turn ${turnId}`);
           }
           const previewText = resolveTurnPreviewText(turn, progressState);
-          return {
+          const result = {
             turnId,
             threadId,
             title: thread?.title ?? null,
@@ -842,12 +1028,14 @@ export class CodexAppClient extends EventEmitter {
                 : 'none',
             status: turn.status,
           };
+          this.logDebug('turn_wait_return', summarizeTurnResultForDebug(result));
+          return result;
         }
         await this.turnPollSleep(1000);
       }
       const previewText = progressState.finalAnswerText || progressState.commentaryText;
       if (previewText) {
-        return {
+        const result = {
           turnId,
           threadId,
           title: null,
@@ -857,7 +1045,15 @@ export class CodexAppClient extends EventEmitter {
           finalSource: progressState.finalAnswerText ? 'progress_only' : 'commentary_only',
           status: null,
         };
+        this.logDebug('turn_wait_return', summarizeTurnResultForDebug(result));
+        return result;
       }
+      this.logDebug('turn_wait_error', {
+        threadId,
+        turnId,
+        pollCount,
+        reason: 'overall_timeout_without_preview',
+      });
       throw new Error(`Timed out waiting for Codex turn ${turnId}`);
     } finally {
       this.off('notification', onNotification);
@@ -1146,6 +1342,30 @@ export function createNoopLogger() {
   };
 }
 
+export function createStderrLogger({
+  envVar = 'CODEXBRIDGE_DEBUG_WEIXIN',
+}: {
+  envVar?: string;
+} = {}) {
+  if (process.env[envVar] !== '1') {
+    return createNoopLogger();
+  }
+  return {
+    debug(message: string) {
+      writeSequencedStderrLine(message);
+    },
+    info(message: string) {
+      writeSequencedStderrLine(message);
+    },
+    warn(message: string) {
+      writeSequencedStderrLine(message);
+    },
+    error(message: string) {
+      writeSequencedStderrLine(message);
+    },
+  };
+}
+
 function normalizeFeatureList(features: string[]): string[] {
   const normalized = [];
   const seen = new Set<string>();
@@ -1161,6 +1381,215 @@ function normalizeFeatureList(features: string[]): string[] {
     normalized.push(value);
   }
   return normalized;
+}
+
+function summarizeTurnInput(input: CodexTurnInput[]) {
+  return input.map((item) => {
+    if (item.type === 'text') {
+      return {
+        type: item.type,
+        textPreview: truncateDebugText(item.text, 160),
+      };
+    }
+    return {
+      type: item.type,
+      path: item.path,
+    };
+  });
+}
+
+function summarizeRpcParams(method: string, params: any) {
+  switch (method) {
+    case 'thread/read':
+      return {
+        threadId: String(params?.threadId ?? ''),
+        includeTurns: Boolean(params?.includeTurns),
+      };
+    case 'thread/start':
+      return {
+        cwd: params?.cwd ?? null,
+        model: params?.model ?? null,
+        serviceTier: params?.serviceTier ?? null,
+        sandbox: params?.sandbox ?? null,
+        approvalPolicy: params?.approvalPolicy ?? null,
+      };
+    case 'turn/start':
+      return {
+        threadId: String(params?.threadId ?? ''),
+        cwd: params?.cwd ?? null,
+        model: params?.model ?? null,
+        serviceTier: params?.serviceTier ?? null,
+        effort: params?.effort ?? null,
+        approvalPolicy: params?.approvalPolicy ?? null,
+        sandboxPolicy: params?.sandboxPolicy ?? null,
+        collaborationMode: params?.collaborationMode?.mode ?? null,
+        inputSummary: summarizeTurnInput(Array.isArray(params?.input) ? params.input : []),
+      };
+    case 'turn/interrupt':
+      return {
+        threadId: String(params?.threadId ?? ''),
+        turnId: String(params?.turnId ?? ''),
+      };
+    default:
+      return summarizePlainObject(params);
+  }
+}
+
+function summarizeRpcResult(method: string, result: any) {
+  switch (method) {
+    case 'thread/read':
+      return summarizeThreadReadResult(result?.thread ?? null);
+    case 'thread/start':
+      return {
+        threadId: String(result?.thread?.id ?? ''),
+        cwd: result?.cwd ?? null,
+      };
+    case 'turn/start':
+      return {
+        turnId: String(result?.turn?.id ?? ''),
+        status: String(result?.turn?.status ?? ''),
+      };
+    default:
+      return summarizePlainObject(result);
+  }
+}
+
+function summarizeNotificationMessage(message: any) {
+  return {
+    method: String(message?.method ?? ''),
+    id: 'id' in (message ?? {}) ? String(message.id ?? '') : null,
+    threadId: extractThreadIdFromNotification(message),
+    turnId: extractNotificationTurnId(message?.params ?? null),
+    itemId: typeof message?.params?.item?.id === 'string' ? message.params.item.id : null,
+    outputKind: typeof message?.params?.item?.output_kind === 'string'
+      ? message.params.item.output_kind
+      : null,
+  };
+}
+
+function summarizeThreadReadResult(thread: any) {
+  if (!thread) {
+    return null;
+  }
+  const turns = Array.isArray(thread?.turns) ? thread.turns : [];
+  return {
+    threadId: String(thread?.id ?? ''),
+    title: typeof thread?.name === 'string' ? thread.name : null,
+    path: typeof thread?.path === 'string' ? thread.path : null,
+    turnCount: turns.length,
+    turns: turns.slice(-3).map((turn) => summarizeTurnSnapshot(turn)),
+  };
+}
+
+function summarizeTurnSnapshot(turn: any) {
+  if (!turn) {
+    return null;
+  }
+  const items = Array.isArray(turn?.items) ? turn.items : [];
+  return {
+    id: String(turn?.id ?? ''),
+    status: String(turn?.status ?? ''),
+    itemCount: items.length,
+    visibleItemCount: items.filter((item) => isAssistantVisibleItem(item) || isUserVisibleItem(item)).length,
+    outputTextPresent: Boolean(extractTurnOutputText(turn)),
+    outputArtifactCount: extractTurnOutputArtifacts(turn).length,
+    error: typeof turn?.error === 'string' ? turn.error : null,
+  };
+}
+
+function summarizeProgressState(progressState: Partial<ProgressState>) {
+  return {
+    commentaryLength: String(progressState?.commentaryText ?? '').length,
+    finalAnswerLength: String(progressState?.finalAnswerText ?? '').length,
+    sawAssistantActivity: Boolean(progressState?.sawAssistantActivity),
+    lastAssistantActivityAt: progressState?.lastAssistantActivityAt ?? 0,
+  };
+}
+
+function summarizeSessionState(sessionPath: string | null | undefined, sessionState: {
+  hasTaskComplete: boolean;
+  lastAgentMessage: string | null;
+  outputArtifacts: Array<{ kind?: string | null; path?: string | null }>;
+}) {
+  return {
+    sessionPath: sessionPath ?? null,
+    hasTaskComplete: sessionState.hasTaskComplete,
+    lastAgentMessagePreview: truncateDebugText(sessionState.lastAgentMessage, 160),
+    outputArtifactCount: sessionState.outputArtifacts.length,
+    outputArtifacts: sessionState.outputArtifacts.map((artifact) => ({
+      kind: artifact.kind ?? null,
+      path: artifact.path ?? null,
+    })),
+  };
+}
+
+function summarizeTurnResultForDebug(result: ProviderTurnResult) {
+  return {
+    threadId: result.threadId ?? null,
+    turnId: result.turnId ?? null,
+    status: result.status ?? null,
+    outputState: result.outputState ?? null,
+    finalSource: result.finalSource ?? null,
+    outputTextPreview: truncateDebugText(result.outputText, 160),
+    previewTextPreview: truncateDebugText(result.previewText, 160),
+    outputArtifactCount: Array.isArray(result.outputArtifacts) ? result.outputArtifacts.length : 0,
+    outputArtifacts: Array.isArray(result.outputArtifacts)
+      ? result.outputArtifacts.map((artifact) => ({
+        kind: artifact.kind ?? null,
+        path: artifact.path ?? null,
+        caption: truncateDebugText(artifact.caption, 120),
+      }))
+      : [],
+  };
+}
+
+function summarizePlainObject(value: any) {
+  if (!value || typeof value !== 'object') {
+    return value ?? null;
+  }
+  const summary: Record<string, unknown> = {};
+  Object.keys(value).slice(0, 12).forEach((key) => {
+    const raw = value[key];
+    if (raw == null || typeof raw === 'number' || typeof raw === 'boolean') {
+      summary[key] = raw;
+      return;
+    }
+    if (typeof raw === 'string') {
+      summary[key] = truncateDebugText(raw, 120);
+      return;
+    }
+    if (Array.isArray(raw)) {
+      summary[key] = { length: raw.length };
+      return;
+    }
+    summary[key] = { keys: Object.keys(raw).slice(0, 8) };
+  });
+  return summary;
+}
+
+function extractThreadIdFromNotification(message: any): string | null {
+  const params = message?.params ?? null;
+  if (typeof params?.threadId === 'string') {
+    return params.threadId;
+  }
+  if (typeof params?.conversationId === 'string') {
+    return params.conversationId;
+  }
+  if (typeof params?.item?.threadId === 'string') {
+    return params.item.threadId;
+  }
+  if (typeof params?.event?.threadId === 'string') {
+    return params.event.threadId;
+  }
+  return null;
+}
+
+function truncateDebugText(value: unknown, limit = 240): string {
+  const text = String(value ?? '').replace(/\s+/gu, ' ').trim();
+  if (!text) {
+    return '';
+  }
+  return text.length <= limit ? text : `${text.slice(0, limit)}...`;
 }
 
 function mapThreadSummary(raw) {
@@ -1630,6 +2059,7 @@ function inspectTurnCompletionFromSessionPath(sessionPath, turnId) {
     return {
       hasTaskComplete: false,
       lastAgentMessage: null,
+      outputArtifacts: [],
     };
   }
   try {
@@ -1653,21 +2083,98 @@ function inspectTurnCompletionFromSessionPath(sessionPath, turnId) {
         continue;
       }
       const lastAgentMessage = extractTextCandidate(payload.last_agent_message)?.trim() || null;
-      return {
+      return inspectSessionTurnArtifacts(lines, index, {
         hasTaskComplete: true,
         lastAgentMessage,
-      };
+      });
     }
   } catch {
     return {
       hasTaskComplete: false,
       lastAgentMessage: null,
+      outputArtifacts: [],
     };
   }
   return {
     hasTaskComplete: false,
     lastAgentMessage: null,
+    outputArtifacts: [],
   };
+}
+
+function inspectSessionTurnArtifacts(lines, taskCompleteIndex, state) {
+  const outputArtifacts = [];
+  const seenArtifacts = new Set<string>();
+  for (let index = taskCompleteIndex - 1; index >= 0; index -= 1) {
+    const line = lines[index]?.trim();
+    if (!line) {
+      continue;
+    }
+    let entry = null;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const payload = entry?.payload ?? null;
+    if (entry?.type === 'event_msg' && payload?.type === 'task_started') {
+      break;
+    }
+    if (entry?.type !== 'event_msg' || payload?.type !== 'image_generation_end') {
+      continue;
+    }
+    const savedPath = typeof payload?.saved_path === 'string' ? payload.saved_path.trim() : '';
+    if (!savedPath || !fs.existsSync(savedPath)) {
+      continue;
+    }
+    const artifact = buildArtifactFromFilePath(savedPath);
+    const key = `${artifact.kind}:${artifact.path}`;
+    if (seenArtifacts.has(key)) {
+      continue;
+    }
+    seenArtifacts.add(key);
+    outputArtifacts.unshift(artifact);
+  }
+  return {
+    hasTaskComplete: state.hasTaskComplete,
+    lastAgentMessage: state.lastAgentMessage,
+    outputArtifacts,
+  };
+}
+
+function buildSessionTaskCompleteResult({
+  turnId,
+  threadId,
+  title,
+  status,
+  previewText,
+  sessionState,
+}) {
+  return {
+    turnId,
+    threadId,
+    title,
+    outputText: sessionState.lastAgentMessage ?? '',
+    outputArtifacts: sessionState.outputArtifacts,
+    outputMedia: normalizeLegacyImageMedia(sessionState.outputArtifacts),
+    outputState: 'complete',
+    previewText,
+    finalSource: sessionState.outputArtifacts.length > 0
+      ? 'session_task_complete_media'
+      : 'session_task_complete',
+    status,
+  };
+}
+
+function shouldWaitForSessionTaskMaterialization(sessionState, hasAssistantVisibleItems) {
+  return sessionState.hasTaskComplete
+    && !hasAssistantVisibleItems
+    && !sessionState.lastAgentMessage
+    && sessionState.outputArtifacts.length === 0;
+}
+
+function shouldWaitForTaskCompleteBeforeMissing(sessionPath, sessionState) {
+  return Boolean(String(sessionPath ?? '').trim()) && !sessionState.hasTaskComplete;
 }
 
 function shouldWaitForSettledOutputAfterTerminalTurn(turn: any, progressState: Partial<ProgressState> = {}) {
