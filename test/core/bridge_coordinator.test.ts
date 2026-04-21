@@ -805,6 +805,7 @@ test('/status includes active-turn state when a session is idle', async () => {
   assert.ok(lines.includes('接口配置：openai-default'));
   assert.ok(lines.includes('会话标题：OpenAI Default thread 1'));
   assert.ok(lines.includes('工作目录：/tmp/openai-default'));
+  assert.ok(lines.includes('速度模式：normal'));
   assert.ok(lines.includes('模型：gpt-5.4'));
   assert.ok(lines.includes('推理强度：'));
   assert.ok(lines.includes('权限预设：'));
@@ -836,6 +837,7 @@ test('/status details includes full diagnostics for the current session', async 
   assert.ok(lines.some((line) => /Bridge 会话：/.test(line)));
   assert.ok(lines.some((line) => /会话标题：OpenAI Default thread 1/.test(line)));
   assert.ok(lines.some((line) => /Codex 线程：/.test(line)));
+  assert.ok(lines.some((line) => /速度模式：normal/.test(line)));
   assert.ok(lines.some((line) => /审批策略：/.test(line)));
   assert.ok(lines.some((line) => /沙箱模式：/.test(line)));
   assert.ok(lines.every((line) => !/完整信息：\/status details/.test(line)));
@@ -1279,6 +1281,7 @@ test('/helps lists all supported slash commands and help entrypoints', async () 
   assert.match(text, /\/provider \(\/pd\) 查看可用 provider/);
   assert.match(text, /\/models \(\/ms\) 列出当前 provider 的可用模型/);
   assert.match(text, /\/model \(\/m\) 查看或切换当前 scope 的模型设置/);
+  assert.match(text, /\/fast 开启或关闭 Fast 模式/);
   assert.match(text, /\/threads \(\/th\) 查看当前 provider 的线程列表首页/);
   assert.match(text, /\/search \(\/se\) 按关键词搜索线程标题或 preview/);
   assert.match(text, /\/next \(\/nx\) 翻到当前线程列表的下一页/);
@@ -1312,6 +1315,7 @@ test('/helps renders English help text when locale is set to en', async () => {
   assert.match(text, /Help: \/helps <command>/);
   assert.match(text, /\/models \(\/ms\) List available models for the current provider/);
   assert.match(text, /\/model \(\/m\) View or switch model settings for the current scope/);
+  assert.match(text, /\/fast Enable or disable Fast mode/);
   assert.match(text, /\/lang Show or switch the current language used for text replies/);
 });
 
@@ -1668,6 +1672,112 @@ test('/model supports reset and unknown-model handling', async () => {
     text: '/model unknown-model',
   });
   assert.match(unknown.messages[0]?.text ?? '', /未知模型：unknown-model/);
+});
+
+test('/fast enables fast service tier and creates a session when needed', async () => {
+  const { runtime, openai } = makeRuntime();
+
+  const enabled = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-fast-1',
+    text: '/fast',
+  });
+
+  assert.equal(enabled.messages[0]?.text ?? '', 'Fast 模式已开启。');
+  assert.equal(enabled.messages[1]?.text ?? '', '当前速度模式：fast');
+  assert.equal(enabled.messages[2]?.text ?? '', '服务层级：fast');
+  assert.equal(enabled.messages[3]?.text ?? '', '下一轮生效。');
+
+  const session = runtime.services.bridgeSessions.resolveScopeSession({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-fast-1',
+  });
+  assert.ok(session);
+
+  const status = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-fast-1',
+    text: '/status details',
+  });
+  const statusLines = status.messages.map((message) => message.text ?? '');
+  assert.ok(statusLines.includes('速度模式：fast'));
+  assert.ok(statusLines.includes('服务层级：fast'));
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-fast-1',
+    text: 'hello with fast mode',
+  });
+
+  assert.equal(openai.startTurnCalls.at(-1)?.sessionSettings?.serviceTier, 'fast');
+});
+
+test('/fast off forces flex service tier for the next turn', async () => {
+  const { runtime, openai } = makeRuntime();
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-fast-2',
+    text: '/fast',
+  });
+
+  const disabled = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-fast-2',
+    text: '/fast off',
+  });
+
+  assert.equal(disabled.messages[0]?.text ?? '', 'Fast 模式已关闭，已恢复普通模式。');
+  assert.equal(disabled.messages[1]?.text ?? '', '当前速度模式：normal');
+  assert.equal(disabled.messages[2]?.text ?? '', '服务层级：flex');
+  assert.equal(disabled.messages[3]?.text ?? '', '下一轮生效。');
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-fast-2',
+    text: 'hello with normal mode',
+  });
+
+  assert.equal(openai.startTurnCalls.at(-1)?.sessionSettings?.serviceTier, 'flex');
+});
+
+test('legacy service tier values are normalized to fast/flex in status output', async () => {
+  const { runtime, openai } = makeRuntime();
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-fast-legacy-1',
+    text: 'hello legacy tier',
+  });
+
+  const session = runtime.services.bridgeSessions.resolveScopeSession({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-fast-legacy-1',
+  });
+  assert.ok(session);
+
+  runtime.services.bridgeSessions.upsertSessionSettings(session.id, {
+    serviceTier: 'priority',
+  });
+  let status = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-fast-legacy-1',
+    text: '/status details',
+  });
+  let statusLines = status.messages.map((message) => message.text ?? '');
+  assert.ok(statusLines.includes('服务层级：fast'));
+
+  runtime.services.bridgeSessions.upsertSessionSettings(session.id, {
+    serviceTier: 'default',
+  });
+
+  status = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-fast-legacy-1',
+    text: '/status details',
+  });
+  statusLines = status.messages.map((message) => message.text ?? '');
+  assert.ok(statusLines.includes('服务层级：flex'));
 });
 
 test('/lang displays current language when no locale argument is provided', async () => {

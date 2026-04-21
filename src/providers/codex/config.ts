@@ -33,7 +33,7 @@ export function loadCodexProfilesFromEnv(env: NodeJS.ProcessEnv = process.env): 
   const profiles: CodexProviderProfile[] = [
     {
       id: 'openai-default',
-      providerKind: 'codex',
+      providerKind: 'openai-native',
       displayName: 'Codex OpenAI',
       config: {
         cliBin: codexRealBin,
@@ -63,7 +63,7 @@ export function loadCodexProfilesFromEnv(env: NodeJS.ProcessEnv = process.env): 
   if (shouldExposeProxyProfile) {
     profiles.push({
       id: normalizeString(env.CODEX_PROVIDER_ID) ?? 'cliproxyminimax',
-      providerKind: 'codex',
+      providerKind: 'minimax-via-cliproxy',
       displayName: normalizeString(env.CODEX_PROVIDER_NAME) ?? 'Codex Proxy Profile',
       config: {
         cliBin: normalizeString(env.CODEX_PROXY_BIN) ?? codexProxyBin,

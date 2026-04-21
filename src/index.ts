@@ -26,7 +26,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       new TelegramPlatformPlugin(),
     ],
     providerPlugins: [
-      new CodexProviderPlugin(),
+      new OpenAINativeProviderPlugin(),
+      new MiniMaxViaCLIProxyProviderPlugin(),
     ],
     providerProfiles: codexProfiles.profiles,
     defaultProviderProfileId: codexProfiles.defaultProviderProfileId,

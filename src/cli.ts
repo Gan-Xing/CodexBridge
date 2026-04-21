@@ -11,7 +11,8 @@ import { clearContextTokensForAccount } from './platforms/weixin/official/contex
 import { createCodexBridgeRuntime } from './runtime/bootstrap.js';
 import { createFileJsonRepositories } from './store/file_json/create_file_json_repositories.js';
 import { loadCodexProfilesFromEnv } from './providers/codex/config.js';
-import { CodexProviderPlugin } from './providers/codex/plugin.js';
+import { OpenAINativeProviderPlugin } from './providers/openai_native/plugin.js';
+import { MiniMaxViaCLIProxyProviderPlugin } from './providers/minimax/plugin.js';
 import { WeixinBridgeRuntime } from './runtime/weixin_bridge_runtime.js';
 import { createI18n } from './i18n/index.js';
 
@@ -168,7 +169,8 @@ async function runWeixinServe(args: string[]) {
       new WeixinPlatformPlugin({ accountStore }),
     ],
     providerPlugins: [
-      new CodexProviderPlugin(),
+      new OpenAINativeProviderPlugin(),
+      new MiniMaxViaCLIProxyProviderPlugin(),
     ],
     providerProfiles: codexProfiles.profiles,
     defaultProviderProfileId: codexProfiles.defaultProviderProfileId,

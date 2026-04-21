@@ -169,7 +169,7 @@ export class CodexProviderPlugin {
       cwd: bridgeSession.cwd ?? event.cwd ?? null,
       model: modelInfo?.model ?? null,
       effort,
-      serviceTier: sessionSettings?.serviceTier ?? null,
+      serviceTier: normalizeCodexServiceTier(sessionSettings?.serviceTier ?? null),
       approvalPolicy: sessionSettings?.approvalPolicy ?? 'on-request',
       sandboxMode: sessionSettings?.sandboxMode ?? 'workspace-write',
       collaborationMode: 'default',
@@ -452,4 +452,18 @@ function normalizeOutputMedia(result: ProviderTurnResult) {
       }));
   }
   return Array.isArray(result?.outputMedia) ? result.outputMedia : [];
+}
+
+function normalizeCodexServiceTier(value: string | null | undefined): string | null {
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (!normalized) {
+    return null;
+  }
+  if (normalized === 'priority') {
+    return 'fast';
+  }
+  if (normalized === 'default') {
+    return 'flex';
+  }
+  return normalized;
 }

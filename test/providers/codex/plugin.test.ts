@@ -131,6 +131,55 @@ test('CodexProviderPlugin uses per-profile clients and forwards default model in
   assert.equal(seenDeveloperInstructions, '');
 });
 
+test('CodexProviderPlugin normalizes legacy service tier values before calling the app client', async () => {
+  const seenServiceTiers: string[] = [];
+  const plugin = makePlugin(() => ({
+    async start() {},
+    async startThread() {
+      return { threadId: 'thread-1', cwd: '/tmp/work', title: null };
+    },
+    async startTurn(params: any) {
+      seenServiceTiers.push(params.serviceTier);
+      return {
+        outputText: 'done',
+        threadId: params.threadId,
+        title: null,
+      };
+    },
+    async listModels() {
+      return [{
+        id: 'gpt-5.4',
+        model: 'gpt-5.4',
+        displayName: 'GPT-5.4',
+        description: '',
+        isDefault: true,
+        supportedReasoningEfforts: ['medium'],
+        defaultReasoningEffort: 'medium',
+      }];
+    },
+  }));
+
+  const profile = makeProfile({ defaultModel: 'gpt-5.4' });
+  const bridgeSession = makeBridgeSession({ codexThreadId: 'thread-1' });
+
+  await plugin.startTurn({
+    providerProfile: profile,
+    bridgeSession,
+    sessionSettings: makeSessionSettings({ serviceTier: 'priority' }),
+    event: { platform: 'weixin', externalScopeId: 'wxid_1', text: 'hello' },
+    inputText: 'hello',
+  });
+  await plugin.startTurn({
+    providerProfile: profile,
+    bridgeSession,
+    sessionSettings: makeSessionSettings({ serviceTier: 'default' }),
+    event: { platform: 'weixin', externalScopeId: 'wxid_1', text: 'hello again' },
+    inputText: 'hello again',
+  });
+
+  assert.deepEqual(seenServiceTiers, ['fast', 'flex']);
+});
+
 test('CodexProviderPlugin turns inbound attachments into text prompt plus localImage inputs', async () => {
   let seenInput = null;
   let seenInputText = null;

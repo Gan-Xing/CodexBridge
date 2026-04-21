@@ -12,9 +12,9 @@ test('loadCodexProfilesFromEnv keeps Codex OpenAI as the default profile', () =>
   });
 
   assert.equal(result.defaultProviderProfileId, 'openai-default');
-  assert.equal(result.profiles[0]?.providerKind, 'codex');
+  assert.equal(result.profiles[0]?.providerKind, 'openai-native');
   assert.equal(result.profiles[0]?.config.cliBin, '/usr/bin/codex');
   assert.equal(result.profiles[1]?.id, 'cliproxyminimax');
-  assert.equal(result.profiles[1]?.providerKind, 'codex');
+  assert.equal(result.profiles[1]?.providerKind, 'minimax-via-cliproxy');
   assert.equal(result.profiles[1]?.config.defaultModel, 'MiniMax-M2.7');
 });

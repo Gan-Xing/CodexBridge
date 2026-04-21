@@ -167,6 +167,18 @@ Examples:
 /model gpt-5.4
 ```
 
+### `/fast`
+
+Enable or disable Fast mode for future turns in the current scope.
+`/fast` turns on `serviceTier=fast`. `/fast off` forces `serviceTier=flex`.
+
+Examples:
+
+```text
+/fast
+/fast off
+```
+
 ### `/threads` and `/th`
 
 Show the first page of threads for the current provider profile.

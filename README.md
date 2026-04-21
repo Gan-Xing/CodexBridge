@@ -12,8 +12,7 @@ CodexBridge is a Codex-centered gateway for connecting multiple chat platforms t
 ## Documents
 
 - [Core architecture](./docs/architecture/codexbridge-core-architecture.md)
-- [WeChat + Codex Phase 1 TODO](./docs/todo/wechat-openai-phase1.md)
-- [TypeScript migration TODO](./docs/todo/codexbridge-typescript-migration.md)
+- [Roadmap TODO](./docs/todo/roadmap.md)
 - [WeChat slash command reference](./docs/usage/weixin-slash-commands.md)
 
 ## Repository Layout
@@ -39,7 +38,7 @@ Project bootstrap is now focused on:
 
 Current implemented bridge pieces:
 
-- Core session routing with WeChat-friendly slash commands, including `/helps`, `/status`, `/usage`, `/stop`, `/new`, `/uploads`, `/provider`, `/models`, `/model`, `/threads`, `/search`, `/next`, `/prev`, `/open`, `/peek`, `/rename`, `/permissions`, `/allow`, `/deny`, `/reconnect`, `/retry`, `/restart`, and `/lang`
+- Core session routing with WeChat-friendly slash commands, including `/helps`, `/status`, `/usage`, `/stop`, `/new`, `/uploads`, `/provider`, `/models`, `/model`, `/fast`, `/threads`, `/search`, `/next`, `/prev`, `/open`, `/peek`, `/rename`, `/permissions`, `/allow`, `/deny`, `/reconnect`, `/retry`, `/restart`, and `/lang`
 - File-backed JSON repositories for persistent bridge state
 - WeChat platform skeleton for Hermes-compatible iLink config loading, QR account state reuse, inbound DM normalization, long-poll client/poller wiring, context-token persistence, text chunking, and outbound text/typing delivery
 - Codex profile loader and initial Codex app-server client/plugin path for shared thread execution
@@ -63,6 +62,8 @@ Recommended entrypoints:
 /ms
 /model
 /m
+/fast
+/fast off
 /model gpt-5.4 xhigh
 /model high
 /threads

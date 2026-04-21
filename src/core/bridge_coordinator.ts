@@ -30,6 +30,8 @@ const THREAD_PREVIEW_LIMIT = 72;
 const THREAD_HISTORY_TURN_LIMIT = 3;
 const HELP_FLAG_SET = new Set(['-h', '--help', '-help', '-helps']);
 const STATUS_DETAILS_ARG_SET = new Set(['details', 'detail', 'full']);
+const FAST_SERVICE_TIER = 'fast';
+const NORMAL_SERVICE_TIER = 'flex';
 
 type CoordinatorResponse = {
   type: 'message';
@@ -322,6 +324,8 @@ export class BridgeCoordinator {
         return this.handleModelsCommand(event);
       case 'model':
         return this.handleModelCommand(event, command.args);
+      case 'fast':
+        return this.handleFastCommand(event, command.args);
       default:
         return messageResponse([
           this.t('coordinator.command.unsupported', { name: command.name }),
@@ -367,6 +371,7 @@ export class BridgeCoordinator {
         ...(details ? [this.t('coordinator.status.providerKind', { kind: providerProfile.providerKind })] : []),
         ...this.renderUsageSummaryLines(usageReport),
         this.t('coordinator.status.defaultCwd', { cwd: this.defaultCwd ?? this.t('common.notSet') }),
+        this.t('coordinator.status.speedMode', { value: formatSpeedMode(null) }),
         this.t('coordinator.status.model', { value: modelValue }),
         this.t('coordinator.status.reasoningEffort', { value: '' }),
         this.t('coordinator.status.accessPreset', { value: '' }),
@@ -383,6 +388,7 @@ export class BridgeCoordinator {
       }),
       ...this.renderUsageSummaryLines(usageReport),
       this.t('coordinator.status.workingDirectory', { cwd: session.cwd ?? this.defaultCwd ?? this.t('common.notSet') }),
+      this.t('coordinator.status.speedMode', { value: formatSpeedMode(settings?.serviceTier ?? null) }),
       this.t('coordinator.status.model', { value: modelValue }),
       this.t('coordinator.status.reasoningEffort', { value: settings?.reasoningEffort ?? '' }),
       this.t('coordinator.status.accessPreset', { value: settings?.accessPreset ?? '' }),
@@ -398,9 +404,10 @@ export class BridgeCoordinator {
       ...this.renderUsageSummaryLines(usageReport),
       this.t('coordinator.status.codexThread', { id: session.codexThreadId }),
       this.t('coordinator.status.workingDirectory', { cwd: session.cwd ?? this.defaultCwd ?? this.t('common.notSet') }),
+      this.t('coordinator.status.speedMode', { value: formatSpeedMode(settings?.serviceTier ?? null) }),
       this.t('coordinator.status.model', { value: settings?.model ?? this.t('common.default') }),
       this.t('coordinator.status.reasoningEffort', { value: settings?.reasoningEffort ?? this.t('common.default') }),
-      this.t('coordinator.status.serviceTier', { value: settings?.serviceTier ?? this.t('common.default') }),
+      this.t('coordinator.status.serviceTier', { value: normalizeServiceTier(settings?.serviceTier) ?? this.t('common.default') }),
       this.t('coordinator.status.accessPreset', { value: formatAccessPreset(resolveAccessPreset(settings)) }),
       this.t('coordinator.status.approvalPolicy', { value: resolveApprovalPolicy(settings) }),
       this.t('coordinator.status.sandboxMode', { value: resolveSandboxMode(settings) }),
@@ -1022,6 +1029,62 @@ export class BridgeCoordinator {
     }
     this.bridgeSessions.upsertSessionSettings(session.id, updates);
     return messageResponse([...messages, this.t('coordinator.permissions.nextTurn')], buildSessionMeta(session));
+  }
+
+  async handleFastCommand(event, args) {
+    const normalizedArgs = args.map((arg) => String(arg ?? '').trim()).filter((arg) => arg.length > 0);
+    if (normalizedArgs.length > 1) {
+      return this.handleHelpsCommand(event, ['fast']);
+    }
+    const action = String(normalizedArgs[0] ?? '').trim().toLowerCase();
+    const enable = !action || ['on', 'enable', 'enabled', 'fast', '1'].includes(action);
+    const disable = ['off', 'disable', 'disabled', 'normal', 'default', '0'].includes(action);
+    if (!enable && !disable) {
+      return this.handleHelpsCommand(event, ['fast']);
+    }
+    const activeResponse = await this.rejectIfActiveTurnForCommand(event, 'fast');
+    if (activeResponse) {
+      return activeResponse;
+    }
+    const scopeRef = toScopeRef(event);
+    if (disable) {
+      const existing = this.bridgeSessions.resolveScopeSession(scopeRef);
+      if (!existing) {
+        return messageResponse([
+          this.t('coordinator.fast.disabled'),
+          this.t('coordinator.fast.current', { value: formatSpeedMode(null) }),
+        ], this.buildScopedSessionMeta(event));
+      }
+      this.bridgeSessions.upsertSessionSettings(existing.id, {
+        serviceTier: NORMAL_SERVICE_TIER,
+      });
+      return messageResponse([
+        this.t('coordinator.fast.disabled'),
+        this.t('coordinator.fast.current', { value: formatSpeedMode(NORMAL_SERVICE_TIER) }),
+        this.t('coordinator.status.serviceTier', { value: NORMAL_SERVICE_TIER }),
+        this.t('coordinator.permissions.nextTurn'),
+      ], buildSessionMeta(existing));
+    }
+    const session = await this.bridgeSessions.resolveOrCreateScopeSession(scopeRef, {
+      providerProfileId: this.resolveScopeProviderProfile(scopeRef).id,
+      cwd: this.resolveEventCwd(event),
+      initialSettings: {
+        locale: this.resolveScopeLocale(scopeRef, event),
+      },
+      providerStartOptions: {
+        sourcePlatform: event.platform,
+        trigger: 'fast-command',
+      },
+    });
+    this.bridgeSessions.upsertSessionSettings(session.id, {
+      serviceTier: FAST_SERVICE_TIER,
+    });
+    return messageResponse([
+      this.t('coordinator.fast.enabled'),
+      this.t('coordinator.fast.current', { value: formatSpeedMode(FAST_SERVICE_TIER) }),
+      this.t('coordinator.status.serviceTier', { value: FAST_SERVICE_TIER }),
+      this.t('coordinator.permissions.nextTurn'),
+    ], buildSessionMeta(session));
   }
 
   resolveSessionModelForEffort(models, requestedModel) {
@@ -2016,6 +2079,7 @@ function renderCommandBlockedMessage(commandName, interruptRequested, i18n: Tran
     open: i18n.t('coordinator.action.open'),
     models: i18n.t('coordinator.action.models'),
     model: i18n.t('coordinator.action.model'),
+    fast: i18n.t('coordinator.action.fast'),
     rename: i18n.t('coordinator.action.rename'),
     provider: i18n.t('coordinator.action.provider'),
     reconnect: i18n.t('coordinator.action.reconnect'),
@@ -2803,6 +2867,23 @@ function getCommandHelpSpecs(i18n: Translator) {
       i18n.t('coordinator.help.note.model'),
     ],
   }),
+  fast: freezeCommandHelp({
+    name: 'fast',
+    aliases: [],
+    summary: i18n.t('coordinator.help.summary.fast'),
+    usage: [
+      '/fast',
+      '/fast off',
+      '/fast -h',
+    ],
+    examples: [
+      '/fast',
+      '/fast off',
+    ],
+    notes: [
+      i18n.t('coordinator.help.note.fast'),
+    ],
+  }),
   threads: freezeCommandHelp({
     name: 'threads',
     aliases: ['th'],
@@ -3051,6 +3132,7 @@ const COMMAND_HELP_ORDER = Object.freeze([
   'provider',
   'models',
   'model',
+  'fast',
   'threads',
   'search',
   'next',
@@ -3081,6 +3163,7 @@ const COMMAND_ALIAS_DEFINITIONS = Object.freeze({
   provider: ['pd'],
   models: ['ms'],
   model: ['m'],
+  fast: [],
   threads: ['th'],
   search: ['se'],
   next: ['nx'],
@@ -3487,6 +3570,24 @@ function normalizeAccessPreset(value) {
 
 function resolveAccessPreset(settings) {
   return normalizeAccessPreset(settings?.accessPreset) ?? 'default';
+}
+
+function normalizeServiceTier(value) {
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (!normalized) {
+    return null;
+  }
+  if (normalized === 'priority') {
+    return 'fast';
+  }
+  if (normalized === 'default') {
+    return 'flex';
+  }
+  return normalized;
+}
+
+function formatSpeedMode(serviceTier) {
+  return normalizeServiceTier(serviceTier) === FAST_SERVICE_TIER ? 'fast' : 'normal';
 }
 
 function resolveAccessModeForPreset(preset) {
