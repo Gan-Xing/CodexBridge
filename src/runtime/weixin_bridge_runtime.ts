@@ -270,6 +270,15 @@ export class WeixinBridgeRuntime {
       return operation;
     }
 
+    if (this.scopeChains.has(scopeId)) {
+      debugRuntime('scope_busy_rejected', {
+        scopeId,
+        textPreview: truncateDebugText(event?.text),
+        attachmentCount: Array.isArray(event?.attachments) ? event.attachments.length : 0,
+      });
+      return this.respondWhileScopeBusy(event);
+    }
+
     if (shouldDelayInboundEvent(event)) {
       const deferred = createPendingInboundMerge(event);
       this.pendingInboundMerges.set(scopeId, deferred);
@@ -282,6 +291,27 @@ export class WeixinBridgeRuntime {
     }
 
     return this.enqueueScopeWork(scopeId, async () => this.processInboundEvent(event));
+  }
+
+  async respondWhileScopeBusy(event: InboundTextEvent): Promise<RuntimeResponse> {
+    const content = [
+      this.i18n.t('coordinator.blocked.active'),
+      this.i18n.t('coordinator.blocked.waitOrStop'),
+    ].join('\n');
+    const typingStart = this.safeSendTyping(event.externalScopeId, 'start');
+    try {
+      await this.sendTextWithRetry({
+        externalScopeId: event.externalScopeId,
+        content,
+      });
+      return {
+        type: 'message',
+        messages: [{ text: content }],
+      };
+    } finally {
+      await typingStart;
+      await this.safeSendTyping(event.externalScopeId, 'stop');
+    }
   }
 
   armPendingInboundMerge(scopeId: string, pending: PendingInboundMerge): void {
@@ -744,6 +774,7 @@ export class WeixinBridgeRuntime {
     event: InboundTextEvent,
     artifacts: OutputArtifact[],
   ): Promise<void> {
+    const deliveryErrors: string[] = [];
     for (const artifact of artifacts) {
       const filePath = String(artifact?.path ?? '').trim();
       if (!filePath) {
@@ -755,9 +786,28 @@ export class WeixinBridgeRuntime {
         caption: artifact.caption ?? null,
       });
       if (!result.success) {
-        throw new Error(`media delivery failed: ${result.error || result.sentPath}`);
+        const errorMessage = String(
+          result.error
+          || result.sentPath
+          || this.i18n.t('runtime.error.unknownDeliveryFailure'),
+        ).trim();
+        deliveryErrors.push(errorMessage);
+        debugRuntime('artifact_delivery_failed', {
+          scopeId: event.externalScopeId,
+          filePath,
+          error: errorMessage,
+        });
       }
     }
+    if (deliveryErrors.length === 0) {
+      return;
+    }
+    await this.sendTextWithRetry({
+      externalScopeId: event.externalScopeId,
+      content: this.i18n.t('runtime.error.attachmentDeliveryFailed', {
+        error: deliveryErrors[0] ?? this.i18n.t('runtime.error.unknownDeliveryFailure'),
+      }),
+    });
   }
 
   async runPostResponseAction(response: RuntimeResponse, event: InboundTextEvent): Promise<void> {

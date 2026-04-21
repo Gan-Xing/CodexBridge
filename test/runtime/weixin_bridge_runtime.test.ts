@@ -419,6 +419,56 @@ test('WeixinBridgeRuntime sends complete media-only Codex turns without requirin
   }]);
 });
 
+test('WeixinBridgeRuntime reports media upload failures after Codex generates an attachment', async () => {
+  const sentText: Array<{ externalScopeId: string; content: string }> = [];
+  const sentMedia: Array<{ externalScopeId: string; filePath: string; caption?: string | null }> = [];
+  const runtime = makeRuntime({
+    sendText: async ({ externalScopeId, content }) => {
+      sentText.push({ externalScopeId, content });
+    },
+    sendMedia: async (payload) => {
+      sentMedia.push(payload);
+      return {
+        success: false,
+        messageId: null,
+        sentPath: payload.filePath,
+        sentCaption: String(payload.caption ?? '').trim(),
+        error: 'CDN upload server error: status 500',
+      };
+    },
+    coordinator: {
+      async handleInboundEvent() {
+        return {
+          type: 'message',
+          messages: [{
+            mediaPath: '/tmp/generated-kitten.png',
+            caption: null,
+          }],
+          meta: {
+            codexTurn: {
+              outputState: 'complete',
+              previewText: '',
+              finalSource: 'thread_items_media',
+            },
+          },
+        };
+      },
+    },
+  });
+
+  await runtime.runOnce();
+
+  assert.deepEqual(sentMedia, [{
+    externalScopeId: 'wxid_1',
+    filePath: '/tmp/generated-kitten.png',
+    caption: null,
+  }]);
+  assert.deepEqual(sentText, [{
+    externalScopeId: 'wxid_1',
+    content: '附件已生成，但微信上传失败：CDN upload server error: status 500。可用 /retry 重试。',
+  }]);
+});
+
 test('WeixinBridgeRuntime sends final text before media attachments in the same response', async () => {
   const sentText: Array<{ externalScopeId: string; content: string }> = [];
   const sentMedia: Array<{ externalScopeId: string; filePath: string; caption?: string | null }> = [];
@@ -752,14 +802,13 @@ test('WeixinBridgeRuntime forwards provider error details to Weixin', async () =
 
 
 
-test('WeixinBridgeRuntime serializes replies per scope so a second message waits for the first delivery to finish', async () => {
+test('WeixinBridgeRuntime replies immediately when a second plain-text message arrives during an active scope turn', async () => {
   const sent: Array<{ externalScopeId: string; content: string }> = [];
   const started: string[] = [];
   let releaseFirst: (value?: unknown) => void = () => {};
   const firstGate = new Promise((resolve) => {
     releaseFirst = resolve;
   });
-  let firstFinished = false;
   const runtime = makeRuntime({
     sendText: async ({ externalScopeId, content }) => {
       sent.push({ externalScopeId, content });
@@ -770,10 +819,8 @@ test('WeixinBridgeRuntime serializes replies per scope so a second message waits
         started.push(event.text);
         if (event.text === 'first') {
           await firstGate;
-          firstFinished = true;
           return completeResponse('first answer');
         }
-        assert.equal(firstFinished, true);
         return completeResponse('second answer');
       },
     },
@@ -793,13 +840,25 @@ test('WeixinBridgeRuntime serializes replies per scope so a second message waits
   await new Promise((resolve) => setTimeout(resolve, 10));
 
   assert.deepEqual(started, ['first']);
-  releaseFirst();
-  await Promise.all([first, second]);
-
-  assert.deepEqual(started, ['first', 'second']);
+  await second;
+  assert.deepEqual(started, ['first']);
   assert.deepEqual(sent, [
+    {
+      externalScopeId: 'wxid_1',
+      content: '当前已有一轮回复在进行中。\n请先等待，或使用 /stop 中断。',
+    },
+  ]);
+
+  releaseFirst();
+  await first;
+
+  assert.deepEqual(started, ['first']);
+  assert.deepEqual(sent, [
+    {
+      externalScopeId: 'wxid_1',
+      content: '当前已有一轮回复在进行中。\n请先等待，或使用 /stop 中断。',
+    },
     { externalScopeId: 'wxid_1', content: 'first answer' },
-    { externalScopeId: 'wxid_1', content: 'second answer' },
   ]);
 });
 

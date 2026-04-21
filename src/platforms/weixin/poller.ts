@@ -17,7 +17,6 @@ interface WeixinPollerPlugin {
 
 interface PendingCursorCommit {
   syncCursor: string | null | undefined;
-  completion: Promise<void>;
   afterCommitActions: Array<() => Promise<void> | void>;
 }
 
@@ -64,9 +63,13 @@ export class WeixinPoller {
         const result = await this.plugin.pollOnce({ syncCursor: this.nextSyncCursor });
         this.nextSyncCursor = result?.syncCursor ?? this.nextSyncCursor;
         const dispatchOutcome = await this.dispatchEvents(result?.events ?? []);
+        void dispatchOutcome.completion.catch(async (error) => {
+          // Service-mode cursor persistence must not wait on long-running turn completion.
+          // We still surface background failures through onError for observability.
+          await this.onError(error);
+        });
         this.enqueueCursorCommit({
           syncCursor: result?.syncCursor ?? this.nextSyncCursor,
-          completion: dispatchOutcome.completion,
           afterCommitActions: dispatchOutcome.afterCommitActions,
         });
         this.ensureCommitPump();
@@ -123,7 +126,6 @@ export class WeixinPoller {
     while (this.pendingCursorCommits.length > 0) {
       const entry = this.pendingCursorCommits[0];
       try {
-        await entry.completion;
         await this.plugin.commitSyncCursor?.(entry.syncCursor);
         for (const afterCommit of entry.afterCommitActions) {
           await afterCommit();

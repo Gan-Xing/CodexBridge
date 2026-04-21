@@ -349,6 +349,7 @@ const CATALOGS: Record<SupportedLocale, MessageCatalog> = {
     'runtime.error.staleSession': '当前绑定的 Codex 会话已不可恢复。请使用 /open 重新绑定，或用 /new 新建。',
     'runtime.error.incomplete': '本轮回复未完整取回，请重试。',
     'runtime.error.finalTextMissing': '微信未能解析该回合完整正文：{scopeId}',
+    'runtime.error.attachmentDeliveryFailed': '附件已生成，但微信上传失败：{error}。可用 /retry 重试。',
     'runtime.error.unknownDeliveryFailure': '微信发送失败，原因未知。',
 
     'platform.weixin.official.ilinkHttpError': 'iLink 请求失败：{method} {endpoint}，HTTP {status}，响应：{response}',
@@ -761,6 +762,7 @@ const CATALOGS: Record<SupportedLocale, MessageCatalog> = {
     'runtime.error.staleSession': 'The currently bound Codex session can no longer be recovered. Use /open to rebind, or /new to create a new one.',
     'runtime.error.incomplete': 'The reply was not fully retrieved. Please retry.',
     'runtime.error.finalTextMissing': 'WeixinBridgeRuntime could not resolve final text for {scopeId}',
+    'runtime.error.attachmentDeliveryFailed': 'The attachment was generated, but the Weixin upload failed: {error}. Use /retry to try again.',
     'runtime.error.unknownDeliveryFailure': 'Unknown Weixin delivery failure',
 
     'platform.weixin.official.ilinkHttpError': 'Weixin iLink request failed: {method} {endpoint}, HTTP {status}, response: {response}',

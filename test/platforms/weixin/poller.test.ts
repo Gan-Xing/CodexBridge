@@ -73,7 +73,7 @@ test('WeixinPoller backs off through onError when pollOnce throws', async () => 
   assert.deepEqual(committed, ['cursor-2']);
 });
 
-test('WeixinPoller keeps polling from an in-memory cursor before background completion settles', async () => {
+test('WeixinPoller commits the sync cursor before background completion settles', async () => {
   const committed = [];
   const pollSyncCursors = [];
   let releaseFirst: (value?: unknown) => void = () => {};
@@ -113,8 +113,12 @@ test('WeixinPoller keeps polling from an in-memory cursor before background comp
   } as any);
 
   const run = poller.start();
-  await Promise.resolve();
-  await Promise.resolve();
+  await new Promise((resolve) => {
+    setImmediate(resolve);
+  });
+
+  assert.ok(committed.includes('cursor-1'));
+
   releaseFirst();
   await run;
 
@@ -122,7 +126,7 @@ test('WeixinPoller keeps polling from an in-memory cursor before background comp
   assert.deepEqual(committed, ['cursor-1', 'cursor-2']);
 });
 
-test('WeixinPoller does not commit the sync cursor when background completion fails', async () => {
+test('WeixinPoller still commits the sync cursor when background completion fails', async () => {
   const errors = [];
   const committed = [];
   let pollCount = 0;
@@ -156,8 +160,8 @@ test('WeixinPoller does not commit the sync cursor when background completion fa
   await poller.start();
 
   assert.equal(pollCount, 1);
+  assert.deepEqual(committed, ['cursor-1']);
   assert.deepEqual(errors, ['handle failed']);
-  assert.deepEqual(committed, []);
 });
 
 test('WeixinPoller keeps only the latest /restart command per scope within one poll batch', async () => {
