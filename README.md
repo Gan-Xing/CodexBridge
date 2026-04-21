@@ -146,6 +146,19 @@ See the full command reference in [docs/usage/weixin-slash-commands.md](./docs/u
 npm test
 ```
 
+## Media Tooling
+
+Image normalization and video thumbnail generation now use project-managed `ffmpeg` / `ffprobe` binaries via `ffmpeg-static` and `ffprobe-static`.
+
+Resolution order:
+
+- `CODEXBRIDGE_FFMPEG_PATH` / `CODEXBRIDGE_FFPROBE_PATH`
+- `FFMPEG_PATH` / `FFPROBE_PATH`
+- bundled binaries from project dependencies
+- system `PATH` fallback
+
+This keeps image/video media handling portable across Linux, macOS, and Windows without requiring a manual global `ffmpeg` install in the common case.
+
 ## WeChat Login
 
 ```bash
