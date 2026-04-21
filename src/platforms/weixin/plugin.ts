@@ -31,6 +31,7 @@ import { buildTextMessageReq } from './official/send.js';
 import { isWeixinSendResponseError } from './official/send.js';
 import { loadWeixinConfig, validateWeixinConfig, type WeixinConfig } from './config.js';
 import { formatWeixinText, splitWeixinText } from './formatting.js';
+import { writeSequencedDebugLog } from '../../core/sequenced_stderr.js';
 import { createI18n, type Translator } from '../../i18n/index.js';
 import type {
   InboundAttachment,
@@ -653,6 +654,13 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
           error: captionError,
         });
       }
+      debugWeixin('send_media_result', {
+        scopeId: externalScopeId,
+        filePath: normalizedPath,
+        messageId,
+        sentCaption: captionError ? '' : normalizedCaption,
+        captionError: captionError || null,
+      });
       return {
         success: true,
         messageId,
@@ -763,11 +771,7 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
 }
 
 function debugWeixin(event: string, payload: unknown) {
-  if (process.env.CODEXBRIDGE_DEBUG_WEIXIN !== '1') {
-    return;
-  }
-  const line = `[weixin-debug] ${event} ${JSON.stringify(payload)}\n`;
-  process.stderr.write(line);
+  writeSequencedDebugLog('weixin-debug', event, payload);
 }
 
 function summarizeInboundPayload(payload: WeixinInboundPayload) {

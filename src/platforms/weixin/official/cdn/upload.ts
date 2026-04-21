@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { writeSequencedDebugLog } from '../../../../core/sequenced_stderr.js';
 import { getUploadUrl, type WeixinOfficialApiOptions, type WeixinOfficialFetch } from '../api.js';
 import { UploadMediaType } from '../types.js';
 import { aesEcbPaddedSize } from './aes_ecb.js';
@@ -36,6 +37,7 @@ export async function downloadRemoteImageToTemp(
   destDir: string,
   fetchImpl?: WeixinOfficialFetch,
 ): Promise<string> {
+  debugWeixinUpload('remote_media_download_start', { url });
   const effectiveFetch = fetchImpl ?? (globalThis.fetch as WeixinOfficialFetch | undefined);
   if (typeof effectiveFetch !== 'function') {
     throw new Error(`remote media download missing fetch implementation: ${url}`);
@@ -55,6 +57,12 @@ export async function downloadRemoteImageToTemp(
   const name = `weixin-remote-${crypto.randomUUID()}${ext}`;
   const filePath = path.join(destDir, name);
   await fs.writeFile(filePath, buf);
+  debugWeixinUpload('remote_media_download_done', {
+    url,
+    filePath,
+    contentType,
+    sizeBytes: buf.length,
+  });
   return filePath;
 }
 
@@ -78,7 +86,30 @@ async function uploadMediaToCdn(params: {
     mediaType: params.mediaType,
     mainPlaintext: plaintext,
   });
+  debugWeixinUpload('upload_media_prepare', {
+    label: params.label,
+    filePath: params.filePath,
+    toUserId: params.toUserId,
+    mediaType: params.mediaType,
+    rawsize,
+    filesize,
+    rawfilemd5,
+    durationMs: mediaInfo?.durationMs ?? null,
+    width: mediaInfo?.width ?? null,
+    height: mediaInfo?.height ?? null,
+    hasThumb: Boolean(thumbSource),
+    thumbRawsize: thumbSource?.rawsize ?? null,
+  });
 
+  debugWeixinUpload('get_upload_url_request', {
+    label: params.label,
+    filePath: params.filePath,
+    toUserId: params.toUserId,
+    mediaType: params.mediaType,
+    rawsize,
+    filesize,
+    hasThumb: Boolean(thumbSource),
+  });
   const uploadUrlResp = await getUploadUrl({
     baseUrl: params.opts.baseUrl,
     token: params.opts.token,
@@ -96,6 +127,13 @@ async function uploadMediaToCdn(params: {
     thumb_filesize: thumbSource?.filesize,
     no_need_thumb: !thumbSource,
     aeskey: aeskey.toString('hex'),
+  });
+  debugWeixinUpload('get_upload_url_response', {
+    label: params.label,
+    filePath: params.filePath,
+    uploadFullUrlPresent: Boolean(uploadUrlResp.upload_full_url),
+    uploadParamPresent: Boolean(uploadUrlResp.upload_param),
+    thumbUploadParamPresent: Boolean(uploadUrlResp.thumb_upload_param),
   });
 
   const { downloadParam } = await uploadBufferToCdn({
@@ -122,7 +160,7 @@ async function uploadMediaToCdn(params: {
       })
       : null;
 
-    return {
+    const result = {
       filekey,
       downloadEncryptedQueryParam: downloadParam,
       aeskey: aeskey.toString('hex'),
@@ -132,6 +170,16 @@ async function uploadMediaToCdn(params: {
       durationMs: mediaInfo?.durationMs ?? null,
       thumb,
     };
+    debugWeixinUpload('upload_media_complete', {
+      label: params.label,
+      filePath: params.filePath,
+      filekey: result.filekey,
+      downloadParamPresent: Boolean(result.downloadEncryptedQueryParam),
+      hasThumb: Boolean(result.thumb),
+      fileSize: result.fileSize,
+      fileSizeCiphertext: result.fileSizeCiphertext,
+    });
+    return result;
   } finally {
     await thumbSource?.cleanup?.();
   }
@@ -249,6 +297,14 @@ async function uploadThumbToCdn(params: {
   if (!params.uploadParam) {
     throw new Error(`${params.label}: thumbnail upload URL missing (need thumb_upload_param)`);
   }
+  debugWeixinUpload('upload_thumb_start', {
+    label: params.label,
+    filekey: params.filekey,
+    rawsize: params.thumbSource.rawsize,
+    filesize: params.thumbSource.filesize,
+    width: params.thumbSource.width,
+    height: params.thumbSource.height,
+  });
   const { downloadParam } = await uploadBufferToCdn({
     buf: params.thumbSource.plaintext,
     uploadParam: params.uploadParam,
@@ -265,4 +321,8 @@ async function uploadThumbToCdn(params: {
     width: params.thumbSource.width,
     height: params.thumbSource.height,
   };
+}
+
+function debugWeixinUpload(event: string, payload: unknown) {
+  writeSequencedDebugLog('weixin-debug', event, payload);
 }

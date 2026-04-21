@@ -7,7 +7,10 @@ import path from 'node:path';
 import test from 'node:test';
 import { hasFfmpegTools, resolveFfmpegPath } from '../../../../src/core/media_tool_paths.js';
 import { createWeixinOfficialTransport } from '../../../../src/platforms/weixin/official/transport.js';
-import { normalizeStillImageForWeixin } from '../../../../src/platforms/weixin/official/media/thumbnail.js';
+import {
+  normalizeStillImageForWeixin,
+  transcodeStillImageJpeg,
+} from '../../../../src/platforms/weixin/official/media/thumbnail.js';
 
 interface FetchMockStep {
   body?: unknown;
@@ -32,6 +35,57 @@ function createFetchMock(sequence: FetchMockStep[]) {
     });
   };
   return { fetchImpl, calls };
+}
+
+function createSolidColorImage(params: {
+  tempDir: string;
+  fileName: string;
+  color?: string;
+  size?: string;
+  extraArgs?: string[];
+}) {
+  const filePath = path.join(params.tempDir, params.fileName);
+  const ffmpeg = spawnSync(resolveFfmpegPath(), [
+    '-hide_banner',
+    '-loglevel',
+    'error',
+    '-y',
+    '-f',
+    'lavfi',
+    '-i',
+    `color=c=${params.color ?? 'red'}:s=${params.size ?? '64x64'}`,
+    '-frames:v',
+    '1',
+    ...(params.extraArgs ?? []),
+    filePath,
+  ], { encoding: 'utf8' });
+  assert.equal(ffmpeg.status, 0, ffmpeg.stderr || ffmpeg.stdout);
+  return filePath;
+}
+
+function createNoisyStillImage(params: {
+  tempDir: string;
+  fileName: string;
+  size?: string;
+  extraArgs?: string[];
+}) {
+  const filePath = path.join(params.tempDir, params.fileName);
+  const ffmpeg = spawnSync(resolveFfmpegPath(), [
+    '-hide_banner',
+    '-loglevel',
+    'error',
+    '-y',
+    '-f',
+    'lavfi',
+    '-i',
+    `nullsrc=s=${params.size ?? '1024x1536'},geq=r=random(1)*255:g=random(2)*255:b=random(3)*255`,
+    '-frames:v',
+    '1',
+    ...(params.extraArgs ?? []),
+    filePath,
+  ], { encoding: 'utf8' });
+  assert.equal(ffmpeg.status, 0, ffmpeg.stderr || ffmpeg.stdout);
+  return filePath;
 }
 
 test('normalizeStillImageForWeixin keeps oversized PNG inputs in PNG format and under the max size', async (t) => {
@@ -170,10 +224,25 @@ test('WeixinOfficialTransport.sendMessage and getConfig use Hermes-compatible pa
   assert.equal(configBody.context_token, 'ctx-1');
 });
 
-test('WeixinOfficialTransport.sendMediaFile uploads JPEG image media and sends the image item downstream', async () => {
+test('WeixinOfficialTransport.sendMediaFile transcodes JPEG inputs before upload and sends the image item downstream', async (t) => {
+  if (!hasFfmpeg()) {
+    t.skip('ffmpeg/ffprobe not available');
+    return;
+  }
+
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-weixin-media-'));
-  const imagePath = path.join(tempDir, 'sample.jpg');
-  fs.writeFileSync(imagePath, Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
+  const imagePath = createSolidColorImage({
+    tempDir,
+    fileName: 'sample.jpg',
+    extraArgs: ['-pix_fmt', 'yuvj420p', '-q:v', '2'],
+  });
+  const expectedUpload = await transcodeStillImageJpeg(imagePath);
+  assert.ok(expectedUpload);
+  const expectedUploadSize = fs.statSync(String(expectedUpload?.filePath ?? '')).size;
+  const expectedUploadMd5 = crypto
+    .createHash('md5')
+    .update(fs.readFileSync(String(expectedUpload?.filePath ?? '')))
+    .digest('hex');
 
   const originalFetch = globalThis.fetch;
   const requests: Array<{ url: string; method: string; body?: string | Uint8Array | null }> = [];
@@ -240,7 +309,8 @@ test('WeixinOfficialTransport.sendMediaFile uploads JPEG image media and sends t
     assert.equal(uploadPayload.thumb_rawsize, undefined);
     assert.equal(uploadPayload.thumb_rawfilemd5, undefined);
     assert.equal(uploadPayload.thumb_filesize, undefined);
-    assert.equal(Number(uploadPayload.rawsize), fs.statSync(imagePath).size);
+    assert.equal(Number(uploadPayload.rawsize), expectedUploadSize);
+    assert.equal(String(uploadPayload.rawfilemd5), expectedUploadMd5);
 
     const cdnUploads = requests.filter((entry) => entry.url.includes('/upload?'));
     assert.equal(cdnUploads.length, 1);
@@ -261,33 +331,119 @@ test('WeixinOfficialTransport.sendMediaFile uploads JPEG image media and sends t
     assert.equal(payload.msg.item_list?.[0]?.image_item?.thumb_size, undefined);
     assert.equal(payload.msg.item_list?.[0]?.image_item?.hd_size, undefined);
   } finally {
+    await expectedUpload?.cleanup();
     globalThis.fetch = originalFetch;
   }
 });
 
-test('WeixinOfficialTransport.sendMediaFile normalizes oversized images before upload without changing image delivery flow', async (t) => {
+test('WeixinOfficialTransport.sendMediaFile transcodes small PNG inputs to JPEG before upload', async (t) => {
+  if (!hasFfmpeg()) {
+    t.skip('ffmpeg/ffprobe not available');
+    return;
+  }
+
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-weixin-media-small-png-'));
+  const imagePath = createSolidColorImage({
+    tempDir,
+    fileName: 'sample.png',
+  });
+  assert.ok(fs.statSync(imagePath).size <= 200 * 1024);
+  const expectedUpload = await transcodeStillImageJpeg(imagePath);
+  assert.ok(expectedUpload);
+  const expectedUploadSize = fs.statSync(String(expectedUpload?.filePath ?? '')).size;
+  const expectedUploadMd5 = crypto
+    .createHash('md5')
+    .update(fs.readFileSync(String(expectedUpload?.filePath ?? '')))
+    .digest('hex');
+
+  const originalFetch = globalThis.fetch;
+  const requests: Array<{ url: string; method: string; body?: string | Uint8Array | null }> = [];
+
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    requests.push({
+      url,
+      method: init?.method ?? 'GET',
+      body: typeof init?.body === 'string'
+        ? init.body
+        : init?.body instanceof Uint8Array
+          ? init.body
+          : null,
+    });
+
+    if (url.includes('/ilink/bot/getuploadurl')) {
+      return new Response(JSON.stringify({
+        upload_param: 'upload-param-1',
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (url.includes('/upload?')) {
+      return new Response('', {
+        status: 200,
+        headers: { 'x-encrypted-param': 'download-param-1' },
+      });
+    }
+
+    if (url.includes('/ilink/bot/sendmessage')) {
+      return new Response(JSON.stringify({ ret: 0 }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    throw new Error(`unexpected fetch url: ${url}`);
+  }) as typeof globalThis.fetch;
+
+  try {
+    const transport = createWeixinOfficialTransport({
+      baseUrl: 'https://ilinkai.weixin.qq.com',
+      token: 'token',
+    });
+
+    const result = await transport.sendMediaFile({
+      filePath: imagePath,
+      toUserId: 'wxid_sender',
+      text: '',
+      contextToken: 'ctx-1',
+      cdnBaseUrl: 'https://novac2c.cdn.weixin.qq.com/c2c',
+    });
+
+    assert.ok(result.messageId);
+    const uploadCalls = requests
+      .filter((entry) => entry.url.includes('/ilink/bot/getuploadurl'))
+      .map((entry) => JSON.parse(String(entry.body ?? '{}')));
+    assert.equal(uploadCalls.length, 1);
+    assert.equal(Number(uploadCalls[0]?.rawsize), expectedUploadSize);
+    assert.equal(String(uploadCalls[0]?.rawfilemd5), expectedUploadMd5);
+  } finally {
+    await expectedUpload?.cleanup();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('WeixinOfficialTransport.sendMediaFile normalizes oversized JPEG-converted images before upload without changing image delivery flow', async (t) => {
   if (!hasFfmpeg()) {
     t.skip('ffmpeg/ffprobe not available');
     return;
   }
 
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-weixin-media-fallback-'));
-  const imagePath = path.join(tempDir, 'sample.png');
-  const ffmpeg = spawnSync(resolveFfmpegPath(), [
-    '-hide_banner',
-    '-loglevel',
-    'error',
-    '-y',
-    '-f',
-    'lavfi',
-    '-i',
-    'nullsrc=s=1024x1536,geq=r=random(1)*255:g=random(2)*255:b=random(3)*255',
-    '-frames:v',
-    '1',
-    imagePath,
-  ], { encoding: 'utf8' });
-  assert.equal(ffmpeg.status, 0, ffmpeg.stderr || ffmpeg.stdout);
+  const imagePath = createNoisyStillImage({
+    tempDir,
+    fileName: 'sample.png',
+  });
   assert.ok(fs.statSync(imagePath).size > 200 * 1024);
+  const transcoded = await transcodeStillImageJpeg(imagePath);
+  assert.ok(transcoded);
+  const transcodedSize = fs.statSync(String(transcoded?.filePath ?? '')).size;
+  const transcodedMd5 = crypto
+    .createHash('md5')
+    .update(fs.readFileSync(String(transcoded?.filePath ?? '')))
+    .digest('hex');
+  assert.ok(transcodedSize > 200 * 1024);
 
   const originalFetch = globalThis.fetch;
   const requests: Array<{ url: string; method: string; body?: string | Uint8Array | null }> = [];
@@ -354,6 +510,7 @@ test('WeixinOfficialTransport.sendMediaFile normalizes oversized images before u
       .map((entry) => JSON.parse(String(entry.body ?? '{}')));
     assert.equal(uploadCalls.length, 1);
     assert.notEqual(String(uploadCalls[0]?.rawfilemd5 ?? ''), originalMd5);
+    assert.notEqual(String(uploadCalls[0]?.rawfilemd5 ?? ''), transcodedMd5);
     assert.notEqual(Number(uploadCalls[0]?.rawsize), fs.statSync(imagePath).size);
     assert.ok(Number(uploadCalls[0]?.rawsize) <= 200 * 1024);
 
@@ -365,14 +522,23 @@ test('WeixinOfficialTransport.sendMediaFile normalizes oversized images before u
     assert.equal(sendPayloads[0]?.msg?.item_list?.[0]?.type, 2);
     assert.equal(sendPayloads[1]?.msg?.item_list?.[0]?.text_item?.text, 'PNG normalized test');
   } finally {
+    await transcoded?.cleanup();
     globalThis.fetch = originalFetch;
   }
 });
 
-test('WeixinOfficialTransport.sendMediaFile keeps media success when caption delivery fails after image send', async () => {
+test('WeixinOfficialTransport.sendMediaFile keeps media success when caption delivery fails after image send', async (t) => {
+  if (!hasFfmpeg()) {
+    t.skip('ffmpeg/ffprobe not available');
+    return;
+  }
+
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-weixin-caption-failure-'));
-  const imagePath = path.join(tempDir, 'sample.jpg');
-  fs.writeFileSync(imagePath, Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
+  const imagePath = createSolidColorImage({
+    tempDir,
+    fileName: 'sample.jpg',
+    extraArgs: ['-pix_fmt', 'yuvj420p', '-q:v', '2'],
+  });
 
   const originalFetch = globalThis.fetch;
   const requests: Array<{ url: string; method: string; body?: string | Uint8Array | null }> = [];
@@ -458,10 +624,18 @@ test('WeixinOfficialTransport.sendMediaFile keeps media success when caption del
   }
 });
 
-test('WeixinOfficialTransport.sendMediaFile does not retry JPEG image sends on negative send codes', async () => {
+test('WeixinOfficialTransport.sendMediaFile does not retry JPEG image sends on negative send codes', async (t) => {
+  if (!hasFfmpeg()) {
+    t.skip('ffmpeg/ffprobe not available');
+    return;
+  }
+
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-weixin-negative-code-'));
-  const imagePath = path.join(tempDir, 'sample.jpg');
-  fs.writeFileSync(imagePath, Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
+  const imagePath = createSolidColorImage({
+    tempDir,
+    fileName: 'sample.jpg',
+    extraArgs: ['-pix_fmt', 'yuvj420p', '-q:v', '2'],
+  });
 
   const originalFetch = globalThis.fetch;
   const requests: Array<{ url: string; method: string; body?: string | Uint8Array | null }> = [];
@@ -529,7 +703,19 @@ test('WeixinOfficialTransport.sendMediaFile does not retry JPEG image sends on n
   }
 });
 
-test('WeixinOfficialTransport.sendMediaFile accepts remote JPEG image URLs by downloading them first', async () => {
+test('WeixinOfficialTransport.sendMediaFile accepts remote JPEG image URLs by downloading them first', async (t) => {
+  if (!hasFfmpeg()) {
+    t.skip('ffmpeg/ffprobe not available');
+    return;
+  }
+
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-weixin-remote-image-'));
+  const remoteImagePath = createSolidColorImage({
+    tempDir,
+    fileName: 'remote.jpg',
+    extraArgs: ['-pix_fmt', 'yuvj420p', '-q:v', '2'],
+  });
+  const remoteImageBytes = fs.readFileSync(remoteImagePath);
   const requests: Array<{ url: string; method: string; body?: string | Uint8Array | null }> = [];
 
   const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -545,7 +731,7 @@ test('WeixinOfficialTransport.sendMediaFile accepts remote JPEG image URLs by do
     });
 
     if (url === 'https://cdn.example.com/image.jpg') {
-      return new Response(Buffer.from([0xff, 0xd8, 0xff, 0xd9]), {
+      return new Response(remoteImageBytes, {
         status: 200,
         headers: { 'Content-Type': 'image/jpeg' },
       });

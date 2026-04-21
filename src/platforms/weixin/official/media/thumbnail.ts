@@ -98,12 +98,10 @@ export async function transcodeStillImageJpeg(filePath: string): Promise<{
       filePath,
       '-frames:v',
       '1',
-      '-vf',
-      'scale=768:-2',
       '-pix_fmt',
       'yuvj420p',
       '-q:v',
-      '8',
+      '2',
       outputPath,
     ]);
     return {
