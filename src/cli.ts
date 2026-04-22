@@ -11,6 +11,7 @@ import { clearContextTokensForAccount } from './platforms/weixin/official/contex
 import { createCodexBridgeRuntime } from './runtime/bootstrap.js';
 import { createFileJsonRepositories } from './store/file_json/create_file_json_repositories.js';
 import { loadCodexProfilesFromEnv } from './providers/codex/config.js';
+import { CodexAccountManager } from './providers/codex/account_manager.js';
 import { OpenAINativeProviderPlugin } from './providers/openai_native/plugin.js';
 import { MiniMaxViaCLIProxyProviderPlugin } from './providers/minimax/plugin.js';
 import { WeixinBridgeRuntime } from './runtime/weixin_bridge_runtime.js';
@@ -164,6 +165,7 @@ async function runWeixinServe(args: string[]) {
   const serveLock = await acquireServeLock(path.join(stateDir, 'runtime', 'weixin-serve.lock'));
   const repositories = createFileJsonRepositories(path.join(stateDir, 'runtime'));
   const codexProfiles = loadCodexProfilesFromEnv();
+  const codexAuthManager = createWeixinServeCodexAuthManager(stateDir);
   const runtime = createCodexBridgeRuntime({
     platformPlugins: [
       new WeixinPlatformPlugin({ accountStore }),
@@ -177,6 +179,7 @@ async function runWeixinServe(args: string[]) {
     defaultCwd,
     locale: i18n.locale,
     repositories,
+    codexAuthManager,
     restartBridge: async ({ event }) => {
       await queueWeixinBridgeRestart({
         stateDir,
@@ -599,6 +602,16 @@ function resolveClearContextAccountId({
   return allAccounts.length === 1 ? allAccounts[0] : null;
 }
 
+function codexLoginStateDir(stateDir: string) {
+  return path.join(path.resolve(stateDir), 'runtime', 'codex-login');
+}
+
+function createWeixinServeCodexAuthManager(stateDir: string) {
+  return new CodexAccountManager({
+    rootDir: codexLoginStateDir(stateDir),
+  });
+}
+
 function formatError(error: unknown) {
   if (error instanceof Error) {
     return error.stack || error.message;
@@ -617,6 +630,8 @@ export {
   flushPendingRestartNotifications,
   main,
   materializeQrArtifact,
+  codexLoginStateDir,
+  createWeixinServeCodexAuthManager,
   pendingRestartNotificationsFile,
   parseWeixinClearContextArgs,
   parseWeixinLoginArgs,

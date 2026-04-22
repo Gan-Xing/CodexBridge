@@ -15,6 +15,7 @@ interface DeliveryResult {
   failedIndex: number | null;
   failedText: string;
   error: string;
+  errorCode?: number | null;
 }
 
 interface RuntimeResponseMessage {
@@ -58,6 +59,7 @@ interface BridgeCoordinatorLike {
       onApprovalRequest?: ((request: ProviderApprovalRequest) => Promise<void>) | null;
     },
   ): Promise<RuntimeResponse>;
+  renderApprovalPrompt?(event: InboundTextEvent): Promise<string | null> | string | null;
   restartBridge?(params: { event: InboundTextEvent }): Promise<void>;
 }
 
@@ -94,6 +96,11 @@ interface PendingInboundMerge {
   reject: (error: unknown) => void;
 }
 
+interface PendingScopeNotice {
+  content: string;
+  queuedAt: number;
+}
+
 interface WeixinBridgeRuntimeOptions {
   platformPlugin: PlatformPluginLike;
   bridgeCoordinator: BridgeCoordinatorLike;
@@ -106,6 +113,8 @@ interface WeixinBridgeRuntimeOptions {
 }
 
 export class WeixinBridgeRuntime {
+  static readonly NOTICE_COOLDOWN_MS = 30_000;
+
   platformPlugin: PlatformPluginLike;
 
   bridgeCoordinator: BridgeCoordinatorLike;
@@ -130,6 +139,10 @@ export class WeixinBridgeRuntime {
 
   pendingInboundMerges: Map<string, PendingInboundMerge>;
 
+  pendingScopeNotices: Map<string, PendingScopeNotice>;
+
+  recentScopeNotices: Map<string, { content: string; sentAt: number }>;
+
   constructor({
     platformPlugin,
     bridgeCoordinator,
@@ -152,6 +165,8 @@ export class WeixinBridgeRuntime {
     this.backgroundTasks = new Set();
     this.scopeChains = new Map();
     this.pendingInboundMerges = new Map();
+    this.pendingScopeNotices = new Map();
+    this.recentScopeNotices = new Map();
   }
 
   async start(): Promise<void> {
@@ -301,10 +316,16 @@ export class WeixinBridgeRuntime {
     ].join('\n');
     const typingStart = this.safeSendTyping(event.externalScopeId, 'start');
     try {
-      await this.sendTextWithRetry({
+      const delivery = await this.sendTextWithRetry({
         externalScopeId: event.externalScopeId,
         content,
       });
+      if (!delivery.success && this.isRateLimitedDeliveryFailure(delivery)) {
+        await this.ensureScopeNoticeDelivered(
+          event.externalScopeId,
+          this.i18n.t('runtime.error.weixinRateLimitedNotice'),
+        );
+      }
       return {
         type: 'message',
         messages: [{ text: content }],
@@ -369,6 +390,7 @@ export class WeixinBridgeRuntime {
     event: InboundTextEvent,
     options: { deferPostResponseAction?: boolean } = {},
   ): Promise<RuntimeResponse> {
+    await this.flushPendingScopeNotice(event.externalScopeId);
     const streamState = createStreamState();
     debugRuntime('process_inbound_event_start', {
       scopeId: event.externalScopeId,
@@ -623,6 +645,7 @@ export class WeixinBridgeRuntime {
       previewChunkCount: streamState.sentChunkCount,
     });
     if (outputState !== 'complete') {
+      let partialCommitDelivery: DeliveryResult | null = null;
       if (outputState === 'partial' && normalizedFinal) {
         const previewText = isComparablePrefix(streamState.streamedText, finalText) ? streamState.streamedText : '';
         const commitContent = resolveFinalCommitContent(finalText, previewText);
@@ -638,6 +661,7 @@ export class WeixinBridgeRuntime {
           externalScopeId: event.externalScopeId,
           content: commitContent,
         });
+        partialCommitDelivery = delivery;
         if (delivery.success) {
           return {
             source: codexTurnMeta?.finalSource ?? 'progress_only',
@@ -660,6 +684,18 @@ export class WeixinBridgeRuntime {
         externalScopeId: event.externalScopeId,
         content: failureMessage,
       });
+      if (
+        !failureDelivery.success
+        && (
+          this.isRateLimitedDeliveryFailure(failureDelivery)
+          || this.isRateLimitedDeliveryFailure(partialCommitDelivery)
+        )
+      ) {
+        await this.ensureScopeNoticeDelivered(
+          event.externalScopeId,
+          this.i18n.t('runtime.error.weixinRateLimitedNotice'),
+        );
+      }
       const failureMode = outputState === 'partial'
         ? 'explicit_partial_failure'
         : outputState === 'interrupted'
@@ -701,6 +737,7 @@ export class WeixinBridgeRuntime {
     }
 
     let lastAttemptedContent = '';
+    let lastFailedDelivery: DeliveryResult | null = null;
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       const commitContent = resolveFinalCommitContent(finalText, previewText);
       if (!commitContent) {
@@ -729,6 +766,7 @@ export class WeixinBridgeRuntime {
           sentContent: delivery.deliveredText || commitContent,
         };
       }
+      lastFailedDelivery = delivery;
       debugRuntime('final_delivery_attempt_failed', {
         scopeId: event.externalScopeId,
         attempt,
@@ -736,6 +774,13 @@ export class WeixinBridgeRuntime {
         failedText: truncateDebugText(delivery.failedText),
         error: delivery.error,
       });
+    }
+
+    if (this.isRateLimitedDeliveryFailure(lastFailedDelivery)) {
+      await this.ensureScopeNoticeDelivered(
+        event.externalScopeId,
+        this.i18n.t('runtime.error.weixinRateLimitedNotice'),
+      );
     }
 
     return {
@@ -765,6 +810,13 @@ export class WeixinBridgeRuntime {
     content: string;
   }): Promise<DeliveryResult> {
     const result = await this.platformPlugin.sendText({ externalScopeId, content });
+    return this.normalizeTextDeliveryResult(result, content);
+  }
+
+  normalizeTextDeliveryResult(
+    result: DeliveryResult | null | undefined,
+    content: string,
+  ): DeliveryResult {
     return result ?? {
       success: false,
       deliveredCount: 0,
@@ -772,7 +824,19 @@ export class WeixinBridgeRuntime {
       failedIndex: 0,
       failedText: String(content ?? '').trim(),
       error: this.i18n.t('runtime.error.unknownDeliveryFailure'),
+      errorCode: null,
     };
+  }
+
+  async sendSystemTextDirect({
+    externalScopeId,
+    content,
+  }: {
+    externalScopeId: string;
+    content: string;
+  }): Promise<DeliveryResult> {
+    const result = await this.platformPlugin.sendText({ externalScopeId, content });
+    return this.normalizeTextDeliveryResult(result, content);
   }
 
   async sendMediaWithRetry({
@@ -818,6 +882,7 @@ export class WeixinBridgeRuntime {
       sentPath: String(filePath ?? ''),
       sentCaption: String(caption ?? '').trim(),
       error: this.i18n.t('runtime.error.unknownDeliveryFailure'),
+      errorCode: null,
     };
   }
 
@@ -835,6 +900,7 @@ export class WeixinBridgeRuntime {
       })),
     });
     const deliveryErrors: string[] = [];
+    let rateLimitedFailure = false;
     for (const artifact of artifacts) {
       const filePath = String(artifact?.path ?? '').trim();
       if (!filePath) {
@@ -846,11 +912,8 @@ export class WeixinBridgeRuntime {
         caption: artifact.caption ?? null,
       });
       if (!result.success) {
-        const errorMessage = String(
-          result.error
-          || result.sentPath
-          || this.i18n.t('runtime.error.unknownDeliveryFailure'),
-        ).trim();
+        rateLimitedFailure ||= this.isRateLimitedDeliveryFailure(result);
+        const errorMessage = this.describeDeliveryFailure(result, result.sentPath);
         deliveryErrors.push(errorMessage);
         debugRuntime('artifact_delivery_failed', {
           scopeId: event.externalScopeId,
@@ -880,12 +943,18 @@ export class WeixinBridgeRuntime {
       errorCount: deliveryErrors.length,
       firstError: deliveryErrors[0] ?? null,
     });
-    await this.sendTextWithRetry({
+    const failureDelivery = await this.sendTextWithRetry({
       externalScopeId: event.externalScopeId,
       content: this.i18n.t('runtime.error.attachmentDeliveryFailed', {
         error: deliveryErrors[0] ?? this.i18n.t('runtime.error.unknownDeliveryFailure'),
       }),
     });
+    if (!failureDelivery.success && (rateLimitedFailure || this.isRateLimitedDeliveryFailure(failureDelivery))) {
+      await this.ensureScopeNoticeDelivered(
+        event.externalScopeId,
+        this.i18n.t('runtime.error.weixinRateLimitedNotice'),
+      );
+    }
   }
 
   async runPostResponseAction(response: RuntimeResponse, event: InboundTextEvent): Promise<void> {
@@ -940,21 +1009,164 @@ export class WeixinBridgeRuntime {
 
   async notifyApprovalPrompt(event: InboundTextEvent): Promise<void> {
     try {
-      const response = await this.bridgeCoordinator.handleInboundEvent({
-        ...event,
-        text: '/allow',
-      }, {});
-      const content = extractResponseMessageText(response);
+      const content = await this.buildApprovalPromptText(event);
       if (!content) {
         return;
       }
-      await this.sendTextWithRetry({
+      let rateLimitedFailure = false;
+      let delivery = await this.sendTextWithRetry({
         externalScopeId: event.externalScopeId,
         content,
       });
+      rateLimitedFailure ||= this.isRateLimitedDeliveryFailure(delivery);
+      if (delivery.success) {
+        return;
+      }
+      debugRuntime('approval_prompt_delivery_failed', {
+        scopeId: event.externalScopeId,
+        failedText: truncateDebugText(delivery.failedText || content),
+        error: delivery.error,
+      });
+      const fallback = this.i18n.t('coordinator.allow.promptFallback');
+      if (!fallback || fallback === content) {
+        throw new Error(delivery.error || this.i18n.t('runtime.error.unknownDeliveryFailure'));
+      }
+      delivery = await this.sendTextWithRetry({
+        externalScopeId: event.externalScopeId,
+        content: fallback,
+      });
+      rateLimitedFailure ||= this.isRateLimitedDeliveryFailure(delivery);
+      if (delivery.success) {
+        return;
+      }
+      debugRuntime('approval_prompt_fallback_failed', {
+        scopeId: event.externalScopeId,
+        failedText: truncateDebugText(delivery.failedText || fallback),
+        error: delivery.error,
+      });
+      if (rateLimitedFailure) {
+        await this.ensureScopeNoticeDelivered(
+          event.externalScopeId,
+          this.i18n.t('runtime.error.weixinRateLimitedApprovalNotice'),
+        );
+      }
+      throw new Error(delivery.error || this.i18n.t('runtime.error.unknownDeliveryFailure'));
     } catch (error) {
       await this.onError(error);
     }
+  }
+
+  async flushPendingScopeNotice(externalScopeId: string): Promise<void> {
+    const scopeId = String(externalScopeId ?? '').trim();
+    if (!scopeId) {
+      return;
+    }
+    const pending = this.pendingScopeNotices.get(scopeId);
+    if (!pending) {
+      return;
+    }
+    if (this.shouldSuppressScopeNotice(scopeId, pending.content)) {
+      this.pendingScopeNotices.delete(scopeId);
+      return;
+    }
+    const delivery = await this.sendSystemTextDirect({
+      externalScopeId: scopeId,
+      content: pending.content,
+    });
+    if (!delivery.success) {
+      debugRuntime('pending_scope_notice_failed', {
+        scopeId,
+        contentPreview: truncateDebugText(pending.content),
+        error: delivery.error,
+        errorCode: delivery.errorCode ?? null,
+      });
+      return;
+    }
+    this.pendingScopeNotices.delete(scopeId);
+    this.noteScopeNoticeDelivered(scopeId, pending.content);
+  }
+
+  shouldSuppressScopeNotice(scopeId: string, content: string): boolean {
+    const recent = this.recentScopeNotices.get(scopeId);
+    if (!recent || recent.content !== content) {
+      return false;
+    }
+    return (Date.now() - recent.sentAt) < WeixinBridgeRuntime.NOTICE_COOLDOWN_MS;
+  }
+
+  noteScopeNoticeDelivered(scopeId: string, content: string): void {
+    this.recentScopeNotices.set(scopeId, {
+      content,
+      sentAt: Date.now(),
+    });
+  }
+
+  async ensureScopeNoticeDelivered(externalScopeId: string, content: string): Promise<void> {
+    const scopeId = String(externalScopeId ?? '').trim();
+    const normalizedContent = String(content ?? '').trim();
+    if (!scopeId || !normalizedContent) {
+      return;
+    }
+    if (this.shouldSuppressScopeNotice(scopeId, normalizedContent)) {
+      return;
+    }
+    const delivery = await this.sendSystemTextDirect({
+      externalScopeId: scopeId,
+      content: normalizedContent,
+    });
+    if (delivery.success) {
+      this.pendingScopeNotices.delete(scopeId);
+      this.noteScopeNoticeDelivered(scopeId, normalizedContent);
+      return;
+    }
+    this.pendingScopeNotices.set(scopeId, {
+      content: normalizedContent,
+      queuedAt: Date.now(),
+    });
+    debugRuntime('scope_notice_queued', {
+      scopeId,
+      contentPreview: truncateDebugText(normalizedContent),
+      error: delivery.error,
+      errorCode: delivery.errorCode ?? null,
+    });
+  }
+
+  isRateLimitedDeliveryFailure(detail: { error?: string | null; errorCode?: number | null } | null | undefined): boolean {
+    const errorCode = typeof detail?.errorCode === 'number' ? detail.errorCode : null;
+    if (errorCode === -2) {
+      return true;
+    }
+    const message = String(detail?.error ?? '').trim();
+    return /\b(?:ret|errcode)\b[^-\d]*-2\b/i.test(message)
+      || /:\s*-2\b/.test(message);
+  }
+
+  describeDeliveryFailure(
+    detail: { error?: string | null; errorCode?: number | null } | null | undefined,
+    fallback: string,
+  ): string {
+    if (this.isRateLimitedDeliveryFailure(detail)) {
+      return this.i18n.t('runtime.error.weixinRateLimited');
+    }
+    return String(
+      detail?.error
+      || fallback
+      || this.i18n.t('runtime.error.unknownDeliveryFailure'),
+    ).trim();
+  }
+
+  async buildApprovalPromptText(event: InboundTextEvent): Promise<string> {
+    const compactPrompt = typeof this.bridgeCoordinator.renderApprovalPrompt === 'function'
+      ? await this.bridgeCoordinator.renderApprovalPrompt(event)
+      : '';
+    if (String(compactPrompt ?? '').trim()) {
+      return String(compactPrompt).trim();
+    }
+    const response = await this.bridgeCoordinator.handleInboundEvent({
+      ...event,
+      text: '/allow',
+    }, {});
+    return extractResponseMessageText(response);
   }
 }
 

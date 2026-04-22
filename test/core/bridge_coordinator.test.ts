@@ -16,6 +16,7 @@ class FakeProviderPlugin {
   interruptTurnCalls: any[];
   respondToApprovalCalls: any[];
   listModelsCalls: any[];
+  reconnectProfileCalls: any[];
   usageReport: any;
   threadCounter: number;
   baseTime: number;
@@ -107,6 +108,7 @@ class FakeProviderPlugin {
     this.interruptTurnCalls = [];
     this.respondToApprovalCalls = [];
     this.listModelsCalls = [];
+    this.reconnectProfileCalls = [];
     this.usageReport = null;
     this.threadCounter = 0;
     this.baseTime = Date.now();
@@ -239,6 +241,7 @@ class FakeProviderPlugin {
   }
 
   async reconnectProfile() {
+    this.reconnectProfileCalls.push({});
     return {
       connected: true,
       accountIdentity: null,
@@ -262,7 +265,13 @@ function makeProviderProfile(id, providerKind, displayName) {
   };
 }
 
-function makeRuntime({ defaultCwd = null, restartBridge = null, locale = null, platformPlugins = [] } = {}) {
+function makeRuntime({
+  defaultCwd = null,
+  restartBridge = null,
+  locale = null,
+  platformPlugins = [],
+  codexAuthManager = null,
+} = {}) {
   const openai = new FakeProviderPlugin('openai-native', { replyPrefix: 'openai' });
   const minimax = new FakeProviderPlugin('minimax-via-cliproxy', { replyPrefix: 'minimax' });
   const runtime = createCodexBridgeRuntime({
@@ -276,6 +285,7 @@ function makeRuntime({ defaultCwd = null, restartBridge = null, locale = null, p
     defaultCwd,
     locale,
     restartBridge,
+    codexAuthManager,
   });
   return { runtime, openai, minimax };
 }
@@ -312,6 +322,110 @@ function makeUsageReport(overrides = {}) {
     ],
     credits: null,
     ...overrides,
+  };
+}
+
+function makeFakeCodexAuthManager({
+  accounts = [],
+  activeAccountId = null,
+  pendingLogin = null,
+  refreshResults = [],
+  startError = null,
+} = {}) {
+  const state = {
+    accounts: accounts.map((account) => ({ ...account })),
+    activeAccountId,
+    pendingLogin: pendingLogin ? { ...pendingLogin } : null,
+    refreshResults: [...refreshResults],
+  };
+  const startCalls = [];
+  const switchCalls = [];
+  const cancelCalls = [];
+
+  const decorateAccount = (account) => ({
+    ...account,
+    isActive: state.activeAccountId === account.id,
+  });
+
+  return {
+    state,
+    startCalls,
+    switchCalls,
+    cancelCalls,
+    async startDeviceLogin(params: { requestedByScope?: string | null } = {}) {
+      startCalls.push(params);
+      if (startError) {
+        throw startError;
+      }
+      if (!state.pendingLogin) {
+        state.pendingLogin = {
+          flowId: 'flow-1',
+          verificationUriComplete: 'https://auth.openai.com/activate?user_code=ABCD-EFGH',
+          verificationUri: 'https://auth.openai.com/activate',
+          userCode: 'ABCD-EFGH',
+          expiresAt: Date.now() + 15 * 60_000,
+          requestedByScope: params.requestedByScope ?? null,
+        };
+      } else {
+        state.pendingLogin = {
+          ...state.pendingLogin,
+          requestedByScope: params.requestedByScope ?? state.pendingLogin.requestedByScope ?? null,
+        };
+      }
+      return { ...state.pendingLogin };
+    },
+    async refreshPendingLogin() {
+      if (state.refreshResults.length > 0) {
+        const next = state.refreshResults.shift();
+        if (next?.status === 'completed' && next.account) {
+          const existingIndex = state.accounts.findIndex((account) => account.id === next.account.id);
+          if (existingIndex >= 0) {
+            state.accounts[existingIndex] = { ...next.account };
+          } else {
+            state.accounts.push({ ...next.account });
+          }
+          state.pendingLogin = null;
+        } else if (next?.status === 'pending' && next.pendingLogin) {
+          state.pendingLogin = { ...next.pendingLogin };
+        } else if (next?.status === 'expired' || next?.status === 'failed') {
+          state.pendingLogin = null;
+        }
+        return next ?? null;
+      }
+      if (!state.pendingLogin) {
+        return null;
+      }
+      return {
+        status: 'pending',
+        pendingLogin: { ...state.pendingLogin },
+      };
+    },
+    async cancelPendingLogin() {
+      cancelCalls.push(true);
+      const hadPending = Boolean(state.pendingLogin);
+      state.pendingLogin = null;
+      return hadPending;
+    },
+    async listAccounts() {
+      return {
+        accounts: state.accounts.map(decorateAccount),
+        activeAccountId: state.activeAccountId,
+        pendingLogin: state.pendingLogin ? { ...state.pendingLogin } : null,
+      };
+    },
+    async switchAccountByIndex(index) {
+      switchCalls.push(index);
+      const account = state.accounts[index - 1];
+      if (!account) {
+        throw new Error(`Account ${index} not found`);
+      }
+      state.activeAccountId = account.id;
+      return {
+        account: decorateAccount(account),
+        authPath: '/tmp/.codex/auth.json',
+        refreshed: true,
+      };
+    },
   };
 }
 
@@ -1065,7 +1179,7 @@ test('/allow 2 replies to the provider approval request and clears it from the a
   assert.equal(openai.respondToApprovalCalls.length, 1);
   assert.equal(openai.respondToApprovalCalls[0]?.option, 2);
   assert.equal(openai.respondToApprovalCalls[0]?.request?.requestId, 'approval-2');
-  assert.equal(runtime.services.activeTurns.resolveScopeTurn(scopeRef)?.pendingApprovals.length, 0);
+  assert.equal(runtime.services.activeTurns.resolveScopeTurn(scopeRef), null);
   assert.match(result.messages[0]?.text ?? '', /已对当前会话记住这次命令执行批准/);
 });
 
@@ -1174,7 +1288,7 @@ test('/deny rejects the provider approval request and clears it from the active 
   assert.equal(openai.respondToApprovalCalls.length, 1);
   assert.equal(openai.respondToApprovalCalls[0]?.option, 3);
   assert.equal(openai.respondToApprovalCalls[0]?.request?.requestId, 'approval-deny-1');
-  assert.equal(runtime.services.activeTurns.resolveScopeTurn(scopeRef)?.pendingApprovals.length, 0);
+  assert.equal(runtime.services.activeTurns.resolveScopeTurn(scopeRef), null);
   assert.match(result.messages[0]?.text ?? '', /已拒绝这次文件改动请求/);
 });
 
@@ -1263,6 +1377,174 @@ test('stale active turns are reconciled before starting a new conversation turn'
   assert.equal(runtime.services.activeTurns.resolveScopeTurn(scopeRef), null);
 });
 
+test('conversation turns remain blocked when the previous provider turn is still running', async () => {
+  const { runtime, openai } = makeRuntime();
+  const scopeRef = {
+    platform: 'weixin',
+    externalScopeId: 'wx-user-running-turn-1',
+  };
+  let runningTurnId = '';
+
+  openai.startTurn = async ({ bridgeSession, onTurnStarted = null }) => {
+    openai.startTurnCalls.push({ bridgeSession });
+    const thread = openai.threads.get(bridgeSession.codexThreadId);
+    assert.ok(thread);
+    runningTurnId = `${bridgeSession.codexThreadId}-turn-${thread.turns.length + 1}`;
+    await onTurnStarted?.({
+      turnId: runningTurnId,
+      threadId: bridgeSession.codexThreadId,
+    });
+    thread.turns = [{
+      id: runningTurnId,
+      status: 'running',
+      error: null,
+      items: [],
+    }];
+    return {
+      outputText: '',
+      outputState: 'partial',
+      previewText: 'still waiting',
+      turnId: runningTurnId,
+      threadId: bridgeSession.codexThreadId,
+      title: bridgeSession.title,
+    };
+  };
+
+  const firstResult = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    ...scopeRef,
+    text: 'first request',
+  });
+
+  assert.equal(firstResult.meta?.codexTurn?.outputState, 'partial');
+  assert.equal(runtime.services.activeTurns.resolveScopeTurn(scopeRef)?.turnId, runningTurnId);
+
+  const secondResult = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    ...scopeRef,
+    text: 'second request',
+  });
+
+  const combined = secondResult.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(combined, /当前已有一轮回复在进行中/);
+  assert.equal(openai.startTurnCalls.length, 1);
+});
+
+test('/stop rebinds a phantom active turn id to the live in-progress provider turn', async () => {
+  const { runtime, openai } = makeRuntime();
+
+  const initial = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-phantom-stop-1',
+    text: 'hello',
+  });
+  const session = initial.session;
+  const scopeRef = {
+    platform: 'weixin',
+    externalScopeId: 'wx-user-phantom-stop-1',
+  };
+  const liveTurnId = `${session.codexThreadId}-turn-live`;
+
+  runtime.services.activeTurns.beginScopeTurn(scopeRef, {
+    bridgeSessionId: session.bridgeSessionId,
+    providerProfileId: session.providerProfileId,
+    threadId: session.codexThreadId,
+    turnId: `${session.codexThreadId}-turn-phantom`,
+  });
+  const thread = openai.threads.get(session.codexThreadId);
+  assert.ok(thread);
+  thread.turns = [{
+    id: liveTurnId,
+    status: 'running',
+    error: null,
+    items: [],
+  }];
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    ...scopeRef,
+    text: '/stop',
+  });
+
+  assert.equal(result.messages[0]?.text ?? '', '已请求中断当前回复。');
+  assert.equal(openai.interruptTurnCalls.length, 1);
+  assert.equal(openai.interruptTurnCalls[0]?.turnId, liveTurnId);
+  assert.equal(runtime.services.activeTurns.resolveScopeTurn(scopeRef)?.turnId, liveTurnId);
+});
+
+test('/stop interrupts every non-terminal turn on the bound thread', async () => {
+  const { runtime, openai } = makeRuntime();
+
+  const initial = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-stop-thread-1',
+    text: 'hello',
+  });
+  const session = initial.session;
+  const scopeRef = {
+    platform: 'weixin',
+    externalScopeId: 'wx-user-stop-thread-1',
+  };
+  runtime.services.activeTurns.beginScopeTurn(scopeRef, {
+    bridgeSessionId: session.bridgeSessionId,
+    providerProfileId: session.providerProfileId,
+    threadId: session.codexThreadId,
+    turnId: `${session.codexThreadId}-turn-2`,
+  });
+  runtime.services.activeTurns.addPendingApproval(scopeRef, {
+    requestId: 'approval-stop-thread-1',
+    kind: 'command',
+    threadId: session.codexThreadId,
+    turnId: `${session.codexThreadId}-turn-2`,
+    itemId: 'item-stop-thread-1',
+    reason: 'command failed; retry without sandbox?',
+    command: 'npm run build',
+    cwd: '/home/ubuntu/dev/CodexBridge',
+    availableDecisionKeys: ['accept', 'acceptForSession', 'decline'],
+  });
+  const thread = openai.threads.get(session.codexThreadId);
+  assert.ok(thread);
+  thread.turns = [
+    {
+      id: `${session.codexThreadId}-turn-1`,
+      status: 'running',
+      error: null,
+      items: [],
+    },
+    {
+      id: `${session.codexThreadId}-turn-2`,
+      status: 'running',
+      error: null,
+      items: [],
+    },
+  ];
+  openai.interruptTurn = async (params) => {
+    openai.interruptTurnCalls.push(params);
+    const currentThread = openai.threads.get(params.threadId);
+    assert.ok(currentThread);
+    currentThread.turns = currentThread.turns.map((turn) => (
+      turn.id === params.turnId
+        ? {
+          ...turn,
+          status: 'interrupted',
+          error: 'Conversation interrupted',
+          items: [],
+        }
+        : turn
+    ));
+  };
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    ...scopeRef,
+    text: '/stop',
+  });
+
+  assert.equal(openai.interruptTurnCalls.length, 2);
+  assert.deepEqual(
+    openai.interruptTurnCalls.map((entry) => entry.turnId).sort(),
+    [`${session.codexThreadId}-turn-1`, `${session.codexThreadId}-turn-2`].sort(),
+  );
+  assert.equal(result.messages[0]?.text ?? '', '已请求停止当前线程上的 2 个进行中回合。');
+  assert.equal(result.messages[1]?.text ?? '', '已同时清空 1 项待处理审批。');
+});
+
 test('/helps lists all supported slash commands and help entrypoints', async () => {
   const { runtime } = makeRuntime();
 
@@ -1276,6 +1558,7 @@ test('/helps lists all supported slash commands and help entrypoints', async () 
   assert.match(text, /斜杠命令/);
   assert.match(text, /\/helps \(\/help, \/h\) 查看所有斜杠命令/);
   assert.match(text, /\/usage \(\/us\) 查看当前 Codex 账号，以及 5 小时 \/ 本周剩余用量/);
+  assert.match(text, /\/login \(\/lg\) 管理本机 Codex 登录账号/);
   assert.match(text, /\/stop \(\/sp\) 请求中断当前正在执行的回复/);
   assert.match(text, /\/uploads \(\/up, \/ul\) 开启上传暂存模式/);
   assert.match(text, /\/provider \(\/pd\) 查看可用 provider/);
@@ -1308,6 +1591,7 @@ test('/helps renders English help text when locale is set to en', async () => {
   assert.match(text, /Slash Commands/);
   assert.match(text, /\/helps \(\/help, \/h\) Show all slash commands/);
   assert.match(text, /\/usage \(\/us\) Show the current Codex account plus 5-hour and weekly remaining usage/);
+  assert.match(text, /\/login \(\/lg\) Manage the host Codex login account/);
   assert.match(text, /\/uploads \(\/up, \/ul\) Enter upload staging mode/);
   assert.match(text, /\/allow \(\/al\) Inspect and approve in-turn approval requests/);
   assert.match(text, /\/deny \(\/dn\) Deny the current in-turn approval request/);
@@ -1317,6 +1601,147 @@ test('/helps renders English help text when locale is set to en', async () => {
   assert.match(text, /\/model \(\/m\) View or switch model settings for the current scope/);
   assert.match(text, /\/fast Enable or disable Fast mode/);
   assert.match(text, /\/lang Show or switch the current language used for text replies/);
+});
+
+test('/login starts a pending Codex device login flow', async () => {
+  const codexAuthManager = makeFakeCodexAuthManager();
+  const { runtime } = makeRuntime({ codexAuthManager });
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-login-start-1',
+    text: '/login',
+  });
+
+  const text = result.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(text, /Codex 登录 \| 等待授权/);
+  assert.match(text, /链接：https:\/\/auth\.openai\.com\/activate\?user_code=ABCD-EFGH/);
+  assert.match(text, /验证码：ABCD-EFGH/);
+  assert.match(text, /这是全局 Codex 登录/);
+  assert.equal(codexAuthManager.startCalls.length, 1);
+});
+
+test('/login returns a friendly message when the OpenAI device endpoint is blocked', async () => {
+  const codexAuthManager = makeFakeCodexAuthManager({
+    startError: new Error('Device login request failed: <!DOCTYPE html><title>Just a moment...</title>'),
+  });
+  const { runtime } = makeRuntime({ codexAuthManager });
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-login-start-blocked',
+    text: '/login',
+  });
+
+  const text = result.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(text, /无法开始 Codex 登录/);
+  assert.match(text, /被 Cloudflare 拦截/);
+});
+
+test('/login list shows saved Codex accounts and marks the active one', async () => {
+  const codexAuthManager = makeFakeCodexAuthManager({
+    accounts: [
+      { id: 'acct-1', email: 'a@example.com', planType: 'pro' },
+      { id: 'acct-2', email: 'b@example.com', planType: 'plus' },
+    ],
+    activeAccountId: 'acct-2',
+  });
+  const { runtime } = makeRuntime({ codexAuthManager });
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-login-list-1',
+    text: '/login list',
+  });
+
+  const text = result.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(text, /Codex 账号池 \| 2 个账号/);
+  assert.match(text, /1\. a@example\.com \| pro/);
+  assert.match(text, /2\. b@example\.com \| 当前 \| plus/);
+  assert.match(text, /切换：\/login <序号>/);
+});
+
+test('/login reports completion when a pending authorization has just finished', async () => {
+  const codexAuthManager = makeFakeCodexAuthManager({
+    pendingLogin: {
+      flowId: 'flow-1',
+      verificationUriComplete: 'https://auth.openai.com/activate?user_code=ABCD-EFGH',
+      userCode: 'ABCD-EFGH',
+      expiresAt: Date.now() + 10_000,
+    },
+    refreshResults: [
+      {
+        status: 'completed',
+        account: {
+          id: 'acct-1',
+          email: 'done@example.com',
+          planType: 'pro',
+        },
+      },
+    ],
+  });
+  const { runtime } = makeRuntime({ codexAuthManager });
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-login-done-1',
+    text: '/login',
+  });
+
+  const text = result.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(text, /Codex 登录已完成，并已保存到本机/);
+  assert.match(text, /账号：done@example\.com/);
+  assert.match(text, /套餐：pro/);
+});
+
+test('/login 1 switches the active Codex account and reconnects native providers', async () => {
+  const codexAuthManager = makeFakeCodexAuthManager({
+    accounts: [
+      { id: 'acct-1', email: 'a@example.com', planType: 'pro' },
+      { id: 'acct-2', email: 'b@example.com', planType: 'plus' },
+    ],
+    activeAccountId: 'acct-2',
+  });
+  const { runtime, openai } = makeRuntime({ codexAuthManager });
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-login-switch-1',
+    text: '/login 1',
+  });
+
+  const text = result.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(text, /Codex 登录账号已切换/);
+  assert.match(text, /账号：a@example\.com/);
+  assert.match(text, /已写入：\/tmp\/\.codex\/auth\.json/);
+  assert.match(text, /已自动刷新 access token/);
+  assert.match(text, /已刷新 1 个 OpenAI Native Codex 会话/);
+  assert.equal(codexAuthManager.state.activeAccountId, 'acct-1');
+  assert.equal(openai.reconnectProfileCalls.length, 1);
+});
+
+test('/login 1 is blocked when any active turn is still running', async () => {
+  const codexAuthManager = makeFakeCodexAuthManager({
+    accounts: [
+      { id: 'acct-1', email: 'a@example.com', planType: 'pro' },
+    ],
+    activeAccountId: 'acct-1',
+  });
+  const { runtime } = makeRuntime({ codexAuthManager });
+  runtime.services.activeTurns.beginScopeTurn({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-login-busy-other',
+  });
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-login-busy-current',
+    text: '/login 1',
+  });
+
+  const text = result.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(text, /暂时不能切换全局登录账号/);
+  assert.equal(codexAuthManager.switchCalls.length, 0);
 });
 
 test('/uploads starts upload mode and persists batch state without starting a turn', async () => {
@@ -1931,6 +2356,28 @@ test('slash commands treat help flags in later argument positions as help reques
   assert.match(text, /\/permissions -h/);
 });
 
+test('/allow -h and /deny -h mention the full-access workaround for approval issues', async () => {
+  const { runtime } = makeRuntime();
+
+  const allowResult = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-allow-help-1',
+    text: '/allow -h',
+  });
+  const denyResult = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-deny-help-1',
+    text: '/deny -h',
+  });
+
+  const allowText = allowResult.messages[0]?.text ?? '';
+  const denyText = denyResult.messages[0]?.text ?? '';
+  assert.match(allowText, /\/perm full-access/);
+  assert.match(allowText, /只对下一轮生效/);
+  assert.match(denyText, /\/perm full-access/);
+  assert.match(denyText, /只对下一轮生效/);
+});
+
 test('/stop reports when there is no active turn to interrupt', async () => {
   const { runtime } = makeRuntime();
 
@@ -1958,12 +2405,34 @@ test('/stop interrupts the active turn once the provider has issued a turn id', 
 
   openai.startTurn = async ({ bridgeSession, inputText, onTurnStarted = null }) => {
     const existingThread = openai.threads.get(bridgeSession.codexThreadId);
+    assert.ok(existingThread);
     const turnId = `${bridgeSession.codexThreadId}-turn-${(existingThread?.turns.length ?? 0) + 1}`;
     await onTurnStarted?.({
       turnId,
       threadId: bridgeSession.codexThreadId,
     });
+    existingThread.turns = [
+      {
+        id: turnId,
+        status: 'running',
+        error: null,
+        items: [],
+      },
+    ];
     await turnGate;
+    existingThread.turns = [
+      {
+        id: turnId,
+        status: interrupted ? 'interrupted' : 'complete',
+        error: interrupted ? 'Conversation interrupted' : null,
+        items: interrupted
+          ? []
+          : [
+            { role: 'user', text: inputText, type: 'message', phase: 'final' },
+            { role: 'assistant', text: `openai: ${inputText}`, type: 'message', phase: 'final' },
+          ],
+      },
+    ];
     return {
       outputText: interrupted ? '' : `openai: ${inputText}`,
       outputState: interrupted ? 'interrupted' : 'complete',
@@ -1975,6 +2444,17 @@ test('/stop interrupts the active turn once the provider has issued a turn id', 
   openai.interruptTurn = async (params) => {
     interrupted = true;
     openai.interruptTurnCalls.push(params);
+    const thread = openai.threads.get(params.threadId);
+    if (thread) {
+      thread.turns = [
+        {
+          id: params.turnId,
+          status: 'interrupted',
+          error: 'Conversation interrupted',
+          items: [],
+        },
+      ];
+    }
     releaseTurn();
   };
 
@@ -2065,11 +2545,32 @@ test('/status shows running active-turn details and control hint', async () => {
   });
 
   openai.startTurn = async ({ bridgeSession, inputText, onTurnStarted = null }) => {
+    const thread = openai.threads.get(bridgeSession.codexThreadId);
+    assert.ok(thread);
     await onTurnStarted?.({
       turnId: `${bridgeSession.codexThreadId}-turn-1`,
       threadId: bridgeSession.codexThreadId,
     });
+    thread.turns = [
+      {
+        id: `${bridgeSession.codexThreadId}-turn-1`,
+        status: 'running',
+        error: null,
+        items: [],
+      },
+    ];
     await turnGate;
+    thread.turns = [
+      {
+        id: `${bridgeSession.codexThreadId}-turn-1`,
+        status: 'complete',
+        error: null,
+        items: [
+          { role: 'user', text: inputText, type: 'message', phase: 'final' },
+          { role: 'assistant', text: `openai: ${inputText}`, type: 'message', phase: 'final' },
+        ],
+      },
+    ];
     return {
       outputText: `openai: ${inputText}`,
       turnId: `${bridgeSession.codexThreadId}-turn-1`,
@@ -2112,11 +2613,32 @@ test('bridge coordinator blocks new conversation turns while another turn is alr
   });
 
   openai.startTurn = async ({ bridgeSession, inputText, onTurnStarted = null }) => {
+    const thread = openai.threads.get(bridgeSession.codexThreadId);
+    assert.ok(thread);
     await onTurnStarted?.({
       turnId: `${bridgeSession.codexThreadId}-turn-1`,
       threadId: bridgeSession.codexThreadId,
     });
+    thread.turns = [
+      {
+        id: `${bridgeSession.codexThreadId}-turn-1`,
+        status: 'running',
+        error: null,
+        items: [],
+      },
+    ];
     await turnGate;
+    thread.turns = [
+      {
+        id: `${bridgeSession.codexThreadId}-turn-1`,
+        status: 'complete',
+        error: null,
+        items: [
+          { role: 'user', text: inputText, type: 'message', phase: 'final' },
+          { role: 'assistant', text: `openai: ${inputText}`, type: 'message', phase: 'final' },
+        ],
+      },
+    ];
     return {
       outputText: `openai: ${inputText}`,
       turnId: `${bridgeSession.codexThreadId}-turn-1`,
@@ -2157,11 +2679,32 @@ test('bridge coordinator shows command-specific blocked messages while a turn is
   });
 
   openai.startTurn = async ({ bridgeSession, inputText, onTurnStarted = null }) => {
+    const thread = openai.threads.get(bridgeSession.codexThreadId);
+    assert.ok(thread);
     await onTurnStarted?.({
       turnId: `${bridgeSession.codexThreadId}-turn-1`,
       threadId: bridgeSession.codexThreadId,
     });
+    thread.turns = [
+      {
+        id: `${bridgeSession.codexThreadId}-turn-1`,
+        status: 'running',
+        error: null,
+        items: [],
+      },
+    ];
     await turnGate;
+    thread.turns = [
+      {
+        id: `${bridgeSession.codexThreadId}-turn-1`,
+        status: 'complete',
+        error: null,
+        items: [
+          { role: 'user', text: inputText, type: 'message', phase: 'final' },
+          { role: 'assistant', text: `openai: ${inputText}`, type: 'message', phase: 'final' },
+        ],
+      },
+    ];
     return {
       outputText: `openai: ${inputText}`,
       turnId: `${bridgeSession.codexThreadId}-turn-1`,
@@ -2214,11 +2757,29 @@ test('command-specific blocked messages switch to wait-for-stop wording after in
   let interrupted = false;
 
   openai.startTurn = async ({ bridgeSession, onTurnStarted = null }) => {
+    const thread = openai.threads.get(bridgeSession.codexThreadId);
+    assert.ok(thread);
     await onTurnStarted?.({
       turnId: `${bridgeSession.codexThreadId}-turn-1`,
       threadId: bridgeSession.codexThreadId,
     });
+    thread.turns = [
+      {
+        id: `${bridgeSession.codexThreadId}-turn-1`,
+        status: 'running',
+        error: null,
+        items: [],
+      },
+    ];
     await turnGate;
+    thread.turns = [
+      {
+        id: `${bridgeSession.codexThreadId}-turn-1`,
+        status: interrupted ? 'interrupted' : 'complete',
+        error: interrupted ? 'Conversation interrupted' : null,
+        items: [],
+      },
+    ];
     return {
       outputText: '',
       outputState: interrupted ? 'interrupted' : 'complete',
@@ -2627,7 +3188,7 @@ test('/reconnect refreshes the current Codex session and keeps the same binding'
   assert.equal(result.session?.codexThreadId, original.session?.codexThreadId);
 });
 
-test('/retry reconnects and reruns the previous request on the same binding', async () => {
+test('/retry resumes the same thread and reruns the previous request on the same binding', async () => {
   const { runtime, openai } = makeRuntime();
 
   const original = await runtime.services.bridgeCoordinator.handleInboundEvent({
@@ -2636,27 +3197,149 @@ test('/retry reconnects and reruns the previous request on the same binding', as
     text: 'hello retry',
   });
 
-  let reconnectCalls = 0;
-  openai.reconnectProfile = async () => {
-    reconnectCalls += 1;
-    return {
-      connected: true,
-      accountIdentity: null,
-    };
-  };
-
   const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
     platform: 'weixin',
     externalScopeId: 'wx-user-retry-1',
     text: '/retry',
   });
 
-  assert.equal(reconnectCalls, 1);
+  assert.equal(openai.resumeThreadCalls.length, 1);
   assert.equal(openai.startTurnCalls.length, 2);
   assert.equal(openai.startTurnCalls[1]?.inputText, 'hello retry');
+  assert.equal(openai.startTurnCalls[1]?.event?.metadata?.codexbridge?.retryContext?.threadId, original.session?.codexThreadId);
   assert.equal(result.messages[0]?.text ?? '', 'openai: hello retry');
   assert.equal(result.session?.bridgeSessionId, original.session?.bridgeSessionId);
   assert.equal(result.session?.codexThreadId, original.session?.codexThreadId);
+});
+
+test('/retry stops live turns before rerunning the previous request', async () => {
+  const { runtime, openai } = makeRuntime();
+
+  const original = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-retry-stop-1',
+    text: 'hello retry stop',
+  });
+  const session = original.session;
+  const scopeRef = {
+    platform: 'weixin',
+    externalScopeId: 'wx-user-retry-stop-1',
+  };
+  runtime.services.activeTurns.beginScopeTurn(scopeRef, {
+    bridgeSessionId: session.bridgeSessionId,
+    providerProfileId: session.providerProfileId,
+    threadId: session.codexThreadId,
+    turnId: `${session.codexThreadId}-turn-live`,
+  });
+  const thread = openai.threads.get(session.codexThreadId);
+  assert.ok(thread);
+  thread.turns = [{
+    id: `${session.codexThreadId}-turn-live`,
+    status: 'running',
+    error: null,
+    items: [],
+  }];
+  openai.interruptTurn = async (params) => {
+    openai.interruptTurnCalls.push(params);
+    const currentThread = openai.threads.get(params.threadId);
+    assert.ok(currentThread);
+    currentThread.turns = [{
+      id: params.turnId,
+      status: 'interrupted',
+      error: 'Conversation interrupted',
+      items: [],
+    }];
+  };
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    ...scopeRef,
+    text: '/retry',
+  });
+
+  assert.equal(openai.interruptTurnCalls.length, 1);
+  assert.equal(openai.resumeThreadCalls.length, 1);
+  assert.equal(openai.startTurnCalls.at(-1)?.inputText, 'hello retry stop');
+  assert.deepEqual(
+    openai.startTurnCalls.at(-1)?.event?.metadata?.codexbridge?.retryContext?.interruptedTurnIds,
+    [`${session.codexThreadId}-turn-live`],
+  );
+  assert.equal(result.messages[0]?.text ?? '', 'openai: hello retry stop');
+});
+
+test('ordinary messages after /stop do not eagerly resume the thread when startTurn succeeds', async () => {
+  const { runtime, openai } = makeRuntime();
+
+  const original = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-stop-resume-1',
+    text: 'hello stop',
+  });
+  runtime.services.bridgeCoordinator.storeStopCheckpoint(original.session.bridgeSessionId, {
+    threadId: original.session.codexThreadId,
+    stoppedAt: Date.now(),
+    interruptedTurnIds: [`${original.session.codexThreadId}-turn-paused`],
+    pendingApprovalCount: 0,
+    interruptErrors: [],
+    requestedWhileStarting: false,
+    settled: true,
+  });
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-stop-resume-1',
+    text: 'hello after stop',
+  });
+
+  assert.equal(openai.resumeThreadCalls.length, 0);
+  assert.equal(openai.startTurnCalls.length, 2);
+  assert.equal(result.messages[0]?.text ?? '', 'openai: hello after stop');
+
+  const settings = runtime.services.bridgeSessions.getSessionSettings(original.session.bridgeSessionId);
+  assert.equal((settings?.metadata?.lastStopCheckpoint as any) ?? null, null);
+});
+
+test('ordinary messages after /stop lazily resume the same thread when Codex asks for recovery', async () => {
+  const { runtime, openai } = makeRuntime();
+
+  const original = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-stop-resume-2',
+    text: 'hello stop resume',
+  });
+  runtime.services.bridgeCoordinator.storeStopCheckpoint(original.session.bridgeSessionId, {
+    threadId: original.session.codexThreadId,
+    stoppedAt: Date.now(),
+    interruptedTurnIds: [`${original.session.codexThreadId}-turn-paused`],
+    pendingApprovalCount: 0,
+    interruptErrors: [],
+    requestedWhileStarting: false,
+    settled: true,
+  });
+
+  let injected = false;
+  const originalStartTurn = openai.startTurn.bind(openai);
+  openai.startTurn = async (args) => {
+    if (!injected && args.bridgeSession.codexThreadId === original.session.codexThreadId && args.inputText === 'hello after lazy resume') {
+      injected = true;
+      throw new Error(`failed to load rollout '/tmp/${original.session.codexThreadId}.jsonl' for thread ${original.session.codexThreadId}: empty session file`);
+    }
+    return originalStartTurn(args);
+  };
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-stop-resume-2',
+    text: 'hello after lazy resume',
+  });
+
+  assert.equal(openai.resumeThreadCalls.length, 1);
+  assert.equal(openai.startTurnCalls.length, 2);
+  assert.equal(result.messages[0]?.text ?? '', 'openai: hello after lazy resume');
+  assert.equal(result.session?.bridgeSessionId, original.session?.bridgeSessionId);
+  assert.equal(result.session?.codexThreadId, original.session?.codexThreadId);
+
+  const settings = runtime.services.bridgeSessions.getSessionSettings(original.session.bridgeSessionId);
+  assert.equal((settings?.metadata?.lastStopCheckpoint as any) ?? null, null);
 });
 
 test('/permissions shows current access settings and updates the preset for the next turn', async () => {
@@ -2769,4 +3452,29 @@ test('bridge coordinator forwards unexpected provider errors as user-visible pro
 
   assert.equal(result.meta?.codexTurn?.outputState, 'provider_error');
   assert.equal(result.meta?.codexTurn?.errorMessage, '401 Unauthorized: refresh_token_reused');
+});
+
+test('bridge coordinator rewrites approved execution stalls into a workaround hint', async () => {
+  const { runtime, openai } = makeRuntime();
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-approval-stall-1',
+    text: 'hello',
+  });
+
+  openai.startTurn = async () => {
+    throw new Error('Approval was accepted, but the approved command (node resend-file.js) produced no follow-up signal for 300 seconds. The provider may be stuck; use /retry to try again.');
+  };
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-approval-stall-1',
+    text: 'hello again',
+  });
+
+  assert.equal(result.meta?.codexTurn?.outputState, 'provider_error');
+  assert.equal(
+    result.meta?.codexTurn?.errorMessage,
+    '审批已通过，但 Codex 未继续执行。可先 /stop，再发送 /perm full-access，然后 /retry 重新执行；该设置仅对下一轮生效。',
+  );
 });

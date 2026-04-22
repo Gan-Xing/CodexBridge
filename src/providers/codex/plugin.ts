@@ -409,6 +409,10 @@ function buildDeveloperInstructions({
   if (artifactInstructions) {
     parts.push(artifactInstructions);
   }
+  const retryInstructions = buildRetryDeveloperInstructions(resolveRetryContext(event));
+  if (retryInstructions) {
+    parts.push(retryInstructions);
+  }
   return parts.filter(Boolean).join('\n\n');
 }
 
@@ -426,6 +430,68 @@ function resolveTurnArtifactContext(event: InboundTextEvent): TurnArtifactContex
     return null;
   }
   return context as TurnArtifactContext;
+}
+
+function resolveRetryContext(event: InboundTextEvent): Record<string, unknown> | null {
+  const metadata = event?.metadata;
+  if (!metadata || typeof metadata !== 'object') {
+    return null;
+  }
+  const codexbridge = (metadata as Record<string, unknown>).codexbridge;
+  if (!codexbridge || typeof codexbridge !== 'object') {
+    return null;
+  }
+  const context = (codexbridge as Record<string, unknown>).retryContext;
+  if (!context || typeof context !== 'object') {
+    return null;
+  }
+  return context as Record<string, unknown>;
+}
+
+function buildRetryDeveloperInstructions(retryContext: Record<string, unknown> | null): string {
+  if (!retryContext) {
+    return '';
+  }
+  const stoppedAt = typeof retryContext.stoppedAt === 'number'
+    ? new Date(retryContext.stoppedAt).toISOString()
+    : null;
+  const threadId = typeof retryContext.threadId === 'string' && retryContext.threadId.trim()
+    ? retryContext.threadId.trim()
+    : null;
+  const interruptedTurnIds = Array.isArray(retryContext.interruptedTurnIds)
+    ? retryContext.interruptedTurnIds
+      .map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
+      .filter(Boolean)
+    : [];
+  const pendingApprovalCount = typeof retryContext.pendingApprovalCount === 'number'
+    ? retryContext.pendingApprovalCount
+    : 0;
+  const interruptErrors = Array.isArray(retryContext.interruptErrors)
+    ? retryContext.interruptErrors
+      .map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
+      .filter(Boolean)
+    : [];
+  const lines = [
+    'Retry context from CodexBridge:',
+    '- This request is being retried on the same Codex thread after the previous attempt was manually stopped.',
+  ];
+  if (threadId) {
+    lines.push(`- Thread id: ${threadId}`);
+  }
+  if (stoppedAt) {
+    lines.push(`- Stop requested at: ${stoppedAt}`);
+  }
+  if (interruptedTurnIds.length > 0) {
+    lines.push(`- Interrupted turn ids: ${interruptedTurnIds.join(', ')}`);
+  }
+  if (pendingApprovalCount > 0) {
+    lines.push(`- Pending approval requests discarded during stop: ${pendingApprovalCount}`);
+  }
+  if (interruptErrors.length > 0) {
+    lines.push(`- Interrupt errors observed: ${interruptErrors.join(' | ')}`);
+  }
+  lines.push('- Continue from the existing thread context when it helps, but answer the user request fully from scratch if needed.');
+  return lines.join('\n');
 }
 
 function normalizeOutputArtifacts(result: ProviderTurnResult) {

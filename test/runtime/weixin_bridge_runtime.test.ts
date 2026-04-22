@@ -274,7 +274,7 @@ test('WeixinBridgeRuntime dispatches plain-text turns in the background so slash
   ]);
 });
 
-test('WeixinBridgeRuntime sends a WeChat approval prompt when Codex requests approval mid-turn', async () => {
+test('WeixinBridgeRuntime sends a compact WeChat approval prompt when Codex requests approval mid-turn', async () => {
   const sent: Array<{ externalScopeId: string; content: string }> = [];
   const seenEvents: string[] = [];
   const runtime = makeRuntime({
@@ -282,11 +282,11 @@ test('WeixinBridgeRuntime sends a WeChat approval prompt when Codex requests app
       sent.push({ externalScopeId, content });
     },
     coordinator: {
+      renderApprovalPrompt() {
+        return '审批请求 | 1 项\n回复 /allow 查看详情\n快捷回复：/allow 1、/allow 2、/deny';
+      },
       async handleInboundEvent(event: any, options: any = {}) {
         seenEvents.push(event.text);
-        if (event.text === '/allow') {
-          return completeResponse('审批请求 | 1 项\n/allow 1：仅批准这一次\n/deny：拒绝这次请求');
-        }
         await options.onApprovalRequest?.({
           requestId: 'approval-1',
           kind: 'command',
@@ -302,10 +302,64 @@ test('WeixinBridgeRuntime sends a WeChat approval prompt when Codex requests app
 
   await runtime.runOnce();
 
-  assert.deepEqual(seenEvents, ['hello', '/allow']);
+  assert.deepEqual(seenEvents, ['hello']);
   assert.deepEqual(sent, [
-    { externalScopeId: 'wxid_1', content: '审批请求 | 1 项\n/allow 1：仅批准这一次\n/deny：拒绝这次请求' },
+    { externalScopeId: 'wxid_1', content: '审批请求 | 1 项\n回复 /allow 查看详情\n快捷回复：/allow 1、/allow 2、/deny' },
     { externalScopeId: 'wxid_1', content: '已继续执行。' },
+  ]);
+});
+
+test('WeixinBridgeRuntime queues a visible approval warning when Weixin rate-limits the approval prompt', async () => {
+  const sent: Array<{ externalScopeId: string; content: string }> = [];
+  let sendAttempts = 0;
+  const runtime = makeRuntime({
+    sendText: async ({ externalScopeId, content }) => {
+      sendAttempts += 1;
+      if (sendAttempts <= 2) {
+        return {
+          success: false,
+          deliveredCount: 0,
+          deliveredText: '',
+          failedIndex: 0,
+          failedText: content,
+          error: '微信消息发送失败（scope=wxid_1, clientId=test）：: -2',
+          errorCode: -2,
+        };
+      }
+      sent.push({ externalScopeId, content });
+    },
+    coordinator: {
+      renderApprovalPrompt() {
+        return '审批请求 | 1 项\n回复 /allow 查看详情\n快捷回复：/allow 1、/allow 2、/deny';
+      },
+      async handleInboundEvent(event: any, options: any = {}) {
+        if (event.text === 'hello') {
+          await options.onApprovalRequest?.({
+            requestId: 'approval-queued-1',
+            kind: 'command',
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            itemId: 'item-1',
+            reason: 'command failed; retry without sandbox?',
+          });
+          return completeResponse('已继续执行。');
+        }
+        return completeResponse('后续正常回复');
+      },
+    },
+  });
+
+  await runtime.runOnce();
+  await runtime.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wxid_1',
+    text: 'next',
+  });
+
+  assert.deepEqual(sent, [
+    { externalScopeId: 'wxid_1', content: '微信发送频率过快（ret: -2），审批提示可能未送达。请稍后直接发送 /allow 查看详情。' },
+    { externalScopeId: 'wxid_1', content: '已继续执行。' },
+    { externalScopeId: 'wxid_1', content: '后续正常回复' },
   ]);
 });
 
@@ -466,6 +520,48 @@ test('WeixinBridgeRuntime reports media upload failures after Codex generates an
   assert.deepEqual(sentText, [{
     externalScopeId: 'wxid_1',
     content: '附件已生成，但微信上传失败：CDN upload server error: status 500。可用 /retry 重试。',
+  }]);
+});
+
+test('WeixinBridgeRuntime rewrites ret -2 media upload failures into a fixed retry hint', async () => {
+  const sentText: Array<{ externalScopeId: string; content: string }> = [];
+  const runtime = makeRuntime({
+    sendText: async ({ externalScopeId, content }) => {
+      sentText.push({ externalScopeId, content });
+    },
+    sendMedia: async (payload) => ({
+      success: false,
+      messageId: null,
+      sentPath: payload.filePath,
+      sentCaption: String(payload.caption ?? '').trim(),
+      error: 'sendMediaItems: -2',
+      errorCode: -2,
+    }),
+    coordinator: {
+      async handleInboundEvent() {
+        return {
+          type: 'message',
+          messages: [{
+            mediaPath: '/tmp/generated-kitten-rate-limit.png',
+            caption: null,
+          }],
+          meta: {
+            codexTurn: {
+              outputState: 'complete',
+              previewText: '',
+              finalSource: 'thread_items_media',
+            },
+          },
+        };
+      },
+    },
+  });
+
+  await runtime.runOnce();
+
+  assert.deepEqual(sentText, [{
+    externalScopeId: 'wxid_1',
+    content: '附件已生成，但微信上传失败：微信发送频率过快（ret: -2）。可用 /retry 重试。',
   }]);
 });
 
@@ -735,6 +831,45 @@ test('WeixinBridgeRuntime sends a fixed failure message when provider marks the 
 
   assert.deepEqual(sent, [
     { externalScopeId: 'wxid_1', content: '本轮回复未完整取回，请重试。' },
+  ]);
+});
+
+test('WeixinBridgeRuntime queues a visible retry notice when final text delivery is rate-limited', async () => {
+  const sent: Array<{ externalScopeId: string; content: string }> = [];
+  let sendAttempts = 0;
+  const runtime = makeRuntime({
+    sendText: async ({ externalScopeId, content }) => {
+      sendAttempts += 1;
+      if (sendAttempts <= 4) {
+        return {
+          success: false,
+          deliveredCount: 0,
+          deliveredText: '',
+          failedIndex: 0,
+          failedText: content,
+          error: '微信消息发送失败（scope=wxid_1, clientId=test）：: -2',
+          errorCode: -2,
+        };
+      }
+      sent.push({ externalScopeId, content });
+    },
+    coordinator: {
+      async handleInboundEvent(event: any) {
+        return completeResponse(event.text === 'hello' ? '第一条最终回复' : '第二条最终回复');
+      },
+    },
+  });
+
+  await runtime.runOnce();
+  await runtime.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wxid_1',
+    text: 'next',
+  });
+
+  assert.deepEqual(sent, [
+    { externalScopeId: 'wxid_1', content: '微信发送频率过快（ret: -2），上一条桥接消息可能未送达。请稍后重试，或发送 /retry 重试上一条请求。' },
+    { externalScopeId: 'wxid_1', content: '第二条最终回复' },
   ]);
 });
 

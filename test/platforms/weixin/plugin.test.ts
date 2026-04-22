@@ -700,6 +700,7 @@ test('WeixinPlatformPlugin sendMedia does not blindly retry failed media sends',
   assert.equal(result.messageId, null);
   assert.equal(attempts, 1);
   assert.match(result.error, /5001/);
+  assert.equal(result.errorCode, 5001);
 });
 
 test('WeixinPlatformPlugin sendMedia keeps media success when caption delivery fails after media send', async () => {
@@ -871,6 +872,7 @@ test('WeixinPlatformPlugin sendText returns a structured failure when iLink send
   assert.equal(result.failedIndex, 0);
   assert.equal(result.failedText, 'hello from bridge');
   assert.match(result.error, /-2/);
+  assert.equal(result.errorCode, -2);
   assert.equal(attempts, 4);
 });
 

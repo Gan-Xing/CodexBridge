@@ -46,6 +46,14 @@ export class ActiveTurnRegistry {
     return this.scopeTurns.get(buildScopeKey(scopeRef)) ?? null;
   }
 
+  listActiveTurns(): ActiveTurnRecord[] {
+    return [...this.scopeTurns.values()];
+  }
+
+  hasAnyActiveTurn(): boolean {
+    return this.scopeTurns.size > 0;
+  }
+
   beginScopeTurn(scopeRef: PlatformScopeRef, initial: BeginScopeTurnOptions = {}): ActiveTurnRecord {
     const scopeKey = buildScopeKey(scopeRef);
     if (this.scopeTurns.has(scopeKey)) {

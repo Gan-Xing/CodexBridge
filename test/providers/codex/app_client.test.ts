@@ -301,6 +301,253 @@ test('CodexAppClient responds to remembered command approvals with acceptForSess
   }]);
 });
 
+test('CodexAppClient keeps waiting past the nominal timeout while an approval request is pending', async () => {
+  let now = 0;
+  let approvalSent = false;
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+    turnPollNow: () => now,
+    turnPollSleep: async (ms) => {
+      now += ms;
+    },
+  });
+
+  client.request = async (method) => {
+    if (method === 'turn/start') {
+      return { turn: { id: 'turn-1' } };
+    }
+    if (method === 'thread/read') {
+      if (!approvalSent) {
+        approvalSent = true;
+        queueMicrotask(() => {
+          client.handleMessage(JSON.stringify({
+            jsonrpc: '2.0',
+            id: 'approval-rpc-3',
+            method: 'item/commandExecution/requestApproval',
+            params: {
+              threadId: 'thread-1',
+              turnId: 'turn-1',
+              itemId: 'item-3',
+              reason: 'command failed; retry without sandbox?',
+              command: 'npm run build',
+              availableDecisions: ['accept', 'decline'],
+            },
+          }));
+        });
+      }
+      const completed = now >= 150;
+      return {
+        thread: {
+          id: 'thread-1',
+          name: 'Thread 1',
+          turns: [{
+            id: 'turn-1',
+            status: completed ? 'completed' : 'running',
+            items: completed
+              ? [{ type: 'assistant_message', text: 'done after approval wait' }]
+              : [],
+          }],
+        },
+      };
+    }
+    throw new Error(`Unexpected method: ${method}`);
+  };
+
+  const result = await client.startTurn({
+    threadId: 'thread-1',
+    inputText: 'hello',
+    timeoutMs: 100,
+  });
+
+  assert.equal(result.outputText, 'done after approval wait');
+  assert.equal(client.getPendingApprovals({ threadId: 'thread-1', turnId: 'turn-1' }).length, 1);
+});
+
+test('CodexAppClient fails when an accepted approval produces no follow-up signal for minutes', async () => {
+  let now = 0;
+  let approvalSent = false;
+  const sent: any[] = [];
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+    turnPollNow: () => now,
+    turnPollSleep: async (ms) => {
+      now += ms;
+    },
+  });
+  client.send = (payload: any) => {
+    sent.push(payload);
+  };
+
+  client.request = async (method) => {
+    if (method === 'turn/start') {
+      return { turn: { id: 'turn-1' } };
+    }
+    if (method === 'thread/read') {
+      if (!approvalSent) {
+        approvalSent = true;
+        queueMicrotask(async () => {
+          client.handleMessage(JSON.stringify({
+            jsonrpc: '2.0',
+            id: 'approval-rpc-4',
+            method: 'item/commandExecution/requestApproval',
+            params: {
+              threadId: 'thread-1',
+              turnId: 'turn-1',
+              itemId: 'item-4',
+              reason: 'retry without sandbox?',
+              command: 'node resend-file.js',
+              availableDecisions: ['accept', 'decline'],
+            },
+          }));
+          await client.respondToApproval({
+            requestId: 'approval-rpc-4',
+            option: 1,
+          });
+        });
+      }
+      return {
+        thread: {
+          id: 'thread-1',
+          name: 'Thread 1',
+          turns: [{
+            id: 'turn-1',
+            status: 'inProgress',
+            items: [{
+              type: 'message',
+              role: 'assistant',
+              phase: 'commentary',
+              text: 'waiting for the approved command to resume',
+            }],
+          }],
+        },
+      };
+    }
+    throw new Error(`Unexpected method: ${method}`);
+  };
+
+  await assert.rejects(
+    client.startTurn({
+      threadId: 'thread-1',
+      inputText: 'hello',
+      timeoutMs: 900_000,
+    }),
+    /Approval was accepted, but the approved command \(node resend-file\.js\) produced no follow-up signal/,
+  );
+
+  assert.deepEqual(sent, [{
+    jsonrpc: '2.0',
+    id: 'approval-rpc-4',
+    result: {
+      decision: 'accept',
+    },
+  }]);
+  assert.ok(now >= 300_000);
+  assert.ok(now < 900_000);
+});
+
+test('CodexAppClient does not fail slow approved commands before the idle limit elapses', async () => {
+  let now = 0;
+  let approvalSent = false;
+  let completionNotified = false;
+  const sent: any[] = [];
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+    turnPollNow: () => now,
+    turnPollSleep: async (ms) => {
+      now += ms;
+    },
+  });
+  client.send = (payload: any) => {
+    sent.push(payload);
+  };
+
+  client.request = async (method) => {
+    if (method === 'turn/start') {
+      return { turn: { id: 'turn-1' } };
+    }
+    if (method === 'thread/read') {
+      if (!approvalSent) {
+        approvalSent = true;
+        queueMicrotask(async () => {
+          client.handleMessage(JSON.stringify({
+            jsonrpc: '2.0',
+            id: 'approval-rpc-5',
+            method: 'item/commandExecution/requestApproval',
+            params: {
+              threadId: 'thread-1',
+              turnId: 'turn-1',
+              itemId: 'item-5',
+              reason: 'retry without sandbox?',
+              command: 'node resend-file.js',
+              availableDecisions: ['accept', 'decline'],
+            },
+          }));
+          await client.respondToApproval({
+            requestId: 'approval-rpc-5',
+            option: 1,
+          });
+        });
+      }
+      if (now >= 240_000 && !completionNotified) {
+        completionNotified = true;
+        queueMicrotask(() => {
+          client.handleMessage(JSON.stringify({
+            jsonrpc: '2.0',
+            method: 'item/completed',
+            params: {
+              threadId: 'thread-1',
+              turnId: 'turn-1',
+              item: {
+                id: 'item-5',
+              },
+            },
+          }));
+        });
+      }
+      const completed = now >= 241_000;
+      return {
+        thread: {
+          id: 'thread-1',
+          name: 'Thread 1',
+          turns: [{
+            id: 'turn-1',
+            status: completed ? 'completed' : 'inProgress',
+            items: completed
+              ? [{
+                type: 'assistant_message',
+                text: 'done after slow approved command',
+              }]
+              : [{
+                type: 'message',
+                role: 'assistant',
+                phase: 'commentary',
+                text: 'slow command still running',
+              }],
+          }],
+        },
+      };
+    }
+    throw new Error(`Unexpected method: ${method}`);
+  };
+
+  const result = await client.startTurn({
+    threadId: 'thread-1',
+    inputText: 'hello',
+    timeoutMs: 900_000,
+  });
+
+  assert.equal(result.outputText, 'done after slow approved command');
+  assert.deepEqual(sent, [{
+    jsonrpc: '2.0',
+    id: 'approval-rpc-5',
+    result: {
+      decision: 'accept',
+    },
+  }]);
+  assert.ok(now >= 241_000);
+  assert.ok(now < 300_000);
+});
+
 test('CodexAppClient startTurn returns generated image outputs when thread items include saved paths', async () => {
   const client = new CodexAppClient({
     codexCliBin: 'codex',
@@ -1944,6 +2191,85 @@ test('CodexAppClient waits for task_complete before returning missing for termin
   );
 
   assert.ok(readCount >= 2);
+});
+
+test('CodexAppClient does not treat inProgress turns as terminal task_complete waits', async () => {
+  const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-session-log-inprogress-'));
+  const sessionPath = path.join(sessionDir, 'rollout.jsonl');
+  fs.writeFileSync(sessionPath, '', 'utf8');
+
+  let nowMs = 0;
+  let commentarySent = false;
+  const debugEntries: string[] = [];
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+    logger: {
+      debug(message) {
+        debugEntries.push(String(message));
+      },
+    },
+    turnPollNow: () => nowMs,
+    turnPollSleep: async () => {
+      nowMs += 1000;
+    },
+  });
+
+  client.request = async (method) => {
+    if (method === 'turn/start') {
+      return { turn: { id: 'turn-1' } };
+    }
+    if (method === 'thread/read') {
+      if (!commentarySent) {
+        commentarySent = true;
+        queueMicrotask(() => {
+          client.handleMessage(JSON.stringify({
+            jsonrpc: '2.0',
+            method: 'item/agentMessage/delta',
+            params: {
+              turnId: 'turn-1',
+              itemId: 'item-1',
+              phase: 'commentary',
+              delta: 'still working',
+            },
+          }));
+        });
+      }
+      return {
+        thread: {
+          id: 'thread-1',
+          name: 'Thread 1',
+          path: sessionPath,
+          turns: [{
+            id: 'turn-1',
+            status: 'inProgress',
+            items: [{
+              type: 'message',
+              role: 'assistant',
+              phase: 'commentary',
+              text: 'still working',
+            }],
+          }],
+        },
+      };
+    }
+    throw new Error(`Unexpected method: ${method}`);
+  };
+
+  const result = await client.startTurn({
+    threadId: 'thread-1',
+    inputText: 'hello',
+    model: 'gpt-5.4',
+    effort: null,
+    collaborationMode: 'default',
+    timeoutMs: 2500,
+  });
+
+  assert.equal(result.outputText, '');
+  assert.equal(result.outputState, 'partial');
+  assert.equal(result.previewText, 'still working');
+  assert.equal(result.finalSource, 'commentary_only');
+  assert.equal(debugEntries.some((entry) => entry.includes('turn_terminal_state')), false);
+  assert.equal(debugEntries.some((entry) => entry.includes('waiting_for_session_task_complete')), false);
 });
 
 test('CodexAppClient returns missing only after session task_complete lands without final text or artifacts', async () => {

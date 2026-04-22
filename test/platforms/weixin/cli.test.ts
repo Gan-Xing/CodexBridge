@@ -5,6 +5,8 @@ import path from 'node:path';
 import test from 'node:test';
 import {
   acquireServeLock,
+  codexLoginStateDir,
+  createWeixinServeCodexAuthManager,
   enqueuePendingRestartNotification,
   flushPendingRestartNotifications,
   materializeQrArtifact,
@@ -53,6 +55,13 @@ test('parseWeixinServeArgs reads state-dir flag', () => {
 
   assert.equal(parsed.stateDir, '/tmp/codexbridge-state');
   assert.equal(parsed.cwd, '/tmp/project');
+});
+
+test('createWeixinServeCodexAuthManager stores account data under runtime/codex-login', () => {
+  const manager = createWeixinServeCodexAuthManager('/tmp/codexbridge-state');
+
+  assert.equal(manager.rootDir, codexLoginStateDir('/tmp/codexbridge-state'));
+  assert.equal(manager.poolPath, path.join(codexLoginStateDir('/tmp/codexbridge-state'), 'accounts.json'));
 });
 
 test('parseWeixinClearContextArgs reads state-dir and account-id flags', () => {

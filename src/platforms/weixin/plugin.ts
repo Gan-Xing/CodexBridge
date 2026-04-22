@@ -445,6 +445,7 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
           failedIndex: index,
           failedText: chunkText,
           error: outcome.error,
+          errorCode: outcome.errorCode ?? null,
         };
       }
       deliveredTexts.push(chunkText);
@@ -456,6 +457,7 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
       failedIndex: null,
       failedText: '',
       error: '',
+      errorCode: null,
     };
   }
 
@@ -490,6 +492,7 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
           return {
             success: false,
             error: `session expired (errcode ${SESSION_EXPIRED_ERRCODE})`,
+            errorCode: SESSION_EXPIRED_ERRCODE,
           };
         }
         assertSuccessfulSendResult(
@@ -515,6 +518,7 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
       error: lastError instanceof Error
         ? lastError.message
         : this.i18n.t('runtime.error.unknownDeliveryFailure'),
+      errorCode: extractWeixinErrorCode(lastError),
     };
   }
 
@@ -591,6 +595,7 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
         sentPath: String(filePath ?? ''),
         sentCaption: String(caption ?? '').trim(),
         error: this.i18n.t('platform.weixin.plugin.sendTextNotStarted'),
+        errorCode: null,
       };
     }
     try {
@@ -602,6 +607,7 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
         sentPath: String(filePath ?? ''),
         sentCaption: String(caption ?? '').trim(),
         error: error instanceof Error ? error.message : String(error),
+        errorCode: extractWeixinErrorCode(error),
       };
     }
 
@@ -615,6 +621,7 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
         sentPath: normalizedPath,
         sentCaption: normalizedCaption,
         error: this.i18n.t('platform.weixin.plugin.contextTokenMissing', { externalScopeId }),
+        errorCode: null,
       };
     }
 
@@ -667,6 +674,7 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
         sentPath: normalizedPath,
         sentCaption: captionError ? '' : normalizedCaption,
         error: captionError,
+        errorCode: captionErrorCode,
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -686,6 +694,7 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
         sentPath: normalizedPath,
         sentCaption: normalizedCaption,
         error: message || this.i18n.t('runtime.error.unknownDeliveryFailure'),
+        errorCode: extractWeixinErrorCode(error),
       };
     }
   }
@@ -919,6 +928,24 @@ function assertSuccessfulSendResult(result: { ret?: number }, messageTemplate: s
     return;
   }
   throw new Error(`${messageTemplate}: ${ret}`);
+}
+
+function extractWeixinErrorCode(error: unknown): number | null {
+  if (isWeixinSendResponseError(error)) {
+    return error.code;
+  }
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  const labeledMatch = message.match(/\b(?:errcode|ret)\b[^-\d]*(-?\d+)\b/i);
+  if (labeledMatch) {
+    const code = Number(labeledMatch[1]);
+    return Number.isFinite(code) ? code : null;
+  }
+  const trailingMatch = message.match(/:\s*(-?\d+)\s*$/);
+  if (trailingMatch) {
+    const code = Number(trailingMatch[1]);
+    return Number.isFinite(code) ? code : null;
+  }
+  return null;
 }
 
 function joinDeliveredTexts(chunks: string[]) {

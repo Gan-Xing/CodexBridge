@@ -77,6 +77,68 @@ type RetryableRequestSnapshot = {
   storedAt: number;
 };
 
+type CodexLoginAccountSummary = {
+  id: string;
+  email?: string | null;
+  name?: string | null;
+  plan?: string | null;
+  planType?: string | null;
+  accountId?: string | null;
+  addedAt?: number | null;
+  lastUsedAt?: number | null;
+  isActive?: boolean;
+};
+
+type CodexPendingLoginSummary = {
+  flowId?: string | null;
+  requestedByScope?: string | null;
+  mode?: string | null;
+  verificationUri?: string | null;
+  verificationUriComplete?: string | null;
+  userCode?: string | null;
+  expiresAt?: number | null;
+  startedAt?: number | null;
+  error?: string | null;
+};
+
+type CodexPendingLoginRefreshResult = {
+  status: 'pending' | 'completed' | 'expired' | 'failed';
+  pendingLogin?: CodexPendingLoginSummary | null;
+  account?: CodexLoginAccountSummary | null;
+  error?: string | null;
+};
+
+type CodexAccountListResult = {
+  accounts: CodexLoginAccountSummary[];
+  activeAccountId: string | null;
+  pendingLogin?: CodexPendingLoginSummary | null;
+};
+
+type CodexAccountSwitchResult = {
+  account: CodexLoginAccountSummary;
+  authPath?: string | null;
+  refreshed?: boolean;
+};
+
+interface CodexAuthManagerLike {
+  getPendingLogin?(): Promise<CodexPendingLoginSummary | null>;
+  startDeviceLogin?(params?: { requestedByScope?: string | null }): Promise<CodexPendingLoginSummary>;
+  refreshPendingLogin?(): Promise<CodexPendingLoginRefreshResult | null>;
+  cancelPendingLogin?(): Promise<boolean>;
+  listAccounts?(): Promise<CodexAccountListResult>;
+  switchAccountByIndex?(index: number): Promise<CodexAccountSwitchResult>;
+}
+
+type StopCheckpointSnapshot = {
+  threadId: string;
+  stoppedAt: number;
+  interruptedTurnIds: string[];
+  pendingApprovalCount: number;
+  interruptErrors: string[];
+  requestedWhileStarting: boolean;
+  settled: boolean;
+};
+
 export class BridgeCoordinator {
   bridgeSessions: any;
   activeTurns: any;
@@ -85,6 +147,8 @@ export class BridgeCoordinator {
   defaultProviderProfileId: any;
   defaultCwd: any;
   restartBridge: any;
+
+  codexAuthManager: CodexAuthManagerLike | null;
   now: any;
   threadBrowserStates: Map<any, any>;
   localeOverridesByScope: Map<string, SupportedLocale>;
@@ -100,6 +164,7 @@ export class BridgeCoordinator {
     defaultProviderProfileId,
     defaultCwd = null,
     restartBridge = null,
+    codexAuthManager = null,
     now = () => Date.now(),
     locale = null,
   }) {
@@ -110,6 +175,7 @@ export class BridgeCoordinator {
     this.defaultProviderProfileId = defaultProviderProfileId;
     this.defaultCwd = normalizeCwd(defaultCwd);
     this.restartBridge = restartBridge;
+    this.codexAuthManager = codexAuthManager;
     this.now = now;
     this.threadBrowserStates = new Map();
     this.localeOverridesByScope = new Map();
@@ -169,6 +235,15 @@ export class BridgeCoordinator {
       return this.handleCommand(event, command, options);
     }
     return this.handleConversationTurn(event, options);
+  }
+
+  renderApprovalPrompt(event) {
+    const activeTurn = this.activeTurns?.resolveScopeTurn(toScopeRef(event)) ?? null;
+    const pendingApprovals = Array.isArray(activeTurn?.pendingApprovals) ? activeTurn.pendingApprovals : [];
+    if (pendingApprovals.length === 0) {
+      return '';
+    }
+    return renderApprovalPromptLines(pendingApprovals, this.currentI18n).join('\n');
   }
 
   async handleConversationTurn(event, options = {}) {
@@ -284,7 +359,7 @@ export class BridgeCoordinator {
       };
       return response;
     } finally {
-      this.activeTurns?.endScopeTurn(scopeRef);
+      await this.releaseActiveTurnIfStillRunning(scopeRef);
     }
   }
 
@@ -333,6 +408,8 @@ export class BridgeCoordinator {
         return this.handleStatusCommand(event, command.args);
       case 'usage':
         return this.handleUsageCommand(event);
+      case 'login':
+        return this.handleLoginCommand(event, command.args);
       case 'new':
         return this.handleNewCommand(event, command.args);
       case 'uploads':
@@ -486,6 +563,240 @@ export class BridgeCoordinator {
       this.t('coordinator.usage.title', { providerProfileId: providerProfile.id }),
       ...this.renderUsageDetailLines(report),
     ], this.resolveScopedSessionMeta(scopeRef));
+  }
+
+  async handleLoginCommand(event, args = []) {
+    if (!this.codexAuthManager) {
+      return messageResponse([
+        this.t('coordinator.login.unsupported'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const action = String(args[0] ?? '').trim();
+    if (!action) {
+      return this.handleLoginStartOrStatusCommand(event);
+    }
+    const normalized = action.toLowerCase();
+    if (normalized === 'list') {
+      return this.handleLoginListCommand(event);
+    }
+    if (normalized === 'cancel') {
+      return this.handleLoginCancelCommand(event);
+    }
+    if (/^\d+$/u.test(normalized)) {
+      return this.handleLoginSwitchCommand(event, Number.parseInt(normalized, 10));
+    }
+    return this.handleHelpsCommand(event, ['login']);
+  }
+
+  async handleLoginStartOrStatusCommand(event) {
+    const scopeKey = formatPlatformScopeKey(event.platform, event.externalScopeId);
+    try {
+      const refreshResult = await this.codexAuthManager?.refreshPendingLogin?.() ?? null;
+      if (refreshResult?.status === 'completed') {
+        return messageResponse([
+          this.t('coordinator.login.completed'),
+          ...this.renderLoginAccountLines(refreshResult.account ?? null, { includePrefix: true }),
+          this.t('coordinator.login.completedNext'),
+        ], this.buildScopedSessionMeta(event));
+      }
+      if (refreshResult?.status === 'pending' && refreshResult.pendingLogin) {
+        return messageResponse(
+          this.renderPendingLoginLines(refreshResult.pendingLogin, {
+            includeContinueHint: true,
+            includeTitle: true,
+          }),
+          this.buildScopedSessionMeta(event),
+        );
+      }
+      if (refreshResult?.status === 'failed') {
+        return messageResponse([
+          this.t('coordinator.login.startFailed', {
+            error: formatCodexLoginError(refreshResult.error, this.currentI18n),
+          }),
+        ], this.buildScopedSessionMeta(event));
+      }
+      const pendingLogin = await this.codexAuthManager?.startDeviceLogin?.({
+        requestedByScope: scopeKey,
+      });
+      return messageResponse(
+        this.renderPendingLoginLines(pendingLogin ?? null, {
+          includeContinueHint: true,
+          includeTitle: true,
+        }),
+        this.buildScopedSessionMeta(event),
+      );
+    } catch (error) {
+      return messageResponse([
+        this.t('coordinator.login.startFailed', {
+          error: formatCodexLoginError(error, this.currentI18n),
+        }),
+      ], this.buildScopedSessionMeta(event));
+    }
+  }
+
+  async handleLoginListCommand(event) {
+    const refreshResult = await this.codexAuthManager?.refreshPendingLogin?.() ?? null;
+    const listing = await this.codexAuthManager?.listAccounts?.();
+    if (!listing) {
+      return messageResponse([
+        this.t('coordinator.login.unsupported'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const lines = [
+      this.t('coordinator.login.listTitle', { count: listing.accounts.length }),
+    ];
+    if (listing.accounts.length === 0) {
+      lines.push(this.t('coordinator.login.listEmpty'));
+      lines.push(this.t('coordinator.login.listEmptyHint'));
+    } else {
+      for (const [index, account] of listing.accounts.entries()) {
+        lines.push(formatLoginListItem(index, account, this.currentI18n));
+      }
+      lines.push(this.t('coordinator.login.listSwitchHint'));
+    }
+    if (refreshResult?.status === 'completed' && refreshResult.account) {
+      lines.push('');
+      lines.push(this.t('coordinator.login.completed'));
+      lines.push(...this.renderLoginAccountLines(refreshResult.account, { includePrefix: true }));
+    } else if (listing.pendingLogin) {
+      lines.push('');
+      lines.push(...this.renderPendingLoginLines(listing.pendingLogin, {
+        includeContinueHint: false,
+        includeTitle: false,
+      }));
+    }
+    return messageResponse(lines, this.buildScopedSessionMeta(event));
+  }
+
+  async handleLoginCancelCommand(event) {
+    const cancelled = await this.codexAuthManager?.cancelPendingLogin?.() ?? false;
+    return messageResponse([
+      cancelled
+        ? this.t('coordinator.login.cancelled')
+        : this.t('coordinator.login.noPending'),
+    ], this.buildScopedSessionMeta(event));
+  }
+
+  async handleLoginSwitchCommand(event, index: number) {
+    if (!Number.isFinite(index) || index < 1) {
+      return messageResponse([
+        this.t('coordinator.login.switchInvalidIndex', { index: String(index) }),
+        this.t('coordinator.login.switchUsage'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    if (this.activeTurns?.hasAnyActiveTurn?.()) {
+      return messageResponse([
+        this.t('coordinator.login.switchBlocked'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    try {
+      const result = await this.codexAuthManager?.switchAccountByIndex?.(index);
+      if (!result?.account) {
+        return messageResponse([
+          this.t('coordinator.login.switchMissing'),
+        ], this.buildScopedSessionMeta(event));
+      }
+      const reconnectSummary = await this.reconnectOpenAINativeProfilesAfterAuthSwitch();
+      const lines = [
+        this.t('coordinator.login.switchSuccess'),
+        ...this.renderLoginAccountLines(result.account, { includePrefix: true }),
+        ...(result.authPath ? [this.t('coordinator.login.authPath', { value: result.authPath })] : []),
+        ...(result.refreshed ? [this.t('coordinator.login.switchRefreshed')] : []),
+        ...(reconnectSummary.refreshedCount > 0
+          ? [this.t('coordinator.login.reconnected', { count: reconnectSummary.refreshedCount })]
+          : [this.t('coordinator.login.reconnectedNone')]),
+        ...(reconnectSummary.errors.length > 0
+          ? [this.t('coordinator.login.reconnectFailed', { error: reconnectSummary.errors[0] })]
+          : []),
+        this.t('coordinator.login.switchThreadNotice'),
+      ];
+      return messageResponse(lines, this.buildScopedSessionMeta(event));
+    } catch (error) {
+      return messageResponse([
+        this.t('coordinator.login.switchFailed', { error: formatUserError(error) }),
+      ], this.buildScopedSessionMeta(event));
+    }
+  }
+
+  async reconnectOpenAINativeProfilesAfterAuthSwitch() {
+    const profiles = this.providerProfiles?.list?.()
+      ?.filter((profile) => profile?.providerKind === 'openai-native') ?? [];
+    if (profiles.length === 0) {
+      return {
+        refreshedCount: 0,
+        errors: [],
+      };
+    }
+    const providerPlugin = this.providerRegistry.getProvider('openai-native');
+    if (!providerPlugin || typeof providerPlugin.reconnectProfile !== 'function') {
+      return {
+        refreshedCount: 0,
+        errors: [],
+      };
+    }
+    let refreshedCount = 0;
+    const errors: string[] = [];
+    for (const profile of profiles) {
+      try {
+        await providerPlugin.reconnectProfile({ providerProfile: profile });
+        refreshedCount += 1;
+      } catch (error) {
+        errors.push(formatUserError(error));
+      }
+    }
+    return {
+      refreshedCount,
+      errors,
+    };
+  }
+
+  renderPendingLoginLines(pendingLogin, {
+    includeContinueHint = true,
+    includeTitle = true,
+  } = {}) {
+    const lines = [];
+    if (includeTitle) {
+      lines.push(this.t('coordinator.login.pendingTitle'));
+    }
+    if (pendingLogin?.verificationUriComplete) {
+      lines.push(this.t('coordinator.login.url', { value: pendingLogin.verificationUriComplete }));
+    } else if (pendingLogin?.verificationUri) {
+      lines.push(this.t('coordinator.login.url', { value: pendingLogin.verificationUri }));
+    }
+    if (pendingLogin?.userCode) {
+      lines.push(this.t('coordinator.login.userCode', { value: pendingLogin.userCode }));
+    }
+    if (typeof pendingLogin?.expiresAt === 'number') {
+      lines.push(this.t('coordinator.login.expiresAt', {
+        value: new Date(pendingLogin.expiresAt).toISOString(),
+      }));
+    }
+    if (pendingLogin?.error) {
+      lines.push(this.t('coordinator.login.pendingError', { error: pendingLogin.error }));
+    }
+    lines.push(this.t('coordinator.login.globalNotice'));
+    if (includeContinueHint) {
+      lines.push(this.t('coordinator.login.pendingNext'));
+    }
+    return lines;
+  }
+
+  renderLoginAccountLines(account, { includePrefix = false } = {}) {
+    if (!account) {
+      return [];
+    }
+    const identity = formatCodexLoginAccountIdentity(account, this.currentI18n);
+    const planType = account.planType ?? account.plan ?? null;
+    const lines = [];
+    if (includePrefix) {
+      lines.push(this.t('coordinator.login.account', { value: identity }));
+    } else {
+      lines.push(identity);
+    }
+    if (planType) {
+      lines.push(this.t('coordinator.login.plan', { value: planType }));
+    }
+    return lines;
   }
 
   resolveStatusMode(args = []) {
@@ -711,6 +1022,11 @@ export class BridgeCoordinator {
     return normalizeRetryableRequestSnapshot(settings?.metadata?.lastRetryableRequest ?? null);
   }
 
+  resolveStopCheckpoint(bridgeSessionId: string): StopCheckpointSnapshot | null {
+    const settings = this.bridgeSessions.getSessionSettings(bridgeSessionId);
+    return normalizeStopCheckpointSnapshot(settings?.metadata?.lastStopCheckpoint ?? null);
+  }
+
   storeRetryableRequest(bridgeSessionId: string, event: InboundTextEvent) {
     this.bridgeSessions.upsertSessionSettings(bridgeSessionId, {
       metadata: {
@@ -720,6 +1036,22 @@ export class BridgeCoordinator {
           cwd: normalizeCwd(event?.cwd),
           storedAt: this.now(),
         },
+      },
+    });
+  }
+
+  storeStopCheckpoint(bridgeSessionId: string, checkpoint: StopCheckpointSnapshot) {
+    this.bridgeSessions.upsertSessionSettings(bridgeSessionId, {
+      metadata: {
+        lastStopCheckpoint: checkpoint,
+      },
+    });
+  }
+
+  clearStopCheckpoint(bridgeSessionId: string) {
+    this.bridgeSessions.upsertSessionSettings(bridgeSessionId, {
+      metadata: {
+        lastStopCheckpoint: null,
       },
     });
   }
@@ -1389,10 +1721,6 @@ export class BridgeCoordinator {
   }
 
   async handleRetryCommand(event, options: StartTurnOptions = {}) {
-    const activeResponse = await this.rejectIfActiveTurnForCommand(event, 'retry');
-    if (activeResponse) {
-      return activeResponse;
-    }
     const scopeRef = toScopeRef(event);
     const session = this.bridgeSessions.resolveScopeSession(scopeRef);
     if (!session) {
@@ -1409,9 +1737,47 @@ export class BridgeCoordinator {
         this.t('coordinator.retry.attachmentPath', { value: missingAttachment.localPath }),
       ], buildSessionMeta(session));
     }
+    const stopResult = await this.stopThreadForSession(scopeRef, session, {
+      waitForSettleMs: 10_000,
+    });
+    if (!stopResult.settled) {
+      return messageResponse([
+        this.t('coordinator.retry.stopPending'),
+      ], buildSessionMeta(session));
+    }
+    if (stopResult.interruptErrors.length > 0 && stopResult.interruptedTurnIds.length === 0 && !stopResult.requestedWhileStarting) {
+      return messageResponse([
+        this.t('coordinator.retry.stopFailed', { error: stopResult.interruptErrors[0] }),
+      ], buildSessionMeta(session));
+    }
     const providerProfile = this.requireProviderProfile(session.providerProfileId);
     const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
-    if (typeof providerPlugin.reconnectProfile === 'function') {
+    if (typeof providerPlugin.resumeThread === 'function') {
+      try {
+        await providerPlugin.resumeThread({
+          providerProfile,
+          threadId: session.codexThreadId,
+        });
+      } catch (error) {
+        if (typeof providerPlugin.reconnectProfile === 'function') {
+          try {
+            await providerPlugin.reconnectProfile({ providerProfile });
+            await providerPlugin.resumeThread({
+              providerProfile,
+              threadId: session.codexThreadId,
+            });
+          } catch (resumeError) {
+            return messageResponse([
+              this.t('coordinator.retry.resumeFailed', { error: formatUserError(resumeError) }),
+            ], buildSessionMeta(session));
+          }
+        } else {
+          return messageResponse([
+            this.t('coordinator.retry.resumeFailed', { error: formatUserError(error) }),
+          ], buildSessionMeta(session));
+        }
+      }
+    } else if (typeof providerPlugin.reconnectProfile === 'function') {
       try {
         await providerPlugin.reconnectProfile({ providerProfile });
       } catch (error) {
@@ -1420,7 +1786,7 @@ export class BridgeCoordinator {
         ], buildSessionMeta(session));
       }
     }
-    return this.handleConversationTurn({
+    return this.handleConversationTurn(withRetryContext({
       platform: event.platform,
       externalScopeId: event.externalScopeId,
       text: snapshot.text,
@@ -1428,7 +1794,14 @@ export class BridgeCoordinator {
       cwd: snapshot.cwd ?? normalizeCwd(session.cwd) ?? this.defaultCwd ?? null,
       locale: this.resolveScopeLocale(scopeRef, event),
       metadata: event.metadata,
-    }, options);
+    }, {
+      threadId: session.codexThreadId,
+      stoppedAt: stopResult.stoppedAt,
+      interruptedTurnIds: stopResult.interruptedTurnIds,
+      pendingApprovalCount: stopResult.pendingApprovalCount,
+      interruptErrors: stopResult.interruptErrors,
+      originalRequestStoredAt: snapshot.storedAt,
+    }), options);
   }
 
   async handlePermissionsCommand(event, args) {
@@ -1539,27 +1912,64 @@ export class BridgeCoordinator {
   async handleStopCommand(event) {
     const scopeRef = toScopeRef(event);
     const active = await this.reconcileActiveTurn(scopeRef);
-    if (!active) {
+    const session = this.bridgeSessions.resolveScopeSession(scopeRef);
+    if (!active && !session) {
       return messageResponse([this.t('coordinator.stop.none')], this.buildScopedSessionMeta(event));
     }
-    if (active.interruptRequested) {
-      return messageResponse([this.t('coordinator.stop.alreadyRequested')], buildActiveTurnMeta(active));
+    if (!session) {
+      if (active?.interruptRequested) {
+        return messageResponse([this.t('coordinator.stop.alreadyRequested')], buildActiveTurnMeta(active));
+      }
+      if (active && !active.turnId) {
+        this.activeTurns?.requestInterrupt(scopeRef);
+        return messageResponse([this.t('coordinator.stop.starting')], buildActiveTurnMeta(active));
+      }
+      if (active?.turnId) {
+        try {
+          this.activeTurns?.requestInterrupt(scopeRef);
+          await this.dispatchInterruptForActiveTurn(active);
+          return messageResponse([this.t('coordinator.stop.requested')], buildActiveTurnMeta(active));
+        } catch (error) {
+          this.activeTurns?.updateScopeTurn(scopeRef, {
+            interruptRequested: false,
+          });
+          return messageResponse([
+            this.t('coordinator.stop.failed', { error: formatUserError(error) }),
+          ], buildActiveTurnMeta(active));
+        }
+      }
+      return messageResponse([this.t('coordinator.stop.none')], this.buildScopedSessionMeta(event));
     }
-    this.activeTurns?.requestInterrupt(scopeRef);
-    if (!active.turnId) {
-      return messageResponse([this.t('coordinator.stop.starting')], buildActiveTurnMeta(active));
+    const stopResult = await this.stopThreadForSession(scopeRef, session);
+    if (stopResult.interruptedTurnIds.length === 0 && !stopResult.requestedWhileStarting) {
+      if (active?.interruptRequested) {
+        return messageResponse([this.t('coordinator.stop.alreadyRequested')], buildActiveTurnMeta(active) ?? buildSessionMeta(session));
+      }
+      return messageResponse([this.t('coordinator.stop.none')], buildActiveTurnMeta(active) ?? buildSessionMeta(session));
     }
-    try {
-      await this.dispatchInterruptForActiveTurn(active);
-      return messageResponse([this.t('coordinator.stop.requested')], buildActiveTurnMeta(active));
-    } catch (error) {
-      this.activeTurns?.updateScopeTurn(scopeRef, {
-        interruptRequested: false,
-      });
-      return messageResponse([
-        this.t('coordinator.stop.failed', { error: formatUserError(error) }),
-      ], buildActiveTurnMeta(active));
+    const lines: string[] = [];
+    if (stopResult.interruptedTurnIds.length > 1) {
+      lines.push(this.t('coordinator.stop.requestedThread', {
+        count: stopResult.interruptedTurnIds.length,
+      }));
+    } else if (stopResult.interruptedTurnIds.length === 1) {
+      lines.push(this.t('coordinator.stop.requested'));
     }
+    if (stopResult.requestedWhileStarting) {
+      lines.push(this.t('coordinator.stop.starting'));
+    }
+    if (stopResult.pendingApprovalCount > 0) {
+      lines.push(this.t('coordinator.stop.pendingCleared', {
+        count: stopResult.pendingApprovalCount,
+      }));
+    }
+    if (stopResult.interruptErrors.length > 0) {
+      lines.push(this.t('coordinator.stop.partialFailed', { error: stopResult.interruptErrors[0] }));
+    }
+    if (lines.length === 0) {
+      lines.push(this.t('coordinator.stop.none'));
+    }
+    return messageResponse(lines, buildActiveTurnMeta(active) ?? buildSessionMeta(session));
   }
 
   async renderThreadsPage(event, {
@@ -1712,15 +2122,54 @@ export class BridgeCoordinator {
         threadId: activeTurn.threadId,
         includeTurns: true,
       });
-      const turn = thread?.turns?.find((entry) => entry.id === activeTurn.turnId) ?? null;
+      const threadTurns = Array.isArray(thread?.turns) ? thread.turns : [];
+      const turn = threadTurns.find((entry) => entry.id === activeTurn.turnId) ?? null;
       if (turn && isProviderTurnTerminal(turn.status)) {
         this.activeTurns?.endScopeTurn(scopeRef);
         return null;
+      }
+      if (!turn) {
+        const pendingTurnIds = Array.isArray(activeTurn.pendingApprovals)
+          ? activeTurn.pendingApprovals
+            .map((entry) => String(entry?.turnId ?? '').trim())
+            .filter(Boolean)
+          : [];
+        const runningTurns = threadTurns.filter((entry) => !isProviderTurnTerminal(entry?.status));
+        const reboundTurn = runningTurns.find((entry) => pendingTurnIds.includes(String(entry?.id ?? '').trim()))
+          ?? (runningTurns.length === 1 ? runningTurns[0] : null);
+        if (reboundTurn?.id) {
+          const updated = this.activeTurns?.updateScopeTurn(scopeRef, {
+            turnId: reboundTurn.id,
+            interruptDispatched: false,
+          }) ?? null;
+          debugCoordinator('active_turn_rebound', {
+            platform: scopeRef.platform,
+            scopeId: scopeRef.externalScopeId,
+            previousTurnId: activeTurn.turnId,
+            reboundTurnId: reboundTurn.id,
+          });
+          return updated ?? activeTurn;
+        }
+        if (runningTurns.length === 0 && !hasPendingApproval(activeTurn)) {
+          this.activeTurns?.endScopeTurn(scopeRef);
+          return null;
+        }
       }
     } catch {
       return activeTurn;
     }
     return this.activeTurns?.resolveScopeTurn(scopeRef) ?? null;
+  }
+
+  async releaseActiveTurnIfStillRunning(scopeRef) {
+    const activeTurn = await this.reconcileActiveTurn(scopeRef);
+    if (!activeTurn) {
+      return;
+    }
+    if (activeTurn.turnId || hasPendingApproval(activeTurn)) {
+      return;
+    }
+    this.activeTurns?.endScopeTurn(scopeRef);
   }
 
   async resolveStatusModelValue(providerProfile, settings) {
@@ -1932,13 +2381,143 @@ export class BridgeCoordinator {
     return normalizeCwd(event.cwd) ?? this.defaultCwd ?? null;
   }
 
+  async readThreadForSession(session) {
+    const providerProfile = this.requireProviderProfile(session.providerProfileId);
+    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+    const thread = await providerPlugin.readThread({
+      providerProfile,
+      threadId: session.codexThreadId,
+      includeTurns: true,
+    });
+    return {
+      providerProfile,
+      providerPlugin,
+      thread,
+    };
+  }
+
+  async waitForThreadToStop(scopeRef, session, waitForSettleMs = 10_000) {
+    const deadline = this.now() + Math.max(0, waitForSettleMs);
+    while (this.now() < deadline) {
+      const active = await this.reconcileActiveTurn(scopeRef);
+      let runningTurns = [];
+      try {
+        const snapshot = await this.readThreadForSession(session);
+        runningTurns = Array.isArray(snapshot.thread?.turns)
+          ? snapshot.thread.turns.filter((entry) => !isProviderTurnTerminal(entry?.status))
+          : [];
+      } catch {
+        if (!active) {
+          return true;
+        }
+      }
+      if (runningTurns.length === 0 && !active) {
+        return true;
+      }
+      await sleep(250);
+    }
+    return (await this.reconcileActiveTurn(scopeRef)) === null;
+  }
+
+  async stopThreadForSession(
+    scopeRef,
+    session,
+    {
+      waitForSettleMs = 0,
+    }: {
+      waitForSettleMs?: number;
+    } = {},
+  ) {
+    const active = await this.reconcileActiveTurn(scopeRef);
+    const pendingApprovalCount = Array.isArray(active?.pendingApprovals) ? active.pendingApprovals.length : 0;
+    const requestedWhileStarting = Boolean(active && !active.turnId);
+    if (active && !active.interruptRequested) {
+      this.activeTurns?.requestInterrupt(scopeRef);
+    }
+    if (pendingApprovalCount > 0) {
+      this.activeTurns?.clearPendingApprovals(scopeRef);
+    }
+
+    let providerProfile = null;
+    let providerPlugin = null;
+    let runningTurnIds: string[] = [];
+    try {
+      const snapshot = await this.readThreadForSession(session);
+      providerProfile = snapshot.providerProfile;
+      providerPlugin = snapshot.providerPlugin;
+      runningTurnIds = Array.isArray(snapshot.thread?.turns)
+        ? snapshot.thread.turns
+          .filter((entry) => !isProviderTurnTerminal(entry?.status))
+          .map((entry) => String(entry?.id ?? '').trim())
+          .filter(Boolean)
+        : [];
+    } catch {
+      // Fall back to the tracked active turn below when thread reads fail.
+    }
+
+    if (active?.turnId && !runningTurnIds.includes(active.turnId)) {
+      runningTurnIds.push(active.turnId);
+    }
+    const interruptedTurnIds = [...new Set(runningTurnIds)];
+    const interruptErrors: string[] = [];
+
+    if (interruptedTurnIds.length > 0) {
+      providerProfile ??= this.requireProviderProfile(session.providerProfileId);
+      providerPlugin ??= this.providerRegistry.getProvider(providerProfile.providerKind);
+      if (typeof providerPlugin?.interruptTurn !== 'function') {
+        interruptErrors.push(this.t('coordinator.turn.providerNoInterrupt', { kind: providerProfile.providerKind }));
+      } else {
+        for (const turnId of interruptedTurnIds) {
+          if (active?.turnId === turnId) {
+            this.activeTurns?.noteInterruptDispatched(scopeRef, true);
+          }
+          try {
+            await providerPlugin.interruptTurn({
+              providerProfile,
+              threadId: session.codexThreadId,
+              turnId,
+            });
+          } catch (error) {
+            if (active?.turnId === turnId) {
+              this.activeTurns?.noteInterruptDispatched(scopeRef, false);
+            }
+            interruptErrors.push(formatUserError(error));
+          }
+        }
+      }
+    }
+
+    const settled = waitForSettleMs > 0
+      ? await this.waitForThreadToStop(scopeRef, session, waitForSettleMs)
+      : false;
+    const checkpoint: StopCheckpointSnapshot = {
+      threadId: session.codexThreadId,
+      stoppedAt: this.now(),
+      interruptedTurnIds,
+      pendingApprovalCount,
+      interruptErrors,
+      requestedWhileStarting,
+      settled,
+    };
+    this.storeStopCheckpoint(session.id, checkpoint);
+    return checkpoint;
+  }
+
   async startTurnWithRecovery(scopeRef, session, event, options: StartTurnOptions = {}) {
+    const stopCheckpoint = session ? this.resolveStopCheckpoint(session.id) : null;
+    const shouldLazyResumeStoppedThread = Boolean(
+      stopCheckpoint
+      && session?.codexThreadId
+      && stopCheckpoint.threadId === session.codexThreadId,
+    );
     debugCoordinator('turn_recovery_start', {
       platform: scopeRef.platform,
       scopeId: scopeRef.externalScopeId,
       bridgeSessionId: session?.id ?? null,
       threadId: session?.codexThreadId ?? null,
       textPreview: truncateCoordinatorText(event?.text, 160),
+      stopCheckpointThreadId: stopCheckpoint?.threadId ?? null,
+      lazyResumeStoppedThread: shouldLazyResumeStoppedThread,
     });
     try {
       return await this.startTurnOnSession(session, event, options);
@@ -1951,8 +2530,13 @@ export class BridgeCoordinator {
         error: error instanceof Error ? error.message : String(error),
         resumeRetryable: isResumeRetryableError(error),
         staleThread: isStaleThreadError(error),
+        stopCheckpointThreadId: stopCheckpoint?.threadId ?? null,
+        lazyResumeStoppedThread: shouldLazyResumeStoppedThread,
       });
       if (isResumeRetryableError(error)) {
+        if (shouldLazyResumeStoppedThread) {
+          return this.resumeTurnOnSameSession(session, event, options, error);
+        }
         return this.retryTurnOnSameSession(session, event, options, error);
       }
       if (!isStaleThreadError(error)) {
@@ -2084,6 +2668,9 @@ export class BridgeCoordinator {
         lastArtifactDelivery: finalizedResult.artifactDelivery ?? null,
       },
     });
+    if (this.resolveStopCheckpoint(session.id)) {
+      this.clearStopCheckpoint(session.id);
+    }
     return { result: finalizedResult, session: nextSession };
   }
 
@@ -2473,6 +3060,21 @@ function withTurnArtifactContext(event: InboundTextEvent, turnArtifactContext) {
   if (!turnArtifactContext) {
     return event;
   }
+  return withCodexbridgeMetadata(event, {
+    turnArtifactContext,
+  });
+}
+
+function withRetryContext(event: InboundTextEvent, retryContext) {
+  if (!retryContext || typeof retryContext !== 'object') {
+    return event;
+  }
+  return withCodexbridgeMetadata(event, {
+    retryContext,
+  });
+}
+
+function withCodexbridgeMetadata(event: InboundTextEvent, updates: Record<string, unknown>) {
   const metadata = event?.metadata && typeof event.metadata === 'object'
     ? event.metadata
     : {};
@@ -2485,7 +3087,7 @@ function withTurnArtifactContext(event: InboundTextEvent, turnArtifactContext) {
       ...metadata,
       codexbridge: {
         ...codexbridge,
-        turnArtifactContext,
+        ...updates,
       },
     },
   };
@@ -2865,6 +3467,27 @@ function getCommandHelpSpecs(i18n: Translator) {
       i18n.t('coordinator.help.note.usage'),
     ],
   }),
+  login: freezeCommandHelp({
+    name: 'login',
+    aliases: ['lg'],
+    summary: i18n.t('coordinator.help.summary.login'),
+    usage: [
+      '/login',
+      '/login list',
+      '/login <index>',
+      '/login cancel',
+      '/login -h',
+    ],
+    examples: [
+      '/login',
+      '/login list',
+      '/login 1',
+      '/login cancel',
+    ],
+    notes: [
+      i18n.t('coordinator.help.note.login'),
+    ],
+  }),
   stop: freezeCommandHelp({
     name: 'stop',
     aliases: ['sp'],
@@ -3231,6 +3854,7 @@ const COMMAND_HELP_ORDER = Object.freeze([
   'helps',
   'status',
   'usage',
+  'login',
   'stop',
   'new',
   'uploads',
@@ -3262,6 +3886,7 @@ const COMMAND_ALIAS_DEFINITIONS = Object.freeze({
   helps: ['help', 'h'],
   status: ['where', 'st'],
   usage: ['us'],
+  login: ['lg'],
   stop: ['sp'],
   new: ['n'],
   uploads: ['up', 'ul'],
@@ -3388,6 +4013,34 @@ function normalizeRetryableRequestSnapshot(value: unknown): RetryableRequestSnap
     attachments: cloneInboundAttachments(normalizeInboundAttachments(record.attachments)),
     cwd: normalizeCwd(record.cwd),
     storedAt: typeof record.storedAt === 'number' ? record.storedAt : Date.now(),
+  };
+}
+
+function normalizeStopCheckpointSnapshot(value: unknown): StopCheckpointSnapshot | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const threadId = normalizeNullableString(record.threadId);
+  if (!threadId) {
+    return null;
+  }
+  return {
+    threadId,
+    stoppedAt: typeof record.stoppedAt === 'number' ? record.stoppedAt : Date.now(),
+    interruptedTurnIds: Array.isArray(record.interruptedTurnIds)
+      ? record.interruptedTurnIds
+        .map((entry) => normalizeNullableString(entry))
+        .filter((entry): entry is string => Boolean(entry))
+      : [],
+    pendingApprovalCount: typeof record.pendingApprovalCount === 'number' ? record.pendingApprovalCount : 0,
+    interruptErrors: Array.isArray(record.interruptErrors)
+      ? record.interruptErrors
+        .map((entry) => normalizeNullableString(entry))
+        .filter((entry): entry is string => Boolean(entry))
+      : [],
+    requestedWhileStarting: record.requestedWhileStarting === true,
+    settled: record.settled === true,
   };
 }
 
@@ -3570,6 +4223,15 @@ function isResumeRetryableError(error) {
     || /empty session file/i.test(message);
 }
 
+function isApprovedExecutionStallError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /Approval was accepted, but the approved /i.test(message)
+    && (
+      /produced no follow-up signal/i.test(message)
+      || /stopped making progress after/i.test(message)
+    );
+}
+
 function classifyTurnFailure(error, i18n: Translator) {
   const message = error instanceof Error ? error.message : String(error);
   if ((error as RecoveryFailure)?.reasonCode === 'stale-session-recovery') {
@@ -3588,6 +4250,12 @@ function classifyTurnFailure(error, i18n: Translator) {
     return {
       outputState: 'stale_session',
       errorMessage: message,
+    };
+  }
+  if (isApprovedExecutionStallError(error)) {
+    return {
+      outputState: 'provider_error',
+      errorMessage: i18n.t('runtime.error.approvalStalledWorkaround'),
     };
   }
   return {
@@ -3628,6 +4296,40 @@ function formatAccountIdentity(identity) {
     || identity.accountId
     || identity.authMode
     || '';
+}
+
+function formatCodexLoginAccountIdentity(account, i18n = createI18n()) {
+  if (!account) {
+    return i18n.t('common.unknown');
+  }
+  return String(
+    account.email
+    || account.name
+    || account.accountId
+    || account.id
+    || i18n.t('common.unknown'),
+  ).trim();
+}
+
+function formatLoginListItem(index, account, i18n = createI18n()) {
+  const markers = [];
+  if (account?.isActive) {
+    markers.push(i18n.t('coordinator.login.activeMarker'));
+  }
+  const planType = account?.planType ?? account?.plan ?? null;
+  if (planType) {
+    markers.push(String(planType));
+  }
+  const suffix = markers.length > 0 ? ` | ${markers.join(' | ')}` : '';
+  return `${index + 1}. ${formatCodexLoginAccountIdentity(account, i18n)}${suffix}`;
+}
+
+function formatCodexLoginError(error, i18n = createI18n()) {
+  const message = formatUserError(error);
+  if (/just a moment|cloudflare/iu.test(message) || /auth\.openai\.com\/oauth\/device\/code/iu.test(message)) {
+    return i18n.t('coordinator.login.cloudflareBlocked');
+  }
+  return truncateCoordinatorText(message, 240);
 }
 
 function readRecentCodexRuntimeError(logPath = path.join(os.homedir(), '.codex', 'log', 'codex-tui.log'), i18n = createI18n()) {
@@ -3792,6 +4494,33 @@ function renderAllowLines(requests: ProviderApprovalRequest[], i18n: Translator)
   if (requests.length > visibleRequests.length) {
     lines.push('');
     lines.push(i18n.t('coordinator.allow.moreRequests', { count: requests.length - visibleRequests.length }));
+  }
+  return lines;
+}
+
+function renderApprovalPromptLines(requests: ProviderApprovalRequest[], i18n: Translator) {
+  const visibleRequest = requests[0] ?? null;
+  const lines = [
+    i18n.t('coordinator.allow.title', { count: requests.length }),
+  ];
+  if (visibleRequest) {
+    lines.push(i18n.t('coordinator.allow.requestHeader', {
+      index: 1,
+      kind: formatApprovalKind(visibleRequest.kind, i18n),
+    }));
+    if (visibleRequest.reason) {
+      lines.push(i18n.t('coordinator.allow.reason', {
+        value: truncateInlineText(visibleRequest.reason, 160),
+      }));
+    }
+  }
+  lines.push(i18n.t('coordinator.allow.promptView'));
+  if (requests.length > 1) {
+    lines.push(i18n.t('coordinator.allow.promptDecisionsIndexed'));
+  } else if (visibleRequest && !supportsSessionWideApproval(visibleRequest)) {
+    lines.push(i18n.t('coordinator.allow.promptDecisionsSingleNoRemember'));
+  } else {
+    lines.push(i18n.t('coordinator.allow.promptDecisionsSingle'));
   }
   return lines;
 }

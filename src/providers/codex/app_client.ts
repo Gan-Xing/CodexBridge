@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { writeSequencedStderrLine } from '../../core/sequenced_stderr.js';
+import { readCodexAccountIdentity } from './auth_state.js';
 import type {
   ProviderApprovalRequest,
   ProviderUsageReport,
@@ -73,6 +74,21 @@ interface PendingApproval {
   rpcId: string;
   transportKind: 'v2_command' | 'v2_file_change' | 'v2_permissions' | 'legacy_exec' | 'legacy_apply_patch';
   request: ProviderApprovalRequest;
+}
+
+interface ApprovedExecution {
+  requestId: string;
+  kind: ProviderApprovalRequest['kind'];
+  threadId: string;
+  turnId: string | null;
+  itemId: string | null;
+  command: string | null;
+  approvedAt: number;
+  lastSignalAt: number;
+  lastSignalKind: string;
+  signalCount: number;
+  completedAt: number | null;
+  lastObservedTurnSnapshotKey: string | null;
 }
 
 interface ProgressState {
@@ -146,6 +162,8 @@ export class CodexAppClient extends EventEmitter {
 
   pendingApprovals: Map<string, PendingApproval>;
 
+  approvedExecutions: Map<string, ApprovedExecution>;
+
   requestId: number;
 
   port: number | null;
@@ -192,6 +210,7 @@ export class CodexAppClient extends EventEmitter {
     this.socket = null;
     this.pending = new Map();
     this.pendingApprovals = new Map();
+    this.approvedExecutions = new Map();
     this.requestId = 0;
     this.port = null;
     this.connected = false;
@@ -243,6 +262,7 @@ export class CodexAppClient extends EventEmitter {
     }
     this.child = null;
     this.pendingApprovals.clear();
+    this.approvedExecutions.clear();
     this.rejectPending(new Error('Codex app client stopped'));
   }
 
@@ -468,12 +488,26 @@ export class CodexAppClient extends EventEmitter {
       throw new Error(`Unknown approval request: ${requestId}`);
     }
     const result = buildApprovalResponseResult(pending, option);
+    const approvedExecution = createApprovedExecution(pending, option, this.turnPollNow());
+    if (approvedExecution) {
+      this.approvedExecutions.set(approvedExecution.requestId, approvedExecution);
+    }
+    try {
+      this.send({
+        jsonrpc: '2.0',
+        id: pending.rpcId,
+        result,
+      });
+    } catch (error) {
+      if (approvedExecution) {
+        this.approvedExecutions.delete(approvedExecution.requestId);
+      }
+      throw error;
+    }
     this.pendingApprovals.delete(String(requestId));
-    this.send({
-      jsonrpc: '2.0',
-      id: pending.rpcId,
-      result,
-    });
+    if (approvedExecution) {
+      this.logDebug('approval_response_sent', summarizeApprovedExecution(approvedExecution));
+    }
   }
 
   async listModels(): Promise<CodexModelInfo[]> {
@@ -659,6 +693,7 @@ export class CodexAppClient extends EventEmitter {
     }
 
     if ('method' in message) {
+      this.noteApprovedExecutionSignalFromNotification(message);
       this.logDebug('rpc_notification', summarizeNotificationMessage(message));
       if ('id' in message && this.handleServerRequest(message)) {
         return;
@@ -685,6 +720,187 @@ export class CodexAppClient extends EventEmitter {
     this.pending.clear();
   }
 
+  getApprovedExecutions({
+    threadId = null,
+    turnId = null,
+    activeOnly = false,
+  }: {
+    threadId?: string | null;
+    turnId?: string | null;
+    activeOnly?: boolean;
+  } = {}): ApprovedExecution[] {
+    return [...this.approvedExecutions.values()].filter((entry) => {
+      if (threadId && entry.threadId !== threadId) {
+        return false;
+      }
+      if (turnId && entry.turnId && entry.turnId !== turnId) {
+        return false;
+      }
+      if (activeOnly && entry.completedAt) {
+        return false;
+      }
+      return true;
+    });
+  }
+
+  noteApprovedExecutionSignalFromNotification(message: any): void {
+    const signalKind = classifyApprovedExecutionSignal(message?.method);
+    if (!signalKind) {
+      return;
+    }
+    const threadId = extractThreadIdFromNotification(message);
+    if (!threadId) {
+      return;
+    }
+    this.noteApprovedExecutionSignal({
+      threadId,
+      turnId: extractNotificationTurnId(message?.params ?? null),
+      itemId: extractItemId(message?.params ?? null),
+      signalKind,
+      markCompleted: signalKind === 'item_completed' || signalKind === 'turn_completed',
+    });
+  }
+
+  noteApprovedExecutionSignal({
+    threadId,
+    turnId = null,
+    itemId = null,
+    signalKind,
+    markCompleted = false,
+  }: {
+    threadId: string;
+    turnId?: string | null;
+    itemId?: string | null;
+    signalKind: string;
+    markCompleted?: boolean;
+  }): void {
+    const now = this.turnPollNow();
+    for (const entry of this.approvedExecutions.values()) {
+      if (entry.completedAt) {
+        continue;
+      }
+      if (entry.threadId !== threadId) {
+        continue;
+      }
+      if (turnId && entry.turnId && entry.turnId !== turnId) {
+        continue;
+      }
+      if (!turnId && entry.turnId && !isThreadLevelApprovedExecutionSignal(signalKind)) {
+        continue;
+      }
+      const firstSignal = entry.signalCount === 0;
+      entry.lastSignalAt = now;
+      entry.lastSignalKind = signalKind;
+      entry.signalCount += 1;
+      if (
+        markCompleted
+        && (
+          !itemId
+          || !entry.itemId
+          || entry.itemId === itemId
+        )
+      ) {
+        entry.completedAt = now;
+      }
+      if (firstSignal || entry.completedAt) {
+        this.logDebug('approval_signal', summarizeApprovedExecutionSignal(entry, signalKind));
+      }
+    }
+  }
+
+  observeApprovedExecutionTurnSnapshot({
+    threadId,
+    turnId,
+    turn,
+  }: {
+    threadId: string;
+    turnId: string;
+    turn: any;
+  }): void {
+    const activeEntries = this.getApprovedExecutions({ threadId, turnId, activeOnly: true });
+    if (activeEntries.length === 0 || !turn) {
+      return;
+    }
+    const snapshotKey = buildTurnSnapshotKey(turn);
+    let changed = false;
+    for (const entry of activeEntries) {
+      if (!entry.lastObservedTurnSnapshotKey) {
+        entry.lastObservedTurnSnapshotKey = snapshotKey;
+        continue;
+      }
+      if (entry.lastObservedTurnSnapshotKey !== snapshotKey) {
+        entry.lastObservedTurnSnapshotKey = snapshotKey;
+        changed = true;
+      }
+    }
+    if (changed) {
+      this.noteApprovedExecutionSignal({
+        threadId,
+        turnId,
+        signalKind: 'turn_snapshot_changed',
+      });
+    }
+  }
+
+  inspectApprovedExecutionStall({
+    threadId,
+    turnId,
+    timeoutMs,
+  }: {
+    threadId: string;
+    turnId: string;
+    timeoutMs: number;
+  }): null | {
+    entry: ApprovedExecution;
+    idleMs: number;
+    idleLimitMs: number;
+  } {
+    const activeEntries = this.getApprovedExecutions({ threadId, turnId, activeOnly: true });
+    if (activeEntries.length === 0) {
+      return null;
+    }
+    const now = this.turnPollNow();
+    const idleLimitMs = computeApprovedExecutionIdleLimitMs(timeoutMs);
+    let stalledEntry: ApprovedExecution | null = null;
+    let stalledIdleMs = 0;
+    for (const entry of activeEntries) {
+      const idleMs = Math.max(0, now - Math.max(entry.lastSignalAt, entry.approvedAt));
+      if (idleMs < idleLimitMs) {
+        continue;
+      }
+      if (!stalledEntry || idleMs > stalledIdleMs) {
+        stalledEntry = entry;
+        stalledIdleMs = idleMs;
+      }
+    }
+    if (!stalledEntry) {
+      return null;
+    }
+    return {
+      entry: stalledEntry,
+      idleMs: stalledIdleMs,
+      idleLimitMs,
+    };
+  }
+
+  clearApprovedExecutionsForTurn({
+    threadId,
+    turnId,
+  }: {
+    threadId: string;
+    turnId: string;
+  }): void {
+    for (const [requestId, entry] of this.approvedExecutions.entries()) {
+      if (entry.threadId !== threadId) {
+        continue;
+      }
+      if (entry.turnId && entry.turnId !== turnId) {
+        continue;
+      }
+      this.approvedExecutions.delete(requestId);
+    }
+  }
+
   async waitForTurnResult({
     threadId,
     turnId,
@@ -703,6 +919,8 @@ export class CodexAppClient extends EventEmitter {
     let lastTurnSnapshotKey = null;
     let stableTerminalReadCount = 0;
     let pollCount = 0;
+    let pendingApprovalWaitLogged = false;
+    let lastPendingApprovalCount = 0;
     const terminalSettleMs = computeTerminalSettleMs(timeoutMs);
     const progressState: ProgressState = {
       commentaryText: '',
@@ -754,7 +972,28 @@ export class CodexAppClient extends EventEmitter {
       terminalSettleMs,
     });
     try {
-      while (this.turnPollNow() < deadline) {
+      while (true) {
+        const pendingApprovalCount = this.getPendingApprovals({ threadId, turnId }).length;
+        const pastDeadline = this.turnPollNow() >= deadline;
+        if (pastDeadline && pendingApprovalCount === 0) {
+          break;
+        }
+        if (pastDeadline && pendingApprovalCount > 0) {
+          if (!pendingApprovalWaitLogged || pendingApprovalCount !== lastPendingApprovalCount) {
+            this.logDebug('turn_wait_continue', {
+              threadId,
+              turnId,
+              pollCount,
+              reason: 'pending_approval_wait',
+              pendingApprovalCount,
+            });
+          }
+          pendingApprovalWaitLogged = true;
+          lastPendingApprovalCount = pendingApprovalCount;
+        } else {
+          pendingApprovalWaitLogged = false;
+          lastPendingApprovalCount = pendingApprovalCount;
+        }
         pollCount += 1;
         let thread = null;
         try {
@@ -793,9 +1032,39 @@ export class CodexAppClient extends EventEmitter {
           turn: summarizeTurnSnapshot(turn),
           progress: summarizeProgressState(progressState),
         });
+        if (turn) {
+          this.observeApprovedExecutionTurnSnapshot({
+            threadId,
+            turnId,
+            turn,
+          });
+        }
+        const approvedExecutionStall = this.inspectApprovedExecutionStall({
+          threadId,
+          turnId,
+          timeoutMs,
+        });
+        if (approvedExecutionStall) {
+          this.logDebug('turn_wait_error', {
+            threadId,
+            turnId,
+            pollCount,
+            reason: 'approved_execution_stalled',
+            idleMs: approvedExecutionStall.idleMs,
+            idleLimitMs: approvedExecutionStall.idleLimitMs,
+            approval: summarizeApprovedExecution(approvedExecutionStall.entry),
+          });
+          throw new Error(buildApprovedExecutionStallError(approvedExecutionStall));
+        }
         if (turn && isTurnTerminal(turn.status)) {
           const outputText = extractTurnOutputText(turn);
           if (outputText) {
+            this.noteApprovedExecutionSignal({
+              threadId,
+              turnId,
+              signalKind: 'turn_terminal',
+              markCompleted: true,
+            });
             const outputArtifacts = extractTurnOutputArtifacts(turn);
             const result = {
               turnId,
@@ -814,6 +1083,12 @@ export class CodexAppClient extends EventEmitter {
           }
           const outputArtifacts = extractTurnOutputArtifacts(turn);
           if (outputArtifacts.length > 0) {
+            this.noteApprovedExecutionSignal({
+              threadId,
+              turnId,
+              signalKind: 'turn_terminal',
+              markCompleted: true,
+            });
             const result = {
               turnId,
               threadId,
@@ -843,6 +1118,12 @@ export class CodexAppClient extends EventEmitter {
             progress: summarizeProgressState(progressState),
           });
           if (completionState === 'interrupted') {
+            this.noteApprovedExecutionSignal({
+              threadId,
+              turnId,
+              signalKind: 'turn_terminal',
+              markCompleted: true,
+            });
             const result = {
               turnId,
               threadId,
@@ -866,6 +1147,12 @@ export class CodexAppClient extends EventEmitter {
             throw new Error(turn.error);
           }
           if (sessionState.lastAgentMessage && hasAssistantVisibleItems) {
+            this.noteApprovedExecutionSignal({
+              threadId,
+              turnId,
+              signalKind: 'session_task_complete',
+              markCompleted: true,
+            });
             const result = buildSessionTaskCompleteResult({
               turnId,
               threadId,
@@ -913,6 +1200,12 @@ export class CodexAppClient extends EventEmitter {
             }
           }
           if (sessionState.lastAgentMessage || sessionState.outputArtifacts.length > 0) {
+            this.noteApprovedExecutionSignal({
+              threadId,
+              turnId,
+              signalKind: 'session_task_complete',
+              markCompleted: true,
+            });
             const result = buildSessionTaskCompleteResult({
               turnId,
               threadId,
@@ -925,6 +1218,12 @@ export class CodexAppClient extends EventEmitter {
             return result;
           }
           if (sessionState.hasTaskComplete) {
+            this.noteApprovedExecutionSignal({
+              threadId,
+              turnId,
+              signalKind: 'session_task_complete',
+              markCompleted: true,
+            });
             const previewText = resolveTurnPreviewText(turn, progressState);
             const result = {
               turnId,
@@ -1056,6 +1355,7 @@ export class CodexAppClient extends EventEmitter {
       });
       throw new Error(`Timed out waiting for Codex turn ${turnId}`);
     } finally {
+      this.clearApprovedExecutionsForTurn({ threadId, turnId });
       this.off('notification', onNotification);
       this.off('approval_request', onApprovalEvent);
     }
@@ -1210,6 +1510,30 @@ function buildApprovalResponseResult(pending: PendingApproval, option: 1 | 2 | 3
   }
 }
 
+function createApprovedExecution(
+  pending: PendingApproval,
+  option: 1 | 2 | 3,
+  now: number,
+): ApprovedExecution | null {
+  if (option === 3) {
+    return null;
+  }
+  return {
+    requestId: pending.rpcId,
+    kind: pending.request.kind,
+    threadId: pending.request.threadId,
+    turnId: pending.request.turnId,
+    itemId: pending.request.itemId,
+    command: pending.request.command ?? null,
+    approvedAt: now,
+    lastSignalAt: now,
+    lastSignalKind: 'approval_response_sent',
+    signalCount: 0,
+    completedAt: null,
+    lastObservedTurnSnapshotKey: null,
+  };
+}
+
 function buildV2CommandApprovalDecision(request: ProviderApprovalRequest, option: 1 | 2 | 3): any {
   if (option === 1) {
     return 'accept';
@@ -1293,6 +1617,57 @@ function normalizeApprovalDecisionKey(value: unknown): string {
     return '';
   }
   return String(entries[0]?.[0] ?? '').trim();
+}
+
+function classifyApprovedExecutionSignal(method: unknown): string | null {
+  const normalized = String(method ?? '').replace(/[^a-z]/gi, '').toLowerCase();
+  switch (normalized) {
+    case 'itemstarted':
+      return 'item_started';
+    case 'itemcompleted':
+      return 'item_completed';
+    case 'threadstatuschanged':
+      return 'thread_status_changed';
+    case 'turnstarted':
+      return 'turn_started';
+    case 'turncompleted':
+      return 'turn_completed';
+    default:
+      return isAgentDeltaNotificationMethod(normalized) ? 'assistant_delta' : null;
+  }
+}
+
+function isThreadLevelApprovedExecutionSignal(signalKind: string): boolean {
+  return signalKind === 'thread_status_changed' || signalKind === 'turn_completed';
+}
+
+function summarizeApprovedExecution(entry: ApprovedExecution) {
+  return {
+    requestId: entry.requestId,
+    kind: entry.kind,
+    threadId: entry.threadId,
+    turnId: entry.turnId,
+    itemId: entry.itemId,
+    commandPreview: truncateDebugText(entry.command, 120),
+    approvedAt: entry.approvedAt,
+    lastSignalAt: entry.lastSignalAt,
+    lastSignalKind: entry.lastSignalKind,
+    signalCount: entry.signalCount,
+    completedAt: entry.completedAt,
+  };
+}
+
+function summarizeApprovedExecutionSignal(entry: ApprovedExecution, signalKind: string) {
+  return {
+    requestId: entry.requestId,
+    threadId: entry.threadId,
+    turnId: entry.turnId,
+    itemId: entry.itemId,
+    signalKind,
+    signalCount: entry.signalCount,
+    commandPreview: truncateDebugText(entry.command, 120),
+    completedAt: entry.completedAt,
+  };
 }
 
 function normalizeNullableString(value: unknown): string | null {
@@ -1798,9 +2173,32 @@ function mapSandboxPolicy(mode) {
   return { type: 'workspaceWrite' };
 }
 
+const TERMINAL_TURN_STATUS_KEYS = new Set([
+  'completed',
+  'complete',
+  'succeeded',
+  'success',
+  'finished',
+  'failed',
+  'error',
+  'timedout',
+  'timeout',
+  'interrupted',
+  'cancelled',
+  'canceled',
+  'aborted',
+]);
+
+function normalizeTurnStatusKey(status) {
+  return String(status ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, '');
+}
+
 function isTurnTerminal(status) {
-  const normalized = String(status ?? '').toLowerCase();
-  return Boolean(normalized) && !['pending', 'running', 'in_progress', 'active'].includes(normalized);
+  const normalized = normalizeTurnStatusKey(status);
+  return Boolean(normalized) && TERMINAL_TURN_STATUS_KEYS.has(normalized);
 }
 
 function isThreadMaterializationPendingError(error) {
@@ -1820,6 +2218,36 @@ function computeTerminalSettleMs(timeoutMs) {
     return 60_000;
   }
   return Math.min(60_000, Math.max(10_000, Math.floor(numericTimeout / 2)));
+}
+
+function computeApprovedExecutionIdleLimitMs(timeoutMs) {
+  const numericTimeout = Number(timeoutMs || 0);
+  if (!Number.isFinite(numericTimeout) || numericTimeout <= 0) {
+    return 300_000;
+  }
+  return Math.min(Math.max(180_000, Math.floor(numericTimeout / 3)), 300_000);
+}
+
+function buildApprovedExecutionStallError({
+  entry,
+  idleMs,
+}: {
+  entry: ApprovedExecution;
+  idleMs: number;
+}) {
+  const idleSeconds = Math.max(1, Math.round(idleMs / 1000));
+  const kindLabel = entry.kind === 'command'
+    ? 'command'
+    : entry.kind === 'file_change'
+      ? 'file change'
+      : 'permission grant';
+  const commandSuffix = entry.command
+    ? ` (${truncateDebugText(entry.command, 120)})`
+    : '';
+  if (entry.signalCount === 0) {
+    return `Approval was accepted, but the approved ${kindLabel}${commandSuffix} produced no follow-up signal for ${idleSeconds} seconds. The provider may be stuck; use /retry to try again.`;
+  }
+  return `Approval was accepted, but the approved ${kindLabel}${commandSuffix} stopped making progress after ${entry.lastSignalKind} and stayed idle for ${idleSeconds} seconds. The provider may be stuck; use /retry to try again.`;
 }
 
 const INTERRUPTED_PATTERN = /interrupt|interrupted|cancel(?:led)?|aborted?|stopped by user|用户中断|已中断/i;
@@ -2502,45 +2930,4 @@ function waitForChildExit(child: ChildProcess | null, timeoutMs: number): Promis
   });
 }
 
-export function readCodexAccountIdentity(authPath = path.join(os.homedir(), '.codex', 'auth.json')) {
-  try {
-    const raw = JSON.parse(fs.readFileSync(authPath, 'utf8'));
-    const idPayload = decodeJwtPayload(typeof raw.tokens?.id_token === 'string' ? raw.tokens.id_token : null);
-    return {
-      email: firstString(idPayload?.email),
-      name: firstString(idPayload?.name),
-      authMode: firstString(raw.auth_mode, idPayload?.auth_provider),
-      accountId: firstString(raw.account_id),
-    };
-  } catch {
-    return null;
-  }
-}
-
-function decodeJwtPayload(token) {
-  if (!token) {
-    return null;
-  }
-  const parts = token.split('.');
-  if (parts.length < 2 || !parts[1]) {
-    return null;
-  }
-  try {
-    const normalized = parts[1]
-      .replace(/-/g, '+')
-      .replace(/_/g, '/')
-      .padEnd(Math.ceil(parts[1].length / 4) * 4, '=');
-    return JSON.parse(Buffer.from(normalized, 'base64').toString('utf8'));
-  } catch {
-    return null;
-  }
-}
-
-function firstString(...values) {
-  for (const value of values) {
-    if (typeof value === 'string' && value.trim()) {
-      return value.trim();
-    }
-  }
-  return null;
-}
+export { readCodexAccountIdentity };

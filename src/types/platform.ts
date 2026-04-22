@@ -31,6 +31,7 @@ export interface PlatformTextDeliveryResult {
   failedIndex: number | null;
   failedText: string;
   error: string;
+  errorCode?: number | null;
 }
 
 export interface PlatformMediaDeliveryResult {
@@ -39,6 +40,7 @@ export interface PlatformMediaDeliveryResult {
   sentPath: string;
   sentCaption: string;
   error: string;
+  errorCode?: number | null;
 }
 
 export interface PlatformStatusInfo {
