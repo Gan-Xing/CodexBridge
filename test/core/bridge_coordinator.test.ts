@@ -271,6 +271,7 @@ function makeRuntime({
   locale = null,
   platformPlugins = [],
   codexAuthManager = null,
+  codexInstructionsManager = null,
 } = {}) {
   const openai = new FakeProviderPlugin('openai-native', { replyPrefix: 'openai' });
   const minimax = new FakeProviderPlugin('minimax-via-cliproxy', { replyPrefix: 'minimax' });
@@ -286,8 +287,46 @@ function makeRuntime({
     locale,
     restartBridge,
     codexAuthManager,
+    codexInstructionsManager,
   });
   return { runtime, openai, minimax };
+}
+
+function makeFakeCodexInstructionsManager({
+  path: filePath = '/tmp/.codex/AGENTS.md',
+  content = '',
+  exists = false,
+} = {}) {
+  const state = {
+    path: filePath,
+    content,
+    exists,
+  };
+  const writes: string[] = [];
+  let clears = 0;
+  return {
+    state,
+    writes,
+    get clears() {
+      return clears;
+    },
+    async readInstructions() {
+      return { ...state };
+    },
+    async writeInstructions(nextContent: string) {
+      const normalized = String(nextContent ?? '').trim();
+      writes.push(nextContent);
+      state.content = normalized ? `${normalized}\n` : '';
+      state.exists = Boolean(normalized);
+      return { ...state };
+    },
+    async clearInstructions() {
+      clears += 1;
+      state.content = '';
+      state.exists = false;
+      return { ...state };
+    },
+  };
 }
 
 function makeUsageReport(overrides = {}) {
@@ -1564,6 +1603,8 @@ test('/helps lists all supported slash commands and help entrypoints', async () 
   assert.match(text, /\/provider \(\/pd\) 查看可用 provider/);
   assert.match(text, /\/models \(\/ms\) 列出当前 provider 的可用模型/);
   assert.match(text, /\/model \(\/m\) 查看或切换当前 scope 的模型设置/);
+  assert.match(text, /\/personality \(\/psn\) 查看或切换当前会话的 personality/);
+  assert.match(text, /\/instructions \(\/ins\) 查看或编辑全局自定义指令/);
   assert.match(text, /\/fast 开启或关闭 Fast 模式/);
   assert.match(text, /\/threads \(\/th\) 查看当前 provider 的线程列表首页/);
   assert.match(text, /\/search \(\/se\) 按关键词搜索线程标题或 preview/);
@@ -1599,6 +1640,8 @@ test('/helps renders English help text when locale is set to en', async () => {
   assert.match(text, /Help: \/helps <command>/);
   assert.match(text, /\/models \(\/ms\) List available models for the current provider/);
   assert.match(text, /\/model \(\/m\) View or switch model settings for the current scope/);
+  assert.match(text, /\/personality \(\/psn\) View or switch the active session personality/);
+  assert.match(text, /\/instructions \(\/ins\) View or edit the global custom instructions/);
   assert.match(text, /\/fast Enable or disable Fast mode/);
   assert.match(text, /\/lang Show or switch the current language used for text replies/);
 });
@@ -1742,6 +1785,81 @@ test('/login 1 is blocked when any active turn is still running', async () => {
   const text = result.messages.map((message) => message.text ?? '').join('\n');
   assert.match(text, /暂时不能切换全局登录账号/);
   assert.equal(codexAuthManager.switchCalls.length, 0);
+});
+
+test('/instructions shows current content, supports inline set, and refreshes codex-backed profiles', async () => {
+  const codexInstructionsManager = makeFakeCodexInstructionsManager({
+    content: 'Always explain tradeoffs first.\n',
+    exists: true,
+  });
+  const { runtime, openai, minimax } = makeRuntime({ codexInstructionsManager });
+
+  const status = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-instructions-1',
+    text: '/instructions',
+  });
+  const statusText = status.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(statusText, /当前自定义指令：开启/);
+  assert.match(statusText, /Always explain tradeoffs first\./);
+
+  const saved = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-instructions-1',
+    text: '/instructions set Prefer concise final answers.',
+  });
+  const savedText = saved.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(savedText, /自定义指令已更新/);
+  assert.match(savedText, /已刷新 2 个 Codex 会话/);
+  assert.equal(codexInstructionsManager.state.content, 'Prefer concise final answers.\n');
+  assert.equal(openai.reconnectProfileCalls.length, 1);
+  assert.equal(minimax.reconnectProfileCalls.length, 1);
+});
+
+test('/instructions edit captures the next non-command message and clear removes the file', async () => {
+  const codexInstructionsManager = makeFakeCodexInstructionsManager();
+  const { runtime } = makeRuntime({ codexInstructionsManager });
+
+  const armed = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-instructions-2',
+    text: '/instructions edit',
+  });
+  assert.match(armed.messages[0]?.text ?? '', /已进入自定义指令编辑模式/);
+
+  const captured = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-instructions-2',
+    text: 'Line 1\nLine 2',
+  });
+  assert.match(captured.messages[0]?.text ?? '', /自定义指令已更新/);
+  assert.equal(codexInstructionsManager.state.content, 'Line 1\nLine 2\n');
+
+  const cleared = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-instructions-2',
+    text: '/instructions clear',
+  });
+  assert.match(cleared.messages[0]?.text ?? '', /自定义指令已清空/);
+  assert.equal(codexInstructionsManager.state.exists, false);
+});
+
+test('/instructions is blocked while any active turn is running', async () => {
+  const codexInstructionsManager = makeFakeCodexInstructionsManager();
+  const { runtime } = makeRuntime({ codexInstructionsManager });
+  runtime.services.activeTurns.beginScopeTurn({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-instructions-busy',
+  });
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-instructions-3',
+    text: '/instructions clear',
+  });
+
+  assert.match(result.messages[0]?.text ?? '', /暂时不能修改全局自定义指令/);
+  assert.equal(codexInstructionsManager.clears, 0);
 });
 
 test('/uploads starts upload mode and persists batch state without starting a turn', async () => {
@@ -2097,6 +2215,69 @@ test('/model supports reset and unknown-model handling', async () => {
     text: '/model unknown-model',
   });
   assert.match(unknown.messages[0]?.text ?? '', /未知模型：unknown-model/);
+});
+
+test('/personality shows current value and updates the next turn', async () => {
+  const { runtime, openai } = makeRuntime();
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-personality-1',
+    text: 'hello first',
+  });
+
+  const current = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-personality-1',
+    text: '/personality',
+  });
+  assert.equal(current.messages[0]?.text ?? '', '当前 personality：（默认）');
+
+  const updated = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-personality-1',
+    text: '/personality pragmatic',
+  });
+  assert.equal(updated.messages[0]?.text ?? '', 'personality 已更新为：pragmatic');
+  assert.equal(updated.messages[1]?.text ?? '', '下一轮生效。');
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-personality-1',
+    text: 'next turn',
+  });
+  assert.equal(openai.startTurnCalls.at(-1)?.sessionSettings?.personality, 'pragmatic');
+
+  const status = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-personality-1',
+    text: '/status details',
+  });
+  const statusText = status.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(statusText, /Personality：pragmatic/);
+});
+
+test('/personality validates values and requires a bound session', async () => {
+  const { runtime } = makeRuntime();
+
+  const noSession = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-personality-2',
+    text: '/personality friendly',
+  });
+  assert.match(noSession.messages[0]?.text ?? '', /当前还没有绑定会话/);
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-personality-2',
+    text: 'seed',
+  });
+  const invalid = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-personality-2',
+    text: '/personality loud',
+  });
+  assert.equal(invalid.messages[0]?.text ?? '', '用法：/personality [friendly|pragmatic|none]');
 });
 
 test('/fast enables fast service tier and creates a session when needed', async () => {
@@ -2726,6 +2907,7 @@ test('bridge coordinator shows command-specific blocked messages while a turn is
     ['/rename thread-1 新名字', '当前有回复在进行中，暂时不能重命名线程。请先等待，或使用 /stop 中断。'],
     ['/provider minimax-default', '当前有回复在进行中，暂时不能切换 provider。请先等待，或使用 /stop 中断。'],
     ['/model gpt-5.4', '当前有回复在进行中，暂时不能切换模型。请先等待，或使用 /stop 中断。'],
+    ['/personality friendly', '当前有回复在进行中，暂时不能切换 personality。请先等待，或使用 /stop 中断。'],
     ['/permissions full-access', '当前有回复在进行中，暂时不能切换权限预设。请先等待，或使用 /stop 中断。'],
     ['/reconnect', '当前有回复在进行中，暂时不能刷新当前 Codex 会话。请先等待，或使用 /stop 中断。'],
     ['/restart', '当前有回复在进行中，暂时不能重启桥接。请先等待，或使用 /stop 中断。'],
@@ -2833,15 +3015,29 @@ test('/new creates a fresh session on the current provider profile', async () =>
     externalScopeId: 'wx-user-1',
     text: 'hello',
   });
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-1',
+    text: '/personality pragmatic',
+  });
 
   const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
     platform: 'weixin',
     externalScopeId: 'wx-user-1',
     text: '/new',
   });
+  const rebound = runtime.services.bridgeSessions.resolveScopeSession({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-1',
+  });
 
   assert.match(result.messages[0]?.text ?? '', /已创建新的 Bridge 会话/);
   assert.equal(openai.startThreadCalls.length, 2);
+  assert.ok(rebound);
+  assert.equal(
+    runtime.services.bridgeSessions.getSessionSettings(rebound.id)?.personality,
+    'pragmatic',
+  );
 });
 
 test('/provider switches the scope to a new provider-backed session', async () => {
@@ -2851,16 +3047,30 @@ test('/provider switches the scope to a new provider-backed session', async () =
     externalScopeId: 'wx-user-1',
     text: 'hello',
   });
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-1',
+    text: '/personality friendly',
+  });
 
   const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
     platform: 'weixin',
     externalScopeId: 'wx-user-1',
     text: '/provider minimax-default',
   });
+  const rebound = runtime.services.bridgeSessions.resolveScopeSession({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-1',
+  });
 
   assert.match(result.messages[0]?.text ?? '', /已切换到 Provider 配置：minimax-default/);
   assert.equal(result.session?.providerProfileId, 'minimax-default');
   assert.equal(minimax.startThreadCalls.length, 1);
+  assert.ok(rebound);
+  assert.equal(
+    runtime.services.bridgeSessions.getSessionSettings(rebound.id)?.personality,
+    'friendly',
+  );
 });
 
 test('/provider without args lists current and available profiles', async () => {

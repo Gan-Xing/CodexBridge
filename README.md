@@ -38,7 +38,7 @@ Project bootstrap is now focused on:
 
 Current implemented bridge pieces:
 
-- Core session routing with WeChat-friendly slash commands, including `/helps`, `/status`, `/usage`, `/stop`, `/new`, `/uploads`, `/provider`, `/models`, `/model`, `/fast`, `/threads`, `/search`, `/next`, `/prev`, `/open`, `/peek`, `/rename`, `/permissions`, `/allow`, `/deny`, `/reconnect`, `/retry`, `/restart`, and `/lang`
+- Core session routing with WeChat-friendly slash commands, including `/helps`, `/status`, `/usage`, `/login`, `/stop`, `/new`, `/uploads`, `/provider`, `/models`, `/model`, `/personality`, `/instructions`, `/fast`, `/threads`, `/search`, `/next`, `/prev`, `/open`, `/peek`, `/rename`, `/permissions`, `/allow`, `/deny`, `/reconnect`, `/retry`, `/restart`, and `/lang`
 - File-backed JSON repositories for persistent bridge state
 - WeChat platform skeleton for Hermes-compatible iLink config loading, QR account state reuse, inbound DM normalization, long-poll client/poller wiring, context-token persistence, text chunking, and outbound text/typing delivery
 - Codex profile loader and initial Codex app-server client/plugin path for shared thread execution
@@ -53,6 +53,9 @@ Recommended entrypoints:
 /helps
 /h
 /st
+/login
+/lg
+/login list
 /helps threads
 /stop
 /sp
@@ -62,6 +65,10 @@ Recommended entrypoints:
 /ms
 /model
 /m
+/personality
+/psn pragmatic
+/instructions
+/instructions edit
 /fast
 /fast off
 /model gpt-5.4 xhigh
@@ -132,7 +139,10 @@ All slash commands support command-scoped help flags:
 Best-practice rule:
 
 - use `/helps` for command discovery
+- use `/login` and `/login list` to manage the host Codex account pool before switching accounts with `/login <index>`
 - use `/threads` and numeric indexes on WeChat instead of copying raw thread ids
+- use `/personality` to control the response style for future turns in the current scope
+- use `/instructions` to manage the active Codex `AGENTS.md` custom instructions file
 - use `/lang zh-CN` or `/lang en` to switch reply language for the current scope
 - use `/allow 1` or `/allow 2` to approve, and `/deny` to reject, when Codex asks for approval mid-turn
 - use `/retry` after an interrupted turn; it refreshes the current Codex session first, then reruns the previous request in the same thread
@@ -143,6 +153,7 @@ See the full command reference in [docs/usage/weixin-slash-commands.md](./docs/u
 ## Validation
 
 ```bash
+npm run typecheck
 npm test
 ```
 

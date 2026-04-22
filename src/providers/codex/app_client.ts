@@ -357,6 +357,7 @@ export class CodexAppClient extends EventEmitter {
     model = null,
     effort = null,
     serviceTier = null,
+    personality = null,
     sandboxMode = 'workspace-write',
     approvalPolicy = 'on-request',
     collaborationMode = 'default',
@@ -373,6 +374,7 @@ export class CodexAppClient extends EventEmitter {
     model?: string | null;
     effort?: string | null;
     serviceTier?: string | null;
+    personality?: string | null;
     sandboxMode?: string;
     approvalPolicy?: string;
     collaborationMode?: string;
@@ -388,6 +390,7 @@ export class CodexAppClient extends EventEmitter {
       model,
       effort,
       serviceTier,
+      personality,
       approvalPolicy,
       sandboxMode,
       collaborationMode,
@@ -419,7 +422,7 @@ export class CodexAppClient extends EventEmitter {
       serviceTier,
       effort,
       summary: null,
-      personality: null,
+      personality,
       outputSchema: null,
       collaborationMode: serializeCollaborationMode({
         collaborationMode,

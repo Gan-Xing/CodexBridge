@@ -28,6 +28,7 @@ interface CreateCodexBridgeRuntimeOptions {
   repositories?: RuntimeRepositories;
   restartBridge?: ((params: { event: any }) => Promise<void>) | null;
   codexAuthManager?: any;
+  codexInstructionsManager?: any;
 }
 
 export function createCodexBridgeRuntime({
@@ -40,6 +41,7 @@ export function createCodexBridgeRuntime({
   repositories = {},
   restartBridge = null,
   codexAuthManager = null,
+  codexInstructionsManager = null,
 }: CreateCodexBridgeRuntimeOptions = {}) {
   const registry = new PluginRegistry({
     locale,
@@ -90,6 +92,7 @@ export function createCodexBridgeRuntime({
     defaultCwd,
     restartBridge,
     codexAuthManager,
+    codexInstructionsManager,
     locale,
   });
 

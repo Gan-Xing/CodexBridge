@@ -139,6 +139,7 @@ test('CodexAppClient startTurn sends explicit default collaboration settings pay
     text: 'hello',
     text_elements: [],
   }]);
+  assert.equal(turnStart.personality, null);
 });
 
 test('CodexAppClient startTurn forwards explicit local-image input arrays unchanged', async () => {
@@ -809,6 +810,49 @@ test('CodexAppClient forwards custom developer instructions into collaboration s
     turnStart.collaborationMode?.settings?.developer_instructions,
     'Always inspect the workspace.',
   );
+});
+
+test('CodexAppClient forwards personality into turn/start payload', async () => {
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+  });
+
+  const calls = [];
+  client.request = async (method, params) => {
+    calls.push([method, params]);
+    if (method === 'turn/start') {
+      return { turn: { id: 'turn-1' } };
+    }
+    if (method === 'thread/read') {
+      return {
+        thread: {
+          id: 'thread-1',
+          name: 'Thread 1',
+          turns: [{
+            id: 'turn-1',
+            status: 'completed',
+            items: [{
+              type: 'assistant_message',
+              text: 'done',
+            }],
+          }],
+        },
+      };
+    }
+    return {};
+  };
+
+  await client.startTurn({
+    threadId: 'thread-1',
+    inputText: 'hello',
+    model: 'gpt-5.4',
+    personality: 'none',
+    collaborationMode: 'default',
+    timeoutMs: 10,
+  });
+
+  const turnStart = calls.find(([method]) => method === 'turn/start')?.[1];
+  assert.equal(turnStart.personality, 'none');
 });
 
 test('CodexAppClient notifies onTurnStarted before waiting for turn completion', async () => {

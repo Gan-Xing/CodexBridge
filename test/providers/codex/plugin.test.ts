@@ -38,6 +38,7 @@ function makeSessionSettings(overrides = {}) {
     model: null,
     reasoningEffort: null,
     serviceTier: null,
+    personality: null,
     approvalPolicy: null,
     sandboxMode: null,
     locale: null,
@@ -662,67 +663,58 @@ test('CodexProviderPlugin reconnectProfile replaces the existing client instance
   assert.equal(turn.outputText, 'client-2-done');
 });
 
-test('CodexProviderPlugin forwards developer instructions from environment when configured', async () => {
-  const previous = process.env.CODEXBRIDGE_CODEX_DEVELOPER_INSTRUCTIONS;
-  process.env.CODEXBRIDGE_CODEX_DEVELOPER_INSTRUCTIONS = 'Always inspect the workspace.';
-
-  try {
-    let seenDeveloperInstructions = null;
-    const plugin = makePlugin(() => ({
-        async start() {},
-        async startThread() {
-          return { threadId: 'thread-1', cwd: null, title: null };
-        },
-        async readThread(threadId: string) {
-          return { threadId, title: null, cwd: null };
-        },
-        async listThreads() {
-          return { items: [], nextCursor: null };
-        },
-        async startTurn(params: any) {
-          seenDeveloperInstructions = params.developerInstructions;
-          return {
-            outputText: 'done',
-            outputState: 'complete',
-            threadId: params.threadId,
-            title: null,
-          };
-        },
-        async interruptTurn() {},
-        async listModels() {
-          return [{
-            id: 'gpt-5.4',
-            model: 'gpt-5.4',
-            displayName: 'GPT-5.4',
-            description: '',
-            isDefault: true,
-            supportedReasoningEfforts: ['medium'],
-            defaultReasoningEffort: 'medium',
-          }];
-        },
-        async resumeThread() {
-          return {};
-        },
-      }));
-
-    await plugin.startTurn({
-      providerProfile: makeProfile(),
-      bridgeSession: makeBridgeSession(),
-      sessionSettings: makeSessionSettings(),
-      event: {
-        platform: 'weixin',
-        externalScopeId: 'wxid_1',
-        text: 'hello',
+test('CodexProviderPlugin forwards session personality to the app client', async () => {
+  let seenPersonality = null;
+  const plugin = makePlugin(() => ({
+      async start() {},
+      async startThread() {
+        return { threadId: 'thread-1', cwd: null, title: null };
       },
-      inputText: 'hello',
-    });
+      async readThread(threadId: string) {
+        return { threadId, title: null, cwd: null };
+      },
+      async listThreads() {
+        return { items: [], nextCursor: null };
+      },
+      async startTurn(params: any) {
+        seenPersonality = params.personality;
+        return {
+          outputText: 'done',
+          outputState: 'complete',
+          threadId: params.threadId,
+          title: null,
+        };
+      },
+      async interruptTurn() {},
+      async listModels() {
+        return [{
+          id: 'gpt-5.4',
+          model: 'gpt-5.4',
+          displayName: 'GPT-5.4',
+          description: '',
+          isDefault: true,
+          supportedReasoningEfforts: ['medium'],
+          defaultReasoningEffort: 'medium',
+        }];
+      },
+      async resumeThread() {
+        return {};
+      },
+    }));
 
-    assert.equal(seenDeveloperInstructions, 'Always inspect the workspace.');
-  } finally {
-    if (previous === undefined) {
-      delete process.env.CODEXBRIDGE_CODEX_DEVELOPER_INSTRUCTIONS;
-    } else {
-      process.env.CODEXBRIDGE_CODEX_DEVELOPER_INSTRUCTIONS = previous;
-    }
-  }
+  await plugin.startTurn({
+    providerProfile: makeProfile(),
+    bridgeSession: makeBridgeSession(),
+    sessionSettings: makeSessionSettings({
+      personality: 'friendly',
+    }),
+    event: {
+      platform: 'weixin',
+      externalScopeId: 'wxid_1',
+      text: 'hello',
+    },
+    inputText: 'hello',
+  });
+
+  assert.equal(seenPersonality, 'friendly');
 });

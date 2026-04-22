@@ -22,6 +22,10 @@ import {
   type SupportedLocale,
   type Translator,
 } from '../i18n/index.js';
+import {
+  CodexInstructionsManager,
+  type CodexInstructionsSnapshot,
+} from '../providers/codex/instructions_state.js';
 import type { TurnArtifactDeliveryState, UploadBatchItem, UploadBatchState } from '../types/core.js';
 import type { InboundAttachment, InboundTextEvent } from '../types/platform.js';
 import type { OutputArtifact, ProviderApprovalRequest } from '../types/provider.js';
@@ -33,6 +37,7 @@ const HELP_FLAG_SET = new Set(['-h', '--help', '-help', '-helps']);
 const STATUS_DETAILS_ARG_SET = new Set(['details', 'detail', 'full']);
 const FAST_SERVICE_TIER = 'fast';
 const NORMAL_SERVICE_TIER = 'flex';
+const CODEX_BACKED_PROVIDER_KIND_SET = new Set(['openai-native', 'minimax-via-cliproxy']);
 
 type CoordinatorResponse = {
   type: 'message';
@@ -129,6 +134,12 @@ interface CodexAuthManagerLike {
   switchAccountByIndex?(index: number): Promise<CodexAccountSwitchResult>;
 }
 
+interface CodexInstructionsManagerLike {
+  readInstructions(): Promise<CodexInstructionsSnapshot>;
+  writeInstructions(content: string): Promise<CodexInstructionsSnapshot>;
+  clearInstructions(): Promise<CodexInstructionsSnapshot>;
+}
+
 type StopCheckpointSnapshot = {
   threadId: string;
   stoppedAt: number;
@@ -149,10 +160,12 @@ export class BridgeCoordinator {
   restartBridge: any;
 
   codexAuthManager: CodexAuthManagerLike | null;
+  codexInstructionsManager: CodexInstructionsManagerLike;
   now: any;
   threadBrowserStates: Map<any, any>;
   localeOverridesByScope: Map<string, SupportedLocale>;
   pendingArtifactClarificationsByScope: Map<string, { originalText: string; askedAt: number }>;
+  pendingInstructionsEditsByScope: Map<string, { startedAt: number }>;
   localeContext: AsyncLocalStorage<SupportedLocale>;
   i18n: Translator;
 
@@ -165,6 +178,7 @@ export class BridgeCoordinator {
     defaultCwd = null,
     restartBridge = null,
     codexAuthManager = null,
+    codexInstructionsManager = null,
     now = () => Date.now(),
     locale = null,
   }) {
@@ -176,10 +190,12 @@ export class BridgeCoordinator {
     this.defaultCwd = normalizeCwd(defaultCwd);
     this.restartBridge = restartBridge;
     this.codexAuthManager = codexAuthManager;
+    this.codexInstructionsManager = codexInstructionsManager ?? new CodexInstructionsManager();
     this.now = now;
     this.threadBrowserStates = new Map();
     this.localeOverridesByScope = new Map();
     this.pendingArtifactClarificationsByScope = new Map();
+    this.pendingInstructionsEditsByScope = new Map();
     this.localeContext = new AsyncLocalStorage();
     this.i18n = createI18n(locale);
   }
@@ -230,6 +246,9 @@ export class BridgeCoordinator {
   }
 
   async handleInboundEventWithLocale(event, options = {}) {
+    if (!parseSlashCommand(event.text) && this.hasPendingInstructionsEdit(event)) {
+      return this.handlePendingInstructionsEdit(event);
+    }
     const command = parseSlashCommand(event.text);
     if (command) {
       return this.handleCommand(event, command, options);
@@ -451,6 +470,10 @@ export class BridgeCoordinator {
         return this.handleModelsCommand(event);
       case 'model':
         return this.handleModelCommand(event, command.args);
+      case 'personality':
+        return this.handlePersonalityCommand(event, command.args);
+      case 'instructions':
+        return this.handleInstructionsCommand(event, command.args);
       case 'fast':
         return this.handleFastCommand(event, command.args);
       default:
@@ -490,6 +513,7 @@ export class BridgeCoordinator {
       : this.resolveScopeProviderProfile(scopeRef);
     const usageReport = await this.resolveProviderUsage(providerProfile);
     const settings = session ? this.bridgeSessions.getSessionSettings(session.id) : null;
+    const instructionsSnapshot = await this.codexInstructionsManager.readInstructions();
     const modelValue = await this.resolveStatusModelValue(providerProfile, settings);
     const lastArtifactDelivery = resolveStoredArtifactDelivery(settings);
     if (!session) {
@@ -500,6 +524,7 @@ export class BridgeCoordinator {
         this.t('coordinator.status.defaultCwd', { cwd: this.defaultCwd ?? this.t('common.notSet') }),
         this.t('coordinator.status.speedMode', { value: formatSpeedMode(null) }),
         this.t('coordinator.status.model', { value: modelValue }),
+        this.t('coordinator.status.personality', { value: formatPersonality(null, this.currentI18n) }),
         this.t('coordinator.status.reasoningEffort', { value: '' }),
         this.t('coordinator.status.accessPreset', { value: '' }),
         ...platformStatusLines,
@@ -517,6 +542,7 @@ export class BridgeCoordinator {
       this.t('coordinator.status.workingDirectory', { cwd: session.cwd ?? this.defaultCwd ?? this.t('common.notSet') }),
       this.t('coordinator.status.speedMode', { value: formatSpeedMode(settings?.serviceTier ?? null) }),
       this.t('coordinator.status.model', { value: modelValue }),
+      this.t('coordinator.status.personality', { value: formatPersonality(settings?.personality ?? null, this.currentI18n) }),
       this.t('coordinator.status.reasoningEffort', { value: settings?.reasoningEffort ?? '' }),
       this.t('coordinator.status.accessPreset', { value: settings?.accessPreset ?? '' }),
     ];
@@ -533,11 +559,16 @@ export class BridgeCoordinator {
       this.t('coordinator.status.workingDirectory', { cwd: session.cwd ?? this.defaultCwd ?? this.t('common.notSet') }),
       this.t('coordinator.status.speedMode', { value: formatSpeedMode(settings?.serviceTier ?? null) }),
       this.t('coordinator.status.model', { value: settings?.model ?? this.t('common.default') }),
+      this.t('coordinator.status.personality', { value: formatPersonality(settings?.personality ?? null, this.currentI18n) }),
       this.t('coordinator.status.reasoningEffort', { value: settings?.reasoningEffort ?? this.t('common.default') }),
       this.t('coordinator.status.serviceTier', { value: normalizeServiceTier(settings?.serviceTier) ?? this.t('common.default') }),
       this.t('coordinator.status.accessPreset', { value: formatAccessPreset(resolveAccessPreset(settings)) }),
       this.t('coordinator.status.approvalPolicy', { value: resolveApprovalPolicy(settings) }),
       this.t('coordinator.status.sandboxMode', { value: resolveSandboxMode(settings) }),
+      this.t('coordinator.status.customInstructions', {
+        value: formatInstructionsStatus(instructionsSnapshot.exists, this.currentI18n),
+      }),
+      this.t('coordinator.status.instructionsPath', { value: instructionsSnapshot.path }),
       this.t('coordinator.status.currentTurn', { value: formatActiveTurnValue(activeTurn, this.currentI18n) }),
       this.t('coordinator.status.turnState', { value: formatActiveTurnState(activeTurn, this.currentI18n) }),
       ...(activeTurn ? [this.t('coordinator.status.turnControl')] : []),
@@ -750,6 +781,35 @@ export class BridgeCoordinator {
     };
   }
 
+  async reconnectCodexBackedProfiles() {
+    const profiles = this.providerProfiles?.list?.()
+      ?.filter((profile) => CODEX_BACKED_PROVIDER_KIND_SET.has(profile?.providerKind)) ?? [];
+    if (profiles.length === 0) {
+      return {
+        refreshedCount: 0,
+        errors: [],
+      };
+    }
+    let refreshedCount = 0;
+    const errors: string[] = [];
+    for (const profile of profiles) {
+      const providerPlugin = this.providerRegistry.getProvider(profile.providerKind);
+      if (!providerPlugin || typeof providerPlugin.reconnectProfile !== 'function') {
+        continue;
+      }
+      try {
+        await providerPlugin.reconnectProfile({ providerProfile: profile });
+        refreshedCount += 1;
+      } catch (error) {
+        errors.push(formatUserError(error));
+      }
+    }
+    return {
+      refreshedCount,
+      errors,
+    };
+  }
+
   renderPendingLoginLines(pendingLogin, {
     includeContinueHint = true,
     includeTitle = true,
@@ -778,6 +838,109 @@ export class BridgeCoordinator {
     if (includeContinueHint) {
       lines.push(this.t('coordinator.login.pendingNext'));
     }
+    return lines;
+  }
+
+  hasPendingInstructionsEdit(event): boolean {
+    return this.pendingInstructionsEditsByScope.has(buildInstructionsEditKey(event));
+  }
+
+  setPendingInstructionsEdit(event) {
+    this.pendingInstructionsEditsByScope.set(buildInstructionsEditKey(event), {
+      startedAt: this.now(),
+    });
+  }
+
+  clearPendingInstructionsEdit(event) {
+    this.pendingInstructionsEditsByScope.delete(buildInstructionsEditKey(event));
+  }
+
+  async handlePendingInstructionsEdit(event) {
+    if (!String(event.text ?? '').trim()) {
+      return messageResponse([
+        this.t('coordinator.instructions.editNeedsText'),
+        this.t('coordinator.instructions.editHint'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    return this.applyInstructionsContent(event, event.text);
+  }
+
+  async renderInstructionsStatus(event) {
+    const snapshot = await this.codexInstructionsManager.readInstructions();
+    const lines = [
+      this.t('coordinator.instructions.current', {
+        value: snapshot.exists ? this.t('common.enabled') : this.t('common.notSet'),
+      }),
+      this.t('coordinator.instructions.path', { value: snapshot.path }),
+      this.t('coordinator.instructions.contentLabel'),
+      snapshot.exists
+        ? snapshot.content.trimEnd() || this.t('common.empty')
+        : this.t('common.notSet'),
+      this.t('coordinator.instructions.usage'),
+      this.t('coordinator.instructions.help'),
+    ];
+    if (this.hasPendingInstructionsEdit(event)) {
+      lines.push(this.t('coordinator.instructions.editPending'));
+    }
+    return messageResponse(lines, this.buildScopedSessionMeta(event));
+  }
+
+  async applyInstructionsContent(event, content: string) {
+    if (this.activeTurns?.hasAnyActiveTurn?.()) {
+      return messageResponse([
+        this.t('coordinator.instructions.blocked'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    try {
+      const snapshot = await this.codexInstructionsManager.writeInstructions(content);
+      this.clearPendingInstructionsEdit(event);
+      const reconnectSummary = await this.reconnectCodexBackedProfiles();
+      return messageResponse(this.renderInstructionsSavedLines({
+        action: 'saved',
+        snapshot,
+        reconnectSummary,
+      }), this.buildScopedSessionMeta(event));
+    } catch (error) {
+      return messageResponse([
+        this.t('coordinator.instructions.failed', { error: formatUserError(error) }),
+      ], this.buildScopedSessionMeta(event));
+    }
+  }
+
+  cancelInstructionsEdit(event) {
+    if (!this.hasPendingInstructionsEdit(event)) {
+      return messageResponse([
+        this.t('coordinator.instructions.editNotPending'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    this.clearPendingInstructionsEdit(event);
+    return messageResponse([
+      this.t('coordinator.instructions.editCancelled'),
+    ], this.buildScopedSessionMeta(event));
+  }
+
+  renderInstructionsSavedLines({
+    action,
+    snapshot,
+    reconnectSummary,
+  }: {
+    action: 'saved' | 'cleared';
+    snapshot: CodexInstructionsSnapshot;
+    reconnectSummary: { refreshedCount: number; errors: string[] };
+  }): string[] {
+    const lines = [
+      action === 'saved'
+        ? this.t('coordinator.instructions.saved')
+        : this.t('coordinator.instructions.cleared'),
+      this.t('coordinator.instructions.path', { value: snapshot.path }),
+      ...(reconnectSummary.refreshedCount > 0
+        ? [this.t('coordinator.instructions.reconnected', { count: reconnectSummary.refreshedCount })]
+        : [this.t('coordinator.instructions.reconnectedNone')]),
+      ...(reconnectSummary.errors.length > 0
+        ? [this.t('coordinator.instructions.reconnectFailed', { error: reconnectSummary.errors[0] })]
+        : []),
+      this.t('coordinator.instructions.applyNextTurn'),
+    ];
     return lines;
   }
 
@@ -829,12 +992,14 @@ export class BridgeCoordinator {
     }
     const scopeRef = toScopeRef(event);
     const existing = this.bridgeSessions.resolveScopeSession(scopeRef);
+    const existingSettings = existing ? this.bridgeSessions.getSessionSettings(existing.id) : null;
     const providerProfileId = existing?.providerProfileId ?? this.resolveDefaultProviderProfileId();
     const nextSession = await this.bridgeSessions.createSessionForScope(scopeRef, {
       providerProfileId,
       cwd: args.join(' ').trim() || existing?.cwd || this.resolveEventCwd(event),
       initialSettings: {
         locale: this.resolveScopeLocale(scopeRef, event),
+        personality: existingSettings?.personality ?? null,
       },
       providerStartOptions: {
         sourcePlatform: event.platform,
@@ -1413,6 +1578,100 @@ export class BridgeCoordinator {
     return messageResponse([...messages, this.t('coordinator.permissions.nextTurn')], buildSessionMeta(session));
   }
 
+  async handlePersonalityCommand(event, args) {
+    const scopeRef = toScopeRef(event);
+    const session = this.bridgeSessions.resolveScopeSession(scopeRef);
+    if (!session) {
+      return messageResponse([
+        this.t('coordinator.personality.noSession'),
+        this.t('coordinator.personality.setupHint'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    if (args.length === 0) {
+      const settings = this.bridgeSessions.getSessionSettings(session.id);
+      return messageResponse([
+        this.t('coordinator.personality.current', {
+          value: formatPersonality(settings?.personality ?? null, this.currentI18n),
+        }),
+        this.t('coordinator.personality.usage'),
+        this.t('coordinator.personality.help'),
+      ], buildSessionMeta(session));
+    }
+    const activeResponse = await this.rejectIfActiveTurnForCommand(event, 'personality');
+    if (activeResponse) {
+      return activeResponse;
+    }
+    const value = normalizeCodexPersonalityArg(args[0] ?? null);
+    if (!value) {
+      return messageResponse([
+        this.t('coordinator.personality.usage'),
+        this.t('coordinator.personality.help'),
+      ], buildSessionMeta(session));
+    }
+    this.bridgeSessions.upsertSessionSettings(session.id, {
+      personality: value,
+    });
+    return messageResponse([
+      this.t('coordinator.personality.updated', {
+        value: formatPersonality(value, this.currentI18n),
+      }),
+      this.t('coordinator.permissions.nextTurn'),
+    ], buildSessionMeta(session));
+  }
+
+  async handleInstructionsCommand(event, args) {
+    const action = String(args[0] ?? '').trim().toLowerCase();
+    if (!action) {
+      return this.renderInstructionsStatus(event);
+    }
+    if (action === 'cancel') {
+      return this.cancelInstructionsEdit(event);
+    }
+    if (action === 'clear') {
+      if (this.activeTurns?.hasAnyActiveTurn?.()) {
+        return messageResponse([
+          this.t('coordinator.instructions.blocked'),
+        ], this.buildScopedSessionMeta(event));
+      }
+      try {
+        const snapshot = await this.codexInstructionsManager.clearInstructions();
+        this.clearPendingInstructionsEdit(event);
+        const reconnectSummary = await this.reconnectCodexBackedProfiles();
+        return messageResponse(this.renderInstructionsSavedLines({
+          action: 'cleared',
+          snapshot,
+          reconnectSummary,
+        }), this.buildScopedSessionMeta(event));
+      } catch (error) {
+        return messageResponse([
+          this.t('coordinator.instructions.failed', { error: formatUserError(error) }),
+        ], this.buildScopedSessionMeta(event));
+      }
+    }
+    if (action === 'edit') {
+      this.setPendingInstructionsEdit(event);
+      return messageResponse([
+        this.t('coordinator.instructions.editArmed'),
+        this.t('coordinator.instructions.editHint'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    if (action === 'set') {
+      const inlineContent = extractInstructionsInlineContent(event.text);
+      if (!inlineContent) {
+        this.setPendingInstructionsEdit(event);
+        return messageResponse([
+          this.t('coordinator.instructions.editArmed'),
+          this.t('coordinator.instructions.editHint'),
+        ], this.buildScopedSessionMeta(event));
+      }
+      return this.applyInstructionsContent(event, inlineContent);
+    }
+    return messageResponse([
+      this.t('coordinator.instructions.usage'),
+      this.t('coordinator.instructions.help'),
+    ], this.buildScopedSessionMeta(event));
+  }
+
   async handleFastCommand(event, args) {
     const normalizedArgs = args.map((arg) => String(arg ?? '').trim()).filter((arg) => arg.length > 0);
     if (normalizedArgs.length > 1) {
@@ -1619,10 +1878,13 @@ export class BridgeCoordinator {
     if (activeResponse) {
       return activeResponse;
     }
+    const current = this.bridgeSessions.resolveScopeSession(scopeRef);
+    const currentSettings = current ? this.bridgeSessions.getSessionSettings(current.id) : null;
     const switched = await this.bridgeSessions.switchScopeProvider(scopeRef, {
       nextProviderProfileId: profile.id,
       initialSettings: {
         locale: this.resolveScopeLocale(scopeRef, event),
+        personality: currentSettings?.personality ?? null,
       },
       providerStartOptions: {
         sourcePlatform: event.platform,
@@ -2771,6 +3033,8 @@ function renderCommandBlockedMessage(commandName, interruptRequested, i18n: Tran
     open: i18n.t('coordinator.action.open'),
     models: i18n.t('coordinator.action.models'),
     model: i18n.t('coordinator.action.model'),
+    personality: i18n.t('coordinator.action.personality'),
+    instructions: i18n.t('coordinator.action.instructions'),
     fast: i18n.t('coordinator.action.fast'),
     rename: i18n.t('coordinator.action.rename'),
     provider: i18n.t('coordinator.action.provider'),
@@ -3595,6 +3859,46 @@ function getCommandHelpSpecs(i18n: Translator) {
       i18n.t('coordinator.help.note.model'),
     ],
   }),
+  personality: freezeCommandHelp({
+    name: 'personality',
+    aliases: ['psn'],
+    summary: i18n.t('coordinator.help.summary.personality'),
+    usage: [
+      '/personality',
+      '/personality <friendly|pragmatic|none>',
+      '/personality -h',
+    ],
+    examples: [
+      '/personality',
+      '/personality pragmatic',
+      '/personality none',
+    ],
+    notes: [
+      i18n.t('coordinator.help.note.personality'),
+    ],
+  }),
+  instructions: freezeCommandHelp({
+    name: 'instructions',
+    aliases: ['ins'],
+    summary: i18n.t('coordinator.help.summary.instructions'),
+    usage: [
+      '/instructions',
+      '/instructions set <text>',
+      '/instructions edit',
+      '/instructions clear',
+      '/instructions cancel',
+      '/instructions -h',
+    ],
+    examples: [
+      '/instructions',
+      '/instructions set Always explain the tradeoffs before editing.',
+      '/instructions edit',
+      '/instructions clear',
+    ],
+    notes: [
+      i18n.t('coordinator.help.note.instructions'),
+    ],
+  }),
   fast: freezeCommandHelp({
     name: 'fast',
     aliases: [],
@@ -3861,6 +4165,8 @@ const COMMAND_HELP_ORDER = Object.freeze([
   'provider',
   'models',
   'model',
+  'personality',
+  'instructions',
   'fast',
   'threads',
   'search',
@@ -3893,6 +4199,8 @@ const COMMAND_ALIAS_DEFINITIONS = Object.freeze({
   provider: ['pd'],
   models: ['ms'],
   model: ['m'],
+  personality: ['psn'],
+  instructions: ['ins'],
   fast: [],
   threads: ['th'],
   search: ['se'],
@@ -4379,6 +4687,14 @@ function resolveAccessPreset(settings) {
   return normalizeAccessPreset(settings?.accessPreset) ?? 'default';
 }
 
+function normalizeCodexPersonalityArg(value) {
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (normalized === 'friendly' || normalized === 'pragmatic' || normalized === 'none') {
+    return normalized;
+  }
+  return null;
+}
+
 function normalizeServiceTier(value) {
   const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
   if (!normalized) {
@@ -4395,6 +4711,18 @@ function normalizeServiceTier(value) {
 
 function formatSpeedMode(serviceTier) {
   return normalizeServiceTier(serviceTier) === FAST_SERVICE_TIER ? 'fast' : 'normal';
+}
+
+function formatPersonality(value, i18n: Translator) {
+  const normalized = normalizeCodexPersonalityArg(value);
+  if (!normalized) {
+    return i18n.t('common.default');
+  }
+  return normalized;
+}
+
+function formatInstructionsStatus(hasInstructions: boolean, i18n: Translator) {
+  return hasInstructions ? i18n.t('common.enabled') : i18n.t('common.notSet');
 }
 
 function resolveAccessModeForPreset(preset) {
@@ -4432,6 +4760,19 @@ function formatAccessPreset(preset) {
   if (preset === 'read-only') return 'read-only';
   if (preset === 'full-access') return 'full-access';
   return 'default';
+}
+
+function buildInstructionsEditKey(event) {
+  return formatPlatformScopeKey(event.platform, event.externalScopeId);
+}
+
+function extractInstructionsInlineContent(text: string) {
+  const raw = String(text ?? '');
+  const match = raw.match(/^\/instructions\s+set(?:\s+|$)([\s\S]*)$/iu);
+  if (!match) {
+    return '';
+  }
+  return match[1] ?? '';
 }
 
 function renderPermissionsLines(settings, i18n: Translator) {

@@ -29,7 +29,7 @@ It borrows the most useful CLI help conventions while staying chat-friendly:
 - `/helps` shows the full command catalog
 - `/helps <command>` shows one command in detail
 - every slash command supports `-h`, `--help`, `-help`, and `-helps`
-- every slash command also supports a short alias such as `/h`, `/st`, `/us`, `/sp`, `/n`, `/up`, `/pd`, `/ms`, `/m`, `/th`, `/se`, `/nx`, `/pv`, `/o`, `/pk`, `/rn`, `/perm`, `/al`, `/dn`, `/rc`, `/rt`, and `/rs`
+- every slash command also supports a short alias such as `/h`, `/st`, `/us`, `/lg`, `/sp`, `/n`, `/up`, `/pd`, `/ms`, `/m`, `/psn`, `/ins`, `/th`, `/se`, `/nx`, `/pv`, `/o`, `/pk`, `/rn`, `/perm`, `/al`, `/dn`, `/rc`, `/rt`, and `/rs`
 - `/lang` and `/lang <zh|en>` to switch reply language for this scope (higher priority than env).
 - thread browsing is index-first on WeChat, so `/open 2` is preferred over copying raw thread ids
 
@@ -39,6 +39,9 @@ It borrows the most useful CLI help conventions while staying chat-friendly:
 /helps
 /h
 /st
+/login
+/lg
+/login list
 /stop
 /sp
 /provider
@@ -64,6 +67,10 @@ It borrows the most useful CLI help conventions while staying chat-friendly:
 /models
 /ms
 /lang zh
+/personality
+/psn pragmatic
+/instructions
+/instructions edit
 /permissions
 /perm
 /allow
@@ -101,6 +108,25 @@ Examples:
 /status
 /where
 /st
+```
+
+### `/login` and `/lg`
+
+Manage the host Codex login account pool.
+
+- `/login` starts or refreshes a pending device login flow
+- `/login list` shows the locally saved account pool
+- `/login <index>` switches the active host Codex login
+- `/login cancel` cancels the pending device login flow
+
+Examples:
+
+```text
+/login
+/lg
+/login list
+/login 1
+/login cancel
 ```
 
 ### `/stop` and `/sp`
@@ -165,6 +191,40 @@ Examples:
 /model high
 /model gpt-5.4 xhigh
 /model gpt-5.4
+```
+
+### `/personality [friendly|pragmatic|none]` and `/psn [friendly|pragmatic|none]`
+
+Show or update the personality used for future turns in the current scope.
+
+Examples:
+
+```text
+/personality
+/psn
+/personality pragmatic
+/psn none
+```
+
+### `/instructions` and `/ins`
+
+View or edit the global Codex custom instructions file backed by `AGENTS.md`.
+
+- `/instructions` shows the current file path and content status
+- `/instructions set <text>` replaces `AGENTS.md` inline
+- `/instructions edit` arms the next non-command message as the new file content
+- `/instructions clear` removes the current custom instructions
+- `/instructions cancel` exits pending edit mode
+
+Examples:
+
+```text
+/instructions
+/ins
+/instructions set Always explain the tradeoffs before editing.
+/instructions edit
+/instructions clear
+/instructions cancel
 ```
 
 ### `/fast`
@@ -410,7 +470,9 @@ For day-to-day use on WeChat:
 4. Use `/rename 1 <alias>` if you want a stable, readable name
 5. Use `/stop` if the current reply needs to be interrupted
 6. Use `/permissions` when you need to inspect or change the next-turn access preset
-7. Use `/allow` to approve and `/deny` to reject when Codex asks for approval during the current turn
-8. Use `/retry` after an interrupted turn; use `/reconnect` only when you want to refresh the session without rerunning the previous request
+7. Use `/personality` to keep the session tone aligned with how you want Codex to respond
+8. Use `/instructions` when you want to update your global custom instructions without leaving WeChat
+9. Use `/allow` to approve and `/deny` to reject when Codex asks for approval during the current turn
+10. Use `/retry` after an interrupted turn; use `/reconnect` only when you want to refresh the session without rerunning the previous request
 
 This workflow avoids copying raw thread ids and works well in a chat UI without buttons.

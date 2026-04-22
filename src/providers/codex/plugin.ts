@@ -158,10 +158,8 @@ export class CodexProviderPlugin {
     const modelInfo = await this.resolveModelInfo(providerProfile, client, sessionSettings?.model ?? null);
     const effort = this.resolveReasoningEffort(modelInfo, sessionSettings?.reasoningEffort ?? null);
     const turnInput = buildCodexTurnInput(event, inputText);
-    const developerInstructions = buildDeveloperInstructions({
-      baseInstructions: process.env.CODEXBRIDGE_CODEX_DEVELOPER_INSTRUCTIONS ?? '',
-      event,
-    });
+    const developerInstructions = buildDeveloperInstructions(event);
+    const personality = normalizeCodexPersonality(sessionSettings?.personality ?? null);
     const result = await client.startTurn({
       threadId: bridgeSession.codexThreadId,
       inputText: turnInput[0]?.type === 'text' ? turnInput[0].text : inputText,
@@ -170,6 +168,7 @@ export class CodexProviderPlugin {
       model: modelInfo?.model ?? null,
       effort,
       serviceTier: normalizeCodexServiceTier(sessionSettings?.serviceTier ?? null),
+      personality,
       approvalPolicy: sessionSettings?.approvalPolicy ?? 'on-request',
       sandboxMode: sessionSettings?.sandboxMode ?? 'workspace-write',
       collaborationMode: 'default',
@@ -396,14 +395,8 @@ function describeAttachment(attachment: InboundAttachment): string {
   }
 }
 
-function buildDeveloperInstructions({
-  baseInstructions,
-  event,
-}: {
-  baseInstructions: string;
-  event: InboundTextEvent;
-}): string {
-  const parts = [String(baseInstructions ?? '').trim()];
+function buildDeveloperInstructions(event: InboundTextEvent): string {
+  const parts: string[] = [];
   const artifactContext = resolveTurnArtifactContext(event);
   const artifactInstructions = buildTurnArtifactDeveloperInstructions(artifactContext);
   if (artifactInstructions) {
@@ -414,6 +407,14 @@ function buildDeveloperInstructions({
     parts.push(retryInstructions);
   }
   return parts.filter(Boolean).join('\n\n');
+}
+
+function normalizeCodexPersonality(value: unknown): 'friendly' | 'pragmatic' | 'none' | null {
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (normalized === 'friendly' || normalized === 'pragmatic' || normalized === 'none') {
+    return normalized;
+  }
+  return null;
 }
 
 function resolveTurnArtifactContext(event: InboundTextEvent): TurnArtifactContext | null {
