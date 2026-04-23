@@ -606,6 +606,10 @@ export class CodexAccountManager {
     if (!accessToken || !refreshToken || !identity) {
       return pool;
     }
+    const consolidation = consolidateAccountsForHostIdentity(pool, identity);
+    if (consolidation.changed) {
+      pool = consolidation.pool;
+    }
     const existing = findMatchingAccount(pool.accounts, identity.accountId, identity.email);
     const now = this.now();
     const observedAt = parseOptionalDateMs(authState?.tokens.lastRefresh) ?? now;
@@ -620,7 +624,7 @@ export class CodexAccountManager {
       addedAt: observedAt,
       lastUsedAt: null,
     };
-    let changed = false;
+    let changed = consolidation.changed;
     const nextLabel = normalizeString(account.label)
       ?? normalizeString(identity.email)
       ?? normalizeString(identity.name)
@@ -883,6 +887,77 @@ function findMatchingAccount(
     return accounts.find((account) => normalizeEmail(account.email) === normalizedEmail) ?? null;
   }
   return null;
+}
+
+function consolidateAccountsForHostIdentity(
+  pool: PersistedAccountPool,
+  identity: { email: string | null; accountId: string | null },
+): {
+  pool: PersistedAccountPool;
+  changed: boolean;
+} {
+  const normalizedEmail = normalizeEmail(identity.email);
+  if (!normalizedEmail) {
+    return { pool, changed: false };
+  }
+  const sameEmail = pool.accounts.filter((account) => normalizeEmail(account.email) === normalizedEmail);
+  if (sameEmail.length <= 1) {
+    return { pool, changed: false };
+  }
+  const normalizedAccountId = normalizeString(identity.accountId);
+  const matchedByAccountId = normalizedAccountId
+    ? sameEmail.find((account) => normalizeString(account.accountId) === normalizedAccountId) ?? null
+    : null;
+  const matchedByActive = sameEmail.find((account) => account.id === pool.activeAccountId) ?? null;
+  const fallback = [...sameEmail].sort(compareAccountsForRetention)[0] ?? null;
+  const primary = matchedByAccountId ?? matchedByActive ?? fallback;
+  if (!primary) {
+    return { pool, changed: false };
+  }
+  const duplicates = sameEmail.filter((account) => account.id !== primary.id);
+  if (duplicates.length === 0) {
+    return { pool, changed: false };
+  }
+  for (const duplicate of duplicates) {
+    primary.label = normalizeString(primary.label)
+      ?? normalizeString(duplicate.label)
+      ?? primary.label;
+    primary.email = normalizeString(primary.email)
+      ?? normalizeString(duplicate.email)
+      ?? primary.email;
+    primary.name = normalizeString(primary.name)
+      ?? normalizeString(duplicate.name)
+      ?? primary.name;
+    primary.accountId = normalizeString(primary.accountId)
+      ?? normalizeString(duplicate.accountId)
+      ?? primary.accountId;
+    primary.plan = normalizeString(primary.plan)
+      ?? normalizeString(duplicate.plan)
+      ?? primary.plan;
+    primary.addedAt = Math.min(primary.addedAt, duplicate.addedAt);
+    primary.lastUsedAt = Math.max(primary.lastUsedAt ?? 0, duplicate.lastUsedAt ?? 0) || null;
+  }
+  const duplicateIds = new Set(duplicates.map((account) => account.id));
+  pool.accounts = pool.accounts.filter((account) => !duplicateIds.has(account.id));
+  if (pool.activeAccountId && (pool.activeAccountId === primary.id || duplicateIds.has(pool.activeAccountId))) {
+    pool.activeAccountId = primary.id;
+  }
+  return {
+    pool,
+    changed: true,
+  };
+}
+
+function compareAccountsForRetention(left: PersistedAccount, right: PersistedAccount): number {
+  const leftLastUsed = left.lastUsedAt ?? 0;
+  const rightLastUsed = right.lastUsedAt ?? 0;
+  if (leftLastUsed !== rightLastUsed) {
+    return rightLastUsed - leftLastUsed;
+  }
+  if (left.addedAt !== right.addedAt) {
+    return right.addedAt - left.addedAt;
+  }
+  return left.id.localeCompare(right.id);
 }
 
 function credentialsNeedRefresh(credentials: CodexStoredCredentials, now: number): boolean {

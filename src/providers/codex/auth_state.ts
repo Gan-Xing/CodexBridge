@@ -125,7 +125,6 @@ export function extractCodexTokenIdentity({
       accessAuthClaims?.auth_provider,
     ),
     accountId: firstString(
-      accountId,
       idAuthClaims?.chatgpt_account_id,
       idAuthClaims?.account_id,
       idPayload?.chatgpt_account_id,
@@ -136,6 +135,7 @@ export function extractCodexTokenIdentity({
       accessPayload?.chatgpt_account_id,
       accessPayload?.account_id,
       accessPayload?.accountId,
+      accountId,
     ),
     plan: firstString(
       idAuthClaims?.chatgpt_plan_type,
@@ -219,7 +219,7 @@ function buildCodexAuthIdentity(
   const email = firstString(raw.email, tokenIdentity.email);
   const name = firstString(raw.name, tokenIdentity.name);
   const authMode = firstString(raw.auth_mode, tokenIdentity.authMode);
-  const accountId = firstString(raw.account_id, tokenIdentity.accountId);
+  const accountId = firstString(tokenIdentity.accountId, raw.account_id);
   const plan = firstString(raw.plan, tokenIdentity.plan);
   if (!email && !name && !authMode && !accountId && !plan) {
     return null;

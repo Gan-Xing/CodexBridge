@@ -420,6 +420,85 @@ test('CodexAccountManager absorbs an existing host auth.json into the local acco
   assert.ok(fs.existsSync(path.join(tempDir, 'manager', 'accounts.json')));
 });
 
+test('CodexAccountManager consolidates duplicate same-email accounts when host auth resolves to one canonical account id', async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-account-dedupe-'));
+  const managerRoot = path.join(tempDir, 'manager');
+  const authPath = path.join(tempDir, 'codex-home', 'auth.json');
+  const now = Date.parse('2026-04-23T08:00:00.000Z');
+  fs.mkdirSync(managerRoot, { recursive: true });
+  fs.writeFileSync(path.join(managerRoot, 'accounts.json'), `${JSON.stringify({
+    version: 1,
+    activeAccountId: 'acc-old-id',
+    pendingLogin: null,
+    accounts: [
+      {
+        id: 'acc-old-id',
+        label: 'old@example.com',
+        email: 'same@example.com',
+        name: 'Same User',
+        accountId: 'acc_raw',
+        plan: 'plus',
+        credentialStore: 'encrypted-file',
+        addedAt: now - 10_000,
+        lastUsedAt: now - 5_000,
+      },
+      {
+        id: 'acc-new-id',
+        label: 'same@example.com',
+        email: 'same@example.com',
+        name: 'Same User',
+        accountId: 'acc_token',
+        plan: 'plus',
+        credentialStore: 'encrypted-file',
+        addedAt: now - 2_000,
+        lastUsedAt: now - 1_000,
+      },
+    ],
+  }, null, 2)}\n`);
+
+  const idToken = makeJwt({
+    email: 'same@example.com',
+    name: 'Same User',
+    'https://api.openai.com/auth': {
+      chatgpt_account_id: 'acc_token',
+      chatgpt_plan_type: 'plus',
+    },
+  });
+  const accessToken = makeJwt({
+    email: 'same@example.com',
+    exp: Math.floor((now + 3_600_000) / 1000),
+    'https://api.openai.com/auth': {
+      chatgpt_account_id: 'acc_token',
+    },
+  });
+  await writeCodexAuthFile({
+    authPath,
+    accessToken,
+    refreshToken: 'refresh-same',
+    idToken,
+    accountId: 'acc_raw',
+    email: 'same@example.com',
+    now,
+  });
+
+  const manager = new CodexAccountManager({
+    rootDir: managerRoot,
+    authPath,
+    platform: 'darwin',
+    now: () => now,
+  });
+
+  const listing = await manager.listAccounts();
+  assert.equal(listing.accounts.length, 1);
+  assert.equal(listing.accounts[0]?.email, 'same@example.com');
+  assert.equal(listing.accounts[0]?.accountId, 'acc_token');
+  assert.equal(listing.accounts[0]?.isActive, true);
+
+  const persisted = JSON.parse(fs.readFileSync(path.join(managerRoot, 'accounts.json'), 'utf8'));
+  assert.equal(persisted.accounts.length, 1);
+  assert.equal(persisted.accounts[0]?.accountId, 'acc_token');
+});
+
 test('CodexAccountManager prefers secret-tool storage on Linux when it is available', async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-account-secret-tool-'));
   const authPath = path.join(tempDir, 'codex-home', 'auth.json');

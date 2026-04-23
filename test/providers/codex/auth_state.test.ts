@@ -58,3 +58,35 @@ test('readCodexAccountIdentity parses identity from auth.json token payloads', a
     authPath,
   });
 });
+
+test('readCodexAccountIdentity prefers chatgpt_account_id from tokens over raw auth.json account_id', async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-auth-state-priority-'));
+  const authPath = path.join(tempDir, 'auth.json');
+  const idToken = makeJwt({
+    email: 'priority@example.com',
+    'https://api.openai.com/auth': {
+      chatgpt_account_id: 'acc_token',
+      chatgpt_plan_type: 'plus',
+    },
+  });
+  const accessToken = makeJwt({
+    exp: Math.floor(Date.now() / 1000) + 3600,
+    'https://api.openai.com/auth': {
+      chatgpt_account_id: 'acc_token',
+    },
+  });
+
+  await writeCodexAuthFile({
+    authPath,
+    accessToken,
+    refreshToken: 'refresh-priority',
+    idToken,
+    accountId: 'acc_raw',
+    email: 'priority@example.com',
+    now: Date.parse('2026-04-23T00:00:00.000Z'),
+  });
+
+  const identity = readCodexAccountIdentity(authPath);
+  assert.equal(identity?.accountId, 'acc_token');
+  assert.equal(identity?.plan, 'plus');
+});
