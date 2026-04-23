@@ -810,18 +810,7 @@ export class WeixinBridgeRuntime {
     content: string;
   }): Promise<DeliveryResult> {
     const result = await this.platformPlugin.sendText({ externalScopeId, content });
-    const normalized = this.normalizeTextDeliveryResult(result, content);
-    debugRuntime('text_delivery_result', {
-      scopeId: externalScopeId,
-      success: normalized.success,
-      deliveredCount: normalized.deliveredCount,
-      deliveredText: truncateDebugText(normalized.deliveredText),
-      failedIndex: normalized.failedIndex,
-      failedText: truncateDebugText(normalized.failedText),
-      error: normalized.error || null,
-      errorCode: normalized.errorCode ?? null,
-    });
-    return normalized;
+    return this.normalizeTextDeliveryResult(result, content);
   }
 
   normalizeTextDeliveryResult(
@@ -847,18 +836,7 @@ export class WeixinBridgeRuntime {
     content: string;
   }): Promise<DeliveryResult> {
     const result = await this.platformPlugin.sendText({ externalScopeId, content });
-    const normalized = this.normalizeTextDeliveryResult(result, content);
-    debugRuntime('system_text_delivery_result', {
-      scopeId: externalScopeId,
-      success: normalized.success,
-      deliveredCount: normalized.deliveredCount,
-      deliveredText: truncateDebugText(normalized.deliveredText),
-      failedIndex: normalized.failedIndex,
-      failedText: truncateDebugText(normalized.failedText),
-      error: normalized.error || null,
-      errorCode: normalized.errorCode ?? null,
-    });
-    return normalized;
+    return this.normalizeTextDeliveryResult(result, content);
   }
 
   async sendMediaWithRetry({
