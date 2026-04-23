@@ -8,3 +8,6 @@ build/
 .next/
 coverage/
 .telegram-inbox/
+.codexbridge/
+reports/
+reference/
