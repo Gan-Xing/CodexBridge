@@ -101,6 +101,40 @@ test('finalizeTurnArtifacts rejects symlinked manifest files that escape the tur
   }
 });
 
+test('finalizeTurnArtifacts accepts manifest paths that contain raw Windows backslashes', () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-artifacts-'));
+  const artifactDir = path.join(tempDir, 'artifact-dir');
+  const spoolDir = path.join(tempDir, 'spool-dir');
+  const reportPath = path.join(artifactDir, 'summary.docx');
+  fs.mkdirSync(artifactDir, { recursive: true });
+  fs.mkdirSync(spoolDir, { recursive: true });
+  fs.writeFileSync(reportPath, 'word-output');
+
+  try {
+    const manifestPath = reportPath.replace(/\//g, '\\');
+    const result = finalizeTurnArtifacts({
+      result: {
+        outputText: `已完成。\n\n\`\`\`codexbridge-artifacts\n[{"path":"${manifestPath}","kind":"file","displayName":"summary.docx"}]\n\`\`\``,
+      },
+      context: makeContext({
+        artifactDir,
+        spoolDir,
+        requestedFormat: 'docx',
+        requestedExtension: '.docx',
+        requestedFileName: 'summary.docx',
+      }),
+    });
+
+    assert.equal(result.outputText, '已完成。');
+    assert.equal(result.outputArtifacts?.length, 1);
+    assert.equal(result.outputArtifacts?.[0]?.displayName, 'summary.docx');
+    assert.equal(result.artifactDelivery?.stage, 'ready');
+    assert.equal(result.artifactDelivery?.noticeCode, null);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test('finalizeTurnArtifacts reports ambiguous fallback candidates instead of sending multiple files blindly', () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-artifacts-'));
   const artifactDir = path.join(tempDir, 'artifact-dir');

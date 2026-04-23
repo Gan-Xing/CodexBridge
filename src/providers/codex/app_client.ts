@@ -172,6 +172,10 @@ export class CodexAppClient extends EventEmitter {
 
   startPromise: Promise<void> | null;
 
+  childStartError: Error | null;
+
+  childStderrTail: string[];
+
   constructor({
     codexCliBin,
     launchCommand = null,
@@ -215,6 +219,8 @@ export class CodexAppClient extends EventEmitter {
     this.port = null;
     this.connected = false;
     this.startPromise = null;
+    this.childStartError = null;
+    this.childStderrTail = [];
   }
 
   logDebug(event: string, payload: unknown = null): void {
@@ -250,15 +256,11 @@ export class CodexAppClient extends EventEmitter {
     this.connected = false;
     this.socket?.close();
     this.socket = null;
+    this.childStartError = null;
+    this.childStderrTail = [];
     const child = this.child;
     if (child && child.exitCode === null) {
-      child.kill('SIGTERM');
-      await waitForChildExit(child, 5000).catch(() => {
-        if (child.exitCode === null) {
-          child.kill('SIGKILL');
-        }
-        return waitForChildExit(child, 2000).catch(() => {});
-      });
+      await terminateChildProcess(child, this.platform).catch(() => {});
     }
     this.child = null;
     this.pendingApprovals.clear();
@@ -546,20 +548,54 @@ export class CodexAppClient extends EventEmitter {
       });
       launcher.unref?.();
     }
+    this.childStartError = null;
+    this.childStderrTail = [];
     this.port = await reservePort();
     const featureArgs = this.enabledFeatures.flatMap((feature) => ['--enable', feature]);
-    this.child = this.spawnImpl(this.codexCliBin, ['app-server', ...featureArgs, '--listen', `ws://127.0.0.1:${this.port}`], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    this.logDebug('app_server_spawned', {
+    const launchSpec = createCodexAppServerLaunchSpec({
       command: this.codexCliBin,
+      args: ['app-server', ...featureArgs, '--listen', `ws://127.0.0.1:${this.port}`],
+      platform: this.platform,
+    });
+    try {
+      this.child = launchSpec.args
+        ? this.spawnImpl(launchSpec.command, launchSpec.args, {
+          stdio: ['ignore', 'pipe', 'pipe'],
+          ...launchSpec.options,
+        })
+        : this.spawnImpl(launchSpec.command, {
+          stdio: ['ignore', 'pipe', 'pipe'],
+          ...launchSpec.options,
+        });
+    } catch (error) {
+      throw createCodexLaunchError({
+        command: launchSpec.displayCommand,
+        error,
+        platform: this.platform,
+      });
+    }
+    this.logDebug('app_server_spawned', {
+      command: launchSpec.displayCommand,
+      spawnCommand: launchSpec.command,
+      spawnArgs: launchSpec.args,
       port: this.port,
       enabledFeatures: this.enabledFeatures,
       autolaunch: this.autolaunch,
       launchCommand: this.launchCommand,
     });
     this.child.stderr?.on('data', (chunk) => {
-      this.logger.debug?.(`[codex-app] codex.stderr ${String(chunk).trim()}`);
+      const text = String(chunk).trim();
+      if (text) {
+        rememberCodexStderrLine(this.childStderrTail, text);
+        this.logger.debug?.(`[codex-app] codex.stderr ${text}`);
+      }
+    });
+    this.child.on('error', (error) => {
+      this.childStartError = createCodexLaunchError({
+        command: launchSpec.displayCommand,
+        error,
+        platform: this.platform,
+      });
     });
     this.child.on('exit', () => {
       this.connected = false;
@@ -573,6 +609,16 @@ export class CodexAppClient extends EventEmitter {
     const url = `ws://127.0.0.1:${this.port}`;
     const started = Date.now();
     while (Date.now() - started < 10_000) {
+      if (this.childStartError) {
+        throw this.childStartError;
+      }
+      if (this.child && this.child.exitCode !== null && !this.connected) {
+        throw createCodexAppServerExitedError({
+          command: this.codexCliBin,
+          exitCode: this.child.exitCode,
+          stderrTail: this.childStderrTail,
+        });
+      }
       try {
         await new Promise<void>((resolve, reject) => {
           const ws = this.webSocketFactory(url);
@@ -597,7 +643,14 @@ export class CodexAppClient extends EventEmitter {
         await sleep(250);
       }
     }
-    throw new Error(`Timed out connecting to ${url}`);
+    if (this.childStartError) {
+      throw this.childStartError;
+    }
+    throw createCodexConnectTimeoutError({
+      command: this.codexCliBin,
+      url,
+      stderrTail: this.childStderrTail,
+    });
   }
 
   async initialize(): Promise<void> {
@@ -2207,7 +2260,8 @@ function isTurnTerminal(status) {
 function isThreadMaterializationPendingError(error) {
   const message = error instanceof Error ? error.message : String(error);
   return /not materialized yet/i.test(message)
-    || /includeTurns is unavailable before first user message/i.test(message);
+    || /includeTurns is unavailable before first user message/i.test(message)
+    || /empty session file/i.test(message);
 }
 
 function isRequestTimeoutError(error) {
@@ -2889,6 +2943,112 @@ function extractTextCandidate(value) {
   return null;
 }
 
+function rememberCodexStderrLine(stderrTail: string[], text: string): void {
+  stderrTail.push(text);
+  while (stderrTail.length > 10) {
+    stderrTail.shift();
+  }
+}
+
+function createCodexAppServerLaunchSpec({
+  command,
+  args,
+  platform,
+}: {
+  command: string;
+  args: string[];
+  platform: NodeJS.Platform;
+}): {
+  command: string;
+  args?: string[] | null;
+  options?: Record<string, unknown>;
+  displayCommand: string;
+} {
+  if (platform === 'win32' && /\.(cmd|bat)$/iu.test(command)) {
+    return {
+      command: buildWindowsShellCommandLine([command, ...args]),
+      args: null,
+      options: {
+        shell: true,
+        windowsHide: true,
+      },
+      displayCommand: command,
+    };
+  }
+  return {
+    command,
+    args,
+    displayCommand: command,
+  };
+}
+
+function createCodexLaunchError({
+  command,
+  error,
+  platform,
+}: {
+  command: string;
+  error: unknown;
+  platform: NodeJS.Platform;
+}): Error {
+  const code = typeof error === 'object' && error && 'code' in error
+    ? String((error as { code?: unknown }).code ?? '')
+    : '';
+  const message = error instanceof Error ? error.message : String(error ?? 'Unknown error');
+  if (code === 'ENOENT' || /spawn .* ENOENT/i.test(message)) {
+    const windowsHint = platform === 'win32'
+      ? ' Ensure the Codex CLI is installed and reachable on PATH, or set CODEX_REAL_BIN to the full path of codex.exe or codex.cmd.'
+      : ' Ensure the Codex CLI is installed and reachable on PATH.';
+    return new Error(`Failed to launch Codex app-server with "${command}": command not found.${windowsHint}`);
+  }
+  return new Error(`Failed to launch Codex app-server with "${command}": ${message}`);
+}
+
+function createCodexAppServerExitedError({
+  command,
+  exitCode,
+  stderrTail,
+}: {
+  command: string;
+  exitCode: number;
+  stderrTail: string[];
+}): Error {
+  const detail = stderrTail.length > 0
+    ? ` Last stderr: ${stderrTail.join(' | ')}`
+    : '';
+  return new Error(`Codex app-server exited before opening its WebSocket (command: "${command}", exit code: ${exitCode}).${detail}`);
+}
+
+function createCodexConnectTimeoutError({
+  command,
+  url,
+  stderrTail,
+}: {
+  command: string;
+  url: string;
+  stderrTail: string[];
+}): Error {
+  const detail = stderrTail.length > 0
+    ? ` Last stderr: ${stderrTail.join(' | ')}`
+    : '';
+  return new Error(`Timed out connecting to ${url} after launching "${command}".${detail}`);
+}
+
+function buildWindowsShellCommandLine(parts: string[]): string {
+  return parts.map(quoteWindowsShellArgument).join(' ');
+}
+
+function quoteWindowsShellArgument(value: string): string {
+  const normalized = String(value ?? '');
+  if (!normalized) {
+    return '""';
+  }
+  if (!/[\s"]/u.test(normalized)) {
+    return normalized;
+  }
+  return `"${normalized.replace(/"/g, '""')}"`;
+}
+
 async function reservePort(): Promise<number> {
   return new Promise<number>((resolve, reject) => {
     const server = net.createServer();
@@ -2930,6 +3090,35 @@ function waitForChildExit(child: ChildProcess | null, timeoutMs: number): Promis
       child.off('exit', onExit);
     };
     child.on('exit', onExit);
+  });
+}
+
+async function terminateChildProcess(child: ChildProcess, platform: NodeJS.Platform): Promise<void> {
+  if (platform === 'win32' && typeof child.pid === 'number') {
+    await terminateWindowsProcessTree(child.pid);
+    return;
+  }
+  child.kill('SIGTERM');
+  await waitForChildExit(child, 5000).catch(() => {
+    if (child.exitCode === null) {
+      child.kill('SIGKILL');
+    }
+    return waitForChildExit(child, 2000).catch(() => {});
+  });
+}
+
+function terminateWindowsProcessTree(pid: number): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const killer = spawn('taskkill', ['/pid', String(pid), '/t', '/f'], {
+      windowsHide: true,
+      stdio: 'ignore',
+    });
+    killer.on('error', () => {
+      resolve();
+    });
+    killer.on('exit', () => {
+      resolve();
+    });
   });
 }
 

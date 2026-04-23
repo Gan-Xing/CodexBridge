@@ -20,7 +20,7 @@ test('resolveCodexAuthPath respects CODEX_HOME', () => {
     CODEX_HOME: '/tmp/codex-home-test',
   } as NodeJS.ProcessEnv);
 
-  assert.equal(result, '/tmp/codex-home-test/auth.json');
+  assert.equal(result, path.join(path.resolve('/tmp/codex-home-test'), 'auth.json'));
 });
 
 test('readCodexAccountIdentity parses identity from auth.json token payloads', async () => {

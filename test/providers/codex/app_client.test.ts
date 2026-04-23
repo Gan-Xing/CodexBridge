@@ -222,6 +222,74 @@ test('CodexAppClient startServer enables image generation when spawning app-serv
   assert.match(String(calls[0]?.args?.[4]), /^ws:\/\/127\.0\.0\.1:\d+$/);
 });
 
+test('CodexAppClient startServer wraps Windows cmd launchers through cmd.exe', async () => {
+  const calls = [];
+  const child = new EventEmitter() as EventEmitter & {
+    stderr: EventEmitter;
+    exitCode: number | null;
+  };
+  child.stderr = new EventEmitter();
+  child.exitCode = 0;
+
+  const client = new CodexAppClient({
+    codexCliBin: 'C:\\Program Files\\Codex\\codex.cmd',
+    platform: 'win32',
+    spawnImpl: ((command, argsOrOptions, maybeOptions) => {
+      calls.push({
+        command,
+        args: Array.isArray(argsOrOptions) ? argsOrOptions : null,
+        options: Array.isArray(argsOrOptions) ? maybeOptions : argsOrOptions,
+      });
+      return child as any;
+    }) as any,
+  });
+
+  client.connectWebSocket = async () => {
+    client.connected = true;
+  };
+  client.initialize = async () => {};
+
+  await client.startServer();
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.args, null);
+  assert.equal(calls[0]?.options?.shell, true);
+  assert.equal(calls[0]?.options?.windowsHide, true);
+  assert.match(String(calls[0]?.command), /^"C:\\Program Files\\Codex\\codex\.cmd" app-server --enable image_generation --listen ws:\/\/127\.0\.0\.1:\d+$/);
+});
+
+test('CodexAppClient startServer surfaces a helpful Windows Codex ENOENT error', async () => {
+  const child = new EventEmitter() as EventEmitter & {
+    stderr: EventEmitter;
+    exitCode: number | null;
+  };
+  child.stderr = new EventEmitter();
+  child.exitCode = null;
+
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+    platform: 'win32',
+    spawnImpl: (() => {
+      setImmediate(() => {
+        const error = Object.assign(new Error('spawn codex ENOENT'), { code: 'ENOENT' });
+        child.emit('error', error);
+      });
+      return child as any;
+    }) as any,
+  });
+
+  client.connectWebSocket = async () => {
+    await new Promise((resolve) => setImmediate(resolve));
+    throw client.childStartError ?? new Error('missing child start error');
+  };
+  client.initialize = async () => {};
+
+  await assert.rejects(
+    client.startServer(),
+    /Failed to launch Codex app-server with "codex": command not found\..*CODEX_REAL_BIN.*codex\.exe/u,
+  );
+});
+
 test('CodexAppClient stores command approval requests emitted by the app-server', async () => {
   const client = new CodexAppClient({
     codexCliBin: 'codex',
@@ -932,6 +1000,52 @@ test('CodexAppClient waits through thread materialization errors before reading 
       readCount += 1;
       if (readCount === 1) {
         throw new Error('thread thread-1 is not materialized yet; includeTurns is unavailable before first user message');
+      }
+      return {
+        thread: {
+          id: 'thread-1',
+          name: 'Thread 1',
+          turns: [{
+            id: 'turn-1',
+            status: 'completed',
+            items: [{
+              type: 'assistant_message',
+              text: 'done',
+            }],
+          }],
+        },
+      };
+    }
+    return {};
+  };
+
+  const result = await client.startTurn({
+    threadId: 'thread-1',
+    inputText: 'hello',
+    model: 'gpt-5.4',
+    effort: null,
+    collaborationMode: 'default',
+    timeoutMs: 2500,
+  });
+
+  assert.equal(result.outputText, 'done');
+  assert.equal(readCount, 2);
+});
+
+test('CodexAppClient waits through transient empty session file errors before reading turn output', async () => {
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+  });
+
+  let readCount = 0;
+  client.request = async (method) => {
+    if (method === 'turn/start') {
+      return { turn: { id: 'turn-1' } };
+    }
+    if (method === 'thread/read') {
+      readCount += 1;
+      if (readCount === 1) {
+        throw new Error('failed to load rollout `rollout.jsonl` for thread thread-1: empty session file');
       }
       return {
         thread: {

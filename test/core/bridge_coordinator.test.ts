@@ -554,7 +554,7 @@ test('bridge coordinator strips hidden artifact manifests and returns declared f
     fs.mkdirSync(path.dirname(declaredPath), { recursive: true });
     fs.writeFileSync(declaredPath, 'word-output');
     return {
-      outputText: `已整理成 Word 文档。\n\n\`\`\`codexbridge-artifacts\n[{"path":"${declaredPath}","kind":"file","displayName":"summary.docx","caption":"Word 文档"}]\n\`\`\``,
+      outputText: `已整理成 Word 文档。\n\n\`\`\`codexbridge-artifacts\n[{"path":${JSON.stringify(declaredPath)},"kind":"file","displayName":"summary.docx","caption":"Word 文档"}]\n\`\`\``,
       turnId,
       threadId: bridgeSession.codexThreadId,
       title: bridgeSession.title,
@@ -591,7 +591,7 @@ test('bridge coordinator recognizes "md 文件" requests and returns the markdow
     fs.mkdirSync(path.dirname(declaredPath), { recursive: true });
     fs.writeFileSync(declaredPath, '# Markdown Summary');
     return {
-      outputText: `Markdown 已整理完成。\n\n\`\`\`codexbridge-artifacts\n[{"path":"${declaredPath}","kind":"file","displayName":"response.md","caption":"Markdown 文件"}]\n\`\`\``,
+      outputText: `Markdown 已整理完成。\n\n\`\`\`codexbridge-artifacts\n[{"path":${JSON.stringify(declaredPath)},"kind":"file","displayName":"response.md","caption":"Markdown 文件"}]\n\`\`\``,
       turnId,
       threadId: bridgeSession.codexThreadId,
       title: bridgeSession.title,
@@ -628,7 +628,7 @@ test('bridge coordinator clarification flow turns "把文件直接发送给我" 
     fs.mkdirSync(path.dirname(declaredPath), { recursive: true });
     fs.writeFileSync(declaredPath, '# Clarified Markdown');
     return {
-      outputText: `已作为 \`.md\` 附件返回。\n\n\`\`\`codexbridge-artifacts\n[{"path":"${declaredPath}","kind":"file","displayName":"deliverable.md","caption":"final deliverable"}]\n\`\`\``,
+      outputText: `已作为 \`.md\` 附件返回。\n\n\`\`\`codexbridge-artifacts\n[{"path":${JSON.stringify(declaredPath)},"kind":"file","displayName":"deliverable.md","caption":"final deliverable"}]\n\`\`\``,
       turnId,
       threadId: bridgeSession.codexThreadId,
       title: bridgeSession.title,
@@ -1011,7 +1011,7 @@ test('/status details includes the last artifact delivery status for the current
     fs.mkdirSync(artifactDir, { recursive: true });
     fs.writeFileSync(declaredPath, 'word-output');
     return {
-      outputText: `已整理成 Word 文档。\n\n\`\`\`codexbridge-artifacts\n[{"path":"${declaredPath}","kind":"file","displayName":"summary.docx"}]\n\`\`\``,
+      outputText: `已整理成 Word 文档。\n\n\`\`\`codexbridge-artifacts\n[{"path":${JSON.stringify(declaredPath)},"kind":"file","displayName":"summary.docx"}]\n\`\`\``,
       turnId,
       threadId: bridgeSession.codexThreadId,
       title: bridgeSession.title,
@@ -1033,7 +1033,7 @@ test('/status details includes the last artifact delivery status for the current
   const lines = result.messages.map((message) => message.text ?? '');
   assert.ok(lines.some((line) => /附件交付：已选定附件/.test(line)));
   assert.ok(lines.some((line) => /请求格式：docx/.test(line)));
-  assert.ok(lines.some((line) => /附件结果：已选 1，拒绝 0/.test(line)));
+  assert.ok(lines.some((line) => /附件结果：已选 1，拒绝 0(?:，候选 \d+)?/.test(line)));
   assert.ok(lines.some((line) => /产物目录：/.test(line)));
   assert.ok(lines.some((line) => /暂存目录：/.test(line)));
 });
@@ -1923,7 +1923,7 @@ test('/uploads stages files, exposes status, and waits for text before starting 
   const statusText = status.messages.map((message) => message.text ?? '').join('\n');
   assert.match(statusText, /上传暂存 \| 1 个文件/);
   assert.match(statusText, /diagram\.png/);
-  assert.match(statusText, /\.codexbridge\/uploads\//);
+  assert.match(statusText, /\.codexbridge[\\/]uploads[\\/]/);
 });
 
 test('/uploads submits staged files together with the next text prompt and clears staged state', async () => {
@@ -1960,7 +1960,7 @@ test('/uploads submits staged files together with the next text prompt and clear
   assert.equal(openai.startTurnCalls.length, 1);
   assert.equal(openai.startTurnCalls[0]?.inputText, '请根据资料总结重点');
   assert.equal(openai.startTurnCalls[0]?.event?.attachments?.length, 1);
-  assert.match(openai.startTurnCalls[0]?.event?.attachments?.[0]?.localPath ?? '', /\.codexbridge\/uploads\//);
+  assert.match(openai.startTurnCalls[0]?.event?.attachments?.[0]?.localPath ?? '', /\.codexbridge[\\/]uploads[\\/]/);
 
   const session = runtime.services.bridgeSessions.resolveScopeSession({
     platform: 'weixin',

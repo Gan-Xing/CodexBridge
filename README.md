@@ -153,9 +153,122 @@ See the full command reference in [docs/usage/weixin-slash-commands.md](./docs/u
 ## Validation
 
 ```bash
+npm install
 npm run typecheck
 npm test
 ```
+
+The validation suite is expected to pass on both Linux and Windows.
+
+## Deployment Quick Start
+
+### Common Prerequisites
+
+- Node.js `>= 24`
+- `npm`
+- A working Codex CLI login on the host
+
+Recommended first check after cloning:
+
+```bash
+npm install
+npm run typecheck
+npm test
+codex --version
+```
+
+If the Codex CLI is not installed yet, install it first:
+
+```bash
+npm install -g @openai/codex@latest --include=optional
+codex --version
+```
+
+If `codex --version` still fails, fix that before attempting `weixin:login` or `weixin:serve`.
+
+### Linux
+
+```bash
+npm install
+npm run typecheck
+npm test
+codex --version
+npm run weixin:login
+npm run weixin:serve -- --cwd /absolute/path/to/workspace
+```
+
+For long-running deployment, prefer the service-manager flow described below instead of leaving a terminal window open.
+
+### Windows (First-Time Bring-Up)
+
+Open PowerShell in the repo root and run:
+
+```powershell
+npm install
+npm run typecheck
+npm test
+codex --version
+where codex
+npm run weixin:login
+npm run weixin:serve -- --cwd C:\absolute\path\to\workspace
+```
+
+If the host has multiple Codex shims on `PATH`, set the real native binary explicitly before starting the bridge:
+
+```powershell
+$env:CODEX_REAL_BIN = (Get-Command codex.exe).Source
+npm run weixin:serve -- --cwd C:\absolute\path\to\workspace
+```
+
+Useful optional debug flag:
+
+```powershell
+$env:CODEXBRIDGE_DEBUG_WEIXIN = '1'
+```
+
+### What Was Hardened After the First Windows Deployment
+
+The first Windows bring-up exposed four platform-specific issues:
+
+1. Command discovery:
+   the provider config originally assumed a Unix-style command lookup. The loader now resolves Windows executables directly and prefers a native `codex.exe` / `.com` binary over wrapper scripts when both exist.
+2. Windows launch wrappers:
+   if the host only exposes `codex.cmd` or `codex.bat`, the bridge now launches that wrapper through a Windows shell command line instead of failing during `spawn(...)`.
+3. Startup diagnostics:
+   if Codex cannot be launched, the bridge now fails with a direct `CODEX_REAL_BIN` / `codex.exe` / `codex.cmd` hint instead of leaving only a raw `spawn codex ENOENT`.
+4. Thread materialization:
+   transient `empty session file` reads from Codex session storage are now retried automatically instead of being treated as fatal turn failures.
+
+### Runtime Defaults
+
+- State directory: `~/.codexbridge`
+- WeChat account files: `~/.codexbridge/weixin/accounts/`
+- Serve lock file: `~/.codexbridge/runtime/weixin-serve.lock`
+- Default Codex auth path: `~/.codex/auth.json`
+- Default Codex instructions path: `~/.codex/AGENTS.md`
+
+### WeChat Runtime Checklist
+
+Binding the WeChat account is only the login step. Replies require the serve loop to stay alive.
+
+Standard order:
+
+1. `npm run weixin:login`
+2. confirm the account file exists under `~/.codexbridge/weixin/accounts/`
+3. start `npm run weixin:serve`
+4. send `/h` or `/status` from WeChat as a smoke test
+5. keep the process running, or install the platform service manager below
+
+### Troubleshooting
+
+- No reply after WeChat binding:
+  confirm `weixin:serve` is still running. The QR login does not start a background worker by itself.
+- `spawn codex ENOENT` or the bridge cannot start Codex:
+  run `codex --version`. On Windows, set `CODEX_REAL_BIN` to the full path of `codex.exe` or `codex.cmd` if needed.
+- Turn starts but no final reply is delivered:
+  inspect debug logs with `CODEXBRIDGE_DEBUG_WEIXIN=1`. Transient `empty session file` reads are retried automatically in current builds.
+- Need to inspect runtime state:
+  account state is stored under `~/.codexbridge/weixin/accounts/`, and the current serve lock is stored under `~/.codexbridge/runtime/weixin-serve.lock`.
 
 ## Media Tooling
 
@@ -209,7 +322,17 @@ The locale currently affects:
 - CLI login / serve prompts
 - bridge restart completion notifications
 
-## systemd User Service
+## Background Service
+
+The bridge loop is `weixin:serve`. For unattended use, register it with the host service manager so it starts on login/boot and restarts after crashes.
+
+Important limits:
+
+- A service manager keeps CodeXBridge alive while the computer is powered on and the OS is running.
+- It cannot receive messages while the host is powered off, asleep, or disconnected from the network.
+- On desktop operating systems, user-level services depend on the user's login/session model. Linux `linger` and macOS `launchd` can run without an open terminal; Windows Task Scheduler below runs after user logon.
+
+### Linux systemd User Service
 
 Install and start the user service on Linux:
 
@@ -226,6 +349,12 @@ bash ./scripts/service/logs-systemd-user.sh
 bash ./scripts/service/logs-systemd-user.sh --follow
 ```
 
+The installer uses `Restart=always` and attempts to enable `loginctl linger` so the user service can continue after logout. If linger cannot be enabled automatically, run:
+
+```bash
+loginctl enable-linger "$USER"
+```
+
 The installer writes a per-user environment file to:
 
 ```text
@@ -239,7 +368,73 @@ That file is the stable place to adjust:
 - optional proxy profile keys such as `CODEX_PROVIDER_*`
 - `CODEXBRIDGE_DEBUG_WEIXIN`
 
-Optional flags:
+### Windows Scheduled Task
+
+Install and start a hidden per-user scheduled task:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\service\install-windows-task.ps1
+```
+
+Useful follow-up commands:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\service\status-windows-task.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\service\restart-windows-task.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\service\logs-windows-task.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\service\logs-windows-task.ps1 -Follow
+```
+
+The installer writes the environment file to:
+
+```text
+%APPDATA%\codexbridge\weixin.service.env
+```
+
+Logs are written under:
+
+```text
+%USERPROFILE%\.codexbridge\logs\
+```
+
+If you need the task to start at machine startup instead of user logon, pass `-AtStartup`. That mode may require elevated privileges and a user environment that can still access the Codex auth files.
+
+### macOS launchd User Service
+
+Install and start the launch agent:
+
+```bash
+bash ./scripts/service/install-launchd-user.sh
+```
+
+Useful follow-up commands:
+
+```bash
+bash ./scripts/service/status-launchd-user.sh
+bash ./scripts/service/restart-launchd-user.sh
+bash ./scripts/service/logs-launchd-user.sh
+bash ./scripts/service/logs-launchd-user.sh --follow
+```
+
+The installer writes:
+
+```text
+~/Library/LaunchAgents/com.ganxing.codexbridge-weixin.plist
+~/.config/codexbridge/weixin.service.env
+~/.codexbridge/logs/
+```
+
+### Service Runner
+
+Windows and macOS use `scripts/service/run-weixin-service.mjs` as a small supervisor. It loads the service env file, starts:
+
+```bash
+node --import tsx src/cli.ts weixin serve
+```
+
+and restarts it after unexpected exit. Linux relies on systemd's native `Restart=always`.
+
+Useful environment/config values:
 
 - `--base-url`
 - `--cwd`

@@ -352,16 +352,14 @@ function extractDeclaredArtifactsFromText(text: string): ExtractedDeclaredArtifa
     if (!payload) {
       continue;
     }
-    try {
-      const parsed = JSON.parse(payload);
-      if (Array.isArray(parsed)) {
-        for (const entry of parsed) {
-          if (entry && typeof entry === 'object') {
-            entries.push(entry as DeclaredArtifactManifestEntry);
-          }
+    const parsed = parseDeclaredArtifactManifest(payload);
+    if (Array.isArray(parsed)) {
+      for (const entry of parsed) {
+        if (entry && typeof entry === 'object') {
+          entries.push(entry as DeclaredArtifactManifestEntry);
         }
       }
-    } catch {
+    } else {
       invalidManifestCount += 1;
     }
   }
@@ -370,6 +368,79 @@ function extractDeclaredArtifactsFromText(text: string): ExtractedDeclaredArtifa
     entries,
     invalidManifestCount,
   };
+}
+
+function parseDeclaredArtifactManifest(payload: string): unknown[] | null {
+  const normalizedPathPayload = escapeBareBackslashesInPathFields(payload);
+  const relaxedPayload = escapeInvalidJsonBackslashes(normalizedPathPayload);
+  for (const candidate of unique([normalizedPathPayload, payload, relaxedPayload])) {
+    try {
+      const parsed = JSON.parse(candidate);
+      return Array.isArray(parsed) ? parsed : null;
+    } catch {}
+  }
+  return null;
+}
+
+function escapeBareBackslashesInPathFields(value: string): string {
+  return String(value ?? '').replace(
+    /("path"\s*:\s*")((?:[^"\\]|\\.)*)(")/giu,
+    (_match, prefix: string, rawPath: string, suffix: string) => {
+      const normalizedPath = rawPath.replace(/(?<!\\)\\(?!\\)/gu, '\\\\');
+      return `${prefix}${normalizedPath}${suffix}`;
+    },
+  );
+}
+
+function escapeInvalidJsonBackslashes(value: string): string {
+  let normalized = '';
+  let inString = false;
+  let escaped = false;
+  let changed = false;
+  for (const character of String(value ?? '')) {
+    if (!inString) {
+      normalized += character;
+      if (character === '"') {
+        inString = true;
+      }
+      continue;
+    }
+    if (escaped) {
+      if (isValidJsonEscapeCharacter(character)) {
+        normalized += character;
+      } else {
+        normalized += `\\${character}`;
+        changed = true;
+      }
+      escaped = false;
+      continue;
+    }
+    normalized += character;
+    if (character === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (character === '"') {
+      inString = false;
+    }
+  }
+  if (escaped) {
+    normalized += '\\';
+    changed = true;
+  }
+  return changed ? normalized : value;
+}
+
+function isValidJsonEscapeCharacter(character: string): boolean {
+  return character === '"'
+    || character === '\\'
+    || character === '/'
+    || character === 'b'
+    || character === 'f'
+    || character === 'n'
+    || character === 'r'
+    || character === 't'
+    || character === 'u';
 }
 
 function materializeDeclaredArtifacts(
@@ -1064,6 +1135,10 @@ function firstNonEmpty(...values: Array<string | null | undefined>): string {
     }
   }
   return '';
+}
+
+function unique<T>(values: T[]): T[] {
+  return [...new Set(values)];
 }
 
 function emptyIntent(): TurnArtifactIntent {
