@@ -847,7 +847,7 @@ test('bridge coordinator resumes the same scope session when the bound thread is
   assert.equal(openai.startTurnCalls.length, 3);
 });
 
-test('bridge coordinator keeps the same binding even when stale thread resume fails', async () => {
+test('bridge coordinator auto-rebinds to a new session when stale thread resume fails', async () => {
   const { runtime, openai } = makeRuntime();
   const original = await runtime.services.bridgeCoordinator.handleInboundEvent({
     platform: 'weixin',
@@ -866,15 +866,15 @@ test('bridge coordinator keeps the same binding even when stale thread resume fa
     text: 'hello again',
   });
 
-  assert.equal(result.messages[0]?.text ?? '', '');
-  assert.equal(result.meta?.codexTurn?.outputState, 'stale_session');
+  assert.match(result.messages[0]?.text ?? '', /openai: hello again/);
+  assert.equal(openai.startThreadCalls.length, 2);
 
   const rebound = runtime.services.bridgeSessions.resolveScopeSession({
     platform: 'weixin',
     externalScopeId: 'wx-user-1',
   });
-  assert.equal(rebound?.id, original.session?.bridgeSessionId);
-  assert.equal(rebound?.codexThreadId, original.session?.codexThreadId);
+  assert.notEqual(rebound?.id, original.session?.bridgeSessionId);
+  assert.notEqual(rebound?.codexThreadId, original.session?.codexThreadId);
 });
 
 test('bridge coordinator recreates a scope session when Codex reports a damaged rollout file', async () => {
@@ -907,7 +907,7 @@ test('bridge coordinator recreates a scope session when Codex reports a damaged 
   assert.equal(openai.startThreadCalls.length, 1);
 });
 
-test('bridge coordinator keeps the same session bound when rollout loading keeps failing', async () => {
+test('bridge coordinator auto-rebinds to a new session when rollout loading keeps failing', async () => {
   const { runtime, openai } = makeRuntime();
   const original = await runtime.services.bridgeCoordinator.handleInboundEvent({
     platform: 'weixin',
@@ -915,8 +915,12 @@ test('bridge coordinator keeps the same session bound when rollout loading keeps
     text: 'hello codexbridge',
   });
 
-  openai.startTurn = async ({ bridgeSession }) => {
-    throw new Error(`failed to load rollout '/tmp/${bridgeSession.codexThreadId}.jsonl' for thread ${bridgeSession.codexThreadId}: empty session file`);
+  const originalStartTurn = openai.startTurn.bind(openai);
+  openai.startTurn = async (args) => {
+    if (args.bridgeSession.codexThreadId === original.session.codexThreadId) {
+      throw new Error(`failed to load rollout '/tmp/${args.bridgeSession.codexThreadId}.jsonl' for thread ${args.bridgeSession.codexThreadId}: empty session file`);
+    }
+    return originalStartTurn(args);
   };
 
   const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
@@ -925,15 +929,15 @@ test('bridge coordinator keeps the same session bound when rollout loading keeps
     text: 'hello after persistent rollout damage',
   });
 
-  assert.equal(result.meta?.codexTurn?.outputState, 'provider_error');
-  assert.match(result.meta?.codexTurn?.errorMessage ?? '', /failed to load rollout/i);
+  assert.match(result.messages[0]?.text ?? '', /openai: hello after persistent rollout damage/);
+  assert.equal(openai.startThreadCalls.length, 2);
 
   const rebound = runtime.services.bridgeSessions.resolveScopeSession({
     platform: 'weixin',
     externalScopeId: 'wx-user-1',
   });
-  assert.equal(rebound?.id, original.session?.bridgeSessionId);
-  assert.equal(rebound?.codexThreadId, original.session?.codexThreadId);
+  assert.notEqual(rebound?.id, original.session?.bridgeSessionId);
+  assert.notEqual(rebound?.codexThreadId, original.session?.codexThreadId);
 });
 
 test('/status reports when no bridge session is bound yet', async () => {

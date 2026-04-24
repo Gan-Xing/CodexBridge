@@ -3892,14 +3892,18 @@ export class BridgeCoordinator {
         lastError = error;
       }
     }
+    if (shouldAutoRebindAfterRecoveryFailure(lastError)) {
+      return this.startTurnOnReplacementSession(toScopeRef(event), session, event, options, 'retry-recovery-failed');
+    }
     throw lastError;
   }
 
   async resumeTurnOnSameSession(session, event, options: StartTurnOptions = {}, originalError) {
+    const scopeRef = toScopeRef(event);
     const providerProfile = this.requireProviderProfile(session.providerProfileId);
     const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
     if (typeof providerPlugin.resumeThread !== 'function') {
-      throw enrichSessionRecoveryError(originalError, session, 'provider has no resumeThread support', this.currentI18n);
+      return this.startTurnOnReplacementSession(scopeRef, session, event, options, 'resume-unsupported');
     }
     let lastError = originalError;
     for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -3914,7 +3918,52 @@ export class BridgeCoordinator {
         await sleep(500);
       }
     }
+    if (shouldAutoRebindAfterRecoveryFailure(lastError)) {
+      return this.startTurnOnReplacementSession(scopeRef, session, event, options, 'resume-recovery-failed');
+    }
     throw enrichSessionRecoveryError(lastError, session, 'resumeThread failed', this.currentI18n);
+  }
+
+  async startTurnOnReplacementSession(scopeRef, session, event, options: StartTurnOptions = {}, trigger = 'auto-rebind-recovery') {
+    const currentSettings = this.bridgeSessions.getSessionSettings(session.id);
+    const locale = currentSettings?.locale ?? this.resolveScopeLocale(scopeRef, event);
+    const nextSession = await this.bridgeSessions.createSessionForScope(scopeRef, {
+      providerProfileId: session.providerProfileId,
+      cwd: normalizeCwd(session.cwd) ?? this.resolveEventCwd(event) ?? this.defaultCwd ?? null,
+      title: session.title ?? null,
+      initialSettings: {
+        locale,
+        model: currentSettings?.model ?? null,
+        reasoningEffort: currentSettings?.reasoningEffort ?? null,
+        serviceTier: currentSettings?.serviceTier ?? null,
+        personality: currentSettings?.personality ?? null,
+        accessPreset: currentSettings?.accessPreset ?? null,
+        approvalPolicy: currentSettings?.approvalPolicy ?? null,
+        sandboxMode: currentSettings?.sandboxMode ?? null,
+        metadata: {
+          ...(currentSettings?.metadata ?? {}),
+        },
+      },
+      providerStartOptions: {
+        sourcePlatform: event.platform,
+        trigger,
+        previousBridgeSessionId: session.id,
+        previousThreadId: session.codexThreadId,
+      },
+    });
+    if (!isAutomationEvent(event)) {
+      this.storeRetryableRequest(nextSession.id, event);
+    }
+    debugCoordinator('turn_recovery_auto_rebind', {
+      platform: scopeRef.platform,
+      scopeId: scopeRef.externalScopeId,
+      previousBridgeSessionId: session.id,
+      previousThreadId: session.codexThreadId,
+      nextBridgeSessionId: nextSession.id,
+      nextThreadId: nextSession.codexThreadId,
+      trigger,
+    });
+    return this.startTurnOnSession(nextSession, event, options);
   }
 }
 
@@ -6266,7 +6315,12 @@ function isStaleThreadError(error) {
 function isResumeRetryableError(error) {
   const message = error instanceof Error ? error.message : String(error);
   return /failed to load rollout/i.test(message)
-    || /empty session file/i.test(message);
+    || /empty session file/i.test(message)
+    || /no rollout found/i.test(message);
+}
+
+function shouldAutoRebindAfterRecoveryFailure(error) {
+  return isStaleThreadError(error) || isResumeRetryableError(error);
 }
 
 function isApprovedExecutionStallError(error) {
