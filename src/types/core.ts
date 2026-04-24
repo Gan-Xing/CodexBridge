@@ -55,6 +55,7 @@ export interface ThreadMetadata {
   threadId: string;
   alias: string | null;
   archivedAt?: number | null;
+  pinnedAt?: number | null;
   updatedAt: number;
 }
 

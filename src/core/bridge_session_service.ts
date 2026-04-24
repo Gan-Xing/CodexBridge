@@ -314,7 +314,8 @@ export class BridgeSessionService {
       cursor = null,
       searchTerm = null,
       includeArchived = false,
-    }: { limit?: number; cursor?: string | null; searchTerm?: string | null; includeArchived?: boolean } = {},
+      onlyPinned = false,
+    }: { limit?: number; cursor?: string | null; searchTerm?: string | null; includeArchived?: boolean; onlyPinned?: boolean } = {},
   ) {
     const providerProfile = this.providerProfiles.get(providerProfileId);
     if (!providerProfile) {
@@ -327,8 +328,8 @@ export class BridgeSessionService {
         .map((metadata) => [metadata.threadId, metadata] as const),
     );
     const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
-    let nextCursor = cursor;
-    const items: Array<{
+    let providerCursor: string | null = null;
+    const remoteItems: Array<{
       threadId: string;
       title: string | null;
       cwd: string | null;
@@ -337,14 +338,16 @@ export class BridgeSessionService {
       turns: unknown[];
       bridgeSessionId: string | null;
       archivedAt: number | null;
+      pinnedAt: number | null;
     }> = [];
     const seenThreadIds = new Set<string>();
+    const remotePageLimit = Math.max(limit, 50);
 
-    while (items.length < limit) {
+    while (true) {
       const remoteResult = await providerPlugin.listThreads({
         providerProfile,
-        limit,
-        cursor: nextCursor,
+        limit: remotePageLimit,
+        cursor: providerCursor,
         searchTerm,
       });
       const remoteThreads = Array.isArray(remoteResult)
@@ -361,10 +364,8 @@ export class BridgeSessionService {
         const localSession = localByThreadId.get(remoteThread.threadId) ?? null;
         const metadata = metadataByThreadId.get(remoteThread.threadId) ?? null;
         const archivedAt = typeof metadata?.archivedAt === 'number' ? metadata.archivedAt : null;
-        if (!includeArchived && archivedAt) {
-          continue;
-        }
-        items.push({
+        const pinnedAt = typeof metadata?.pinnedAt === 'number' ? metadata.pinnedAt : null;
+        remoteItems.push({
           threadId: remoteThread.threadId,
           title: this.resolveThreadDisplayTitle({
             providerProfileId: providerProfile.id,
@@ -378,19 +379,42 @@ export class BridgeSessionService {
           turns: Array.isArray(remoteThread.turns) ? remoteThread.turns : [],
           bridgeSessionId: localSession?.id ?? null,
           archivedAt,
+          pinnedAt,
         });
-        if (items.length >= limit) {
-          break;
-        }
       }
 
       const resolvedNextCursor = typeof remoteResult?.nextCursor === 'string' ? remoteResult.nextCursor : null;
-      if (!resolvedNextCursor || resolvedNextCursor === nextCursor) {
-        nextCursor = null;
+      if (!resolvedNextCursor || resolvedNextCursor === providerCursor) {
         break;
       }
-      nextCursor = resolvedNextCursor;
+      providerCursor = resolvedNextCursor;
     }
+
+    const filteredItems = remoteItems
+      .filter((item) => includeArchived || typeof item.archivedAt !== 'number')
+      .filter((item) => !onlyPinned || typeof item.pinnedAt === 'number')
+      .sort((left, right) => {
+        const leftPinned = typeof left.pinnedAt === 'number';
+        const rightPinned = typeof right.pinnedAt === 'number';
+        if (leftPinned && !rightPinned) {
+          return -1;
+        }
+        if (!leftPinned && rightPinned) {
+          return 1;
+        }
+        const leftUpdatedAt = Number(left.updatedAt ?? 0);
+        const rightUpdatedAt = Number(right.updatedAt ?? 0);
+        if (leftUpdatedAt !== rightUpdatedAt) {
+          return rightUpdatedAt - leftUpdatedAt;
+        }
+        return String(left.threadId).localeCompare(String(right.threadId));
+      });
+
+    const offset = Math.max(0, Number(cursor ? Number(cursor) : 0) || 0);
+    const items = filteredItems.slice(offset, offset + limit);
+    const nextCursor = offset + items.length < filteredItems.length
+      ? String(offset + items.length)
+      : null;
 
     return {
       items,
@@ -485,6 +509,7 @@ export class BridgeSessionService {
       threadId,
       alias: normalizedAlias || null,
       archivedAt: typeof current?.archivedAt === 'number' ? current.archivedAt : null,
+      pinnedAt: typeof current?.pinnedAt === 'number' ? current.pinnedAt : null,
       updatedAt: this.now(),
     };
     this.threadMetadata?.save(nextMetadata);
@@ -504,6 +529,21 @@ export class BridgeSessionService {
       threadId,
       alias: current?.alias ?? null,
       archivedAt: archived ? this.now() : null,
+      pinnedAt: typeof current?.pinnedAt === 'number' ? current.pinnedAt : null,
+      updatedAt: this.now(),
+    };
+    this.threadMetadata?.save(nextMetadata);
+    return nextMetadata;
+  }
+
+  setProviderThreadPinned(providerProfileId: string, threadId: string, pinned: boolean) {
+    const current = this.getThreadMetadata(providerProfileId, threadId);
+    const nextMetadata: ThreadMetadata = {
+      providerProfileId,
+      threadId,
+      alias: current?.alias ?? null,
+      archivedAt: typeof current?.archivedAt === 'number' ? current.archivedAt : null,
+      pinnedAt: pinned ? this.now() : null,
       updatedAt: this.now(),
     };
     this.threadMetadata?.save(nextMetadata);

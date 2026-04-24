@@ -2515,12 +2515,16 @@ test('/helps threads renders usage, examples, and notes for a specific command',
   assert.match(text, /命令：\/threads/);
   assert.match(text, /说明：查看当前 provider 的线程列表首页/);
   assert.match(text, /用法：/);
-  assert.match(text, /\/threads all/);
-  assert.match(text, /\/threads del 2/);
-  assert.match(text, /\/threads restore 2/);
-  assert.match(text, /\/threads -h/);
+  assert.match(text, /\/threads$/m);
+  assert.match(text, /\/th all/);
+  assert.match(text, /\/th pin/);
+  assert.match(text, /\/th del 2/);
+  assert.match(text, /\/th restore 2/);
+  assert.match(text, /\/th pin 2/);
+  assert.match(text, /\/th unpin 2/);
+  assert.match(text, /\/th -h/);
   assert.match(text, /\/open 2/);
-  assert.match(text, /默认只显示未归档线程/);
+  assert.match(text, /默认列表会把置顶线程排在前面/);
 });
 
 test('slash commands support first-argument help flags like -h', async () => {
@@ -2534,9 +2538,13 @@ test('slash commands support first-argument help flags like -h', async () => {
 
   const text = result.messages[0]?.text ?? '';
   assert.match(text, /命令：\/threads/);
-  assert.match(text, /\/threads del 2/);
-  assert.match(text, /\/threads restore 2/);
-  assert.match(text, /\/threads -h/);
+  assert.match(text, /\/threads$/m);
+  assert.match(text, /\/th pin/);
+  assert.match(text, /\/th del 2/);
+  assert.match(text, /\/th restore 2/);
+  assert.match(text, /\/th pin 2/);
+  assert.match(text, /\/th unpin 2/);
+  assert.match(text, /\/th -h/);
   assert.match(text, /\/peek 2/);
 });
 
@@ -3187,7 +3195,7 @@ test('/threads renders a paged thread browser with previews and commands', async
   assert.match(text, /当前绑定：OpenAI Default thread 1/);
   assert.match(text, /\* \d+\. OpenAI Default thread 1/);
   assert.match(text, /预览：hello from wx/);
-  assert.match(text, /操作：\/open \d+  \/peek \d+  \/rename \d+ 新名字  \/threads del \d+  \/threads all  \/search 关键词/);
+  assert.match(text, /操作：\/open \d+  \/peek \d+  \/rename \d+ 新名字  \/threads del \d+  \/threads pin \d+  \/threads all  \/threads pin  \/search 关键词/);
 });
 
 test('/threads shows thread id in current binding when the current thread has no title', async () => {
@@ -3545,6 +3553,78 @@ test('/threads del and /threads restore accept multiple indexes from the current
   assert.match(visibleAgainText, /thread three/);
   assert.match(visibleAgainText, /thread two/);
   assert.match(visibleAgainText, /thread one/);
+});
+
+test('/threads pin and /threads unpin keep pinned threads at the top and support pinned-only view', async () => {
+  const { runtime } = makeRuntime();
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-pin-1',
+    text: 'alpha thread',
+  });
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-pin-2',
+    text: 'beta thread',
+  });
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-pin-3',
+    text: 'gamma thread',
+  });
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-pin-browser',
+    text: '/threads',
+  });
+
+  const pinned = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-pin-browser',
+    text: '/threads pin 2 3',
+  });
+  const pinnedText = pinned.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(pinnedText, /已置顶线程：openai-default-thread-2/);
+  assert.match(pinnedText, /已置顶线程：openai-default-thread-1/);
+
+  const defaultView = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-pin-browser',
+    text: '/threads',
+  });
+  const defaultText = defaultView.messages[0]?.text ?? '';
+  assert.match(defaultText, /1\. OpenAI Default thread [12] \[置顶\]/u);
+  assert.match(defaultText, /2\. OpenAI Default thread [12] \[置顶\]/u);
+  assert.match(defaultText, /3\. OpenAI Default thread 3/u);
+
+  const pinnedView = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-pin-browser',
+    text: '/threads pin',
+  });
+  const pinnedViewText = pinnedView.messages[0]?.text ?? '';
+  assert.match(pinnedViewText, /视图：仅置顶/);
+  assert.match(pinnedViewText, /OpenAI Default thread 2 \[置顶\]/);
+  assert.match(pinnedViewText, /OpenAI Default thread 1 \[置顶\]/);
+  assert.doesNotMatch(pinnedViewText, /OpenAI Default thread 3/);
+  assert.match(pinnedViewText, /\/threads unpin 1/);
+
+  const unpinned = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-pin-browser',
+    text: '/threads unpin 1',
+  });
+  assert.match(unpinned.messages[0]?.text ?? '', /已取消置顶：openai-default-thread-2/);
+
+  const pinnedViewAfterUnpin = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-pin-browser',
+    text: '/threads pin',
+  });
+  const pinnedAfterText = pinnedViewAfterUnpin.messages[0]?.text ?? '';
+  assert.doesNotMatch(pinnedAfterText, /OpenAI Default thread 2 \[置顶\]/);
+  assert.match(pinnedAfterText, /OpenAI Default thread 1 \[置顶\]/);
 });
 
 test('/peek shows recent conversation turns for the selected thread', async () => {
