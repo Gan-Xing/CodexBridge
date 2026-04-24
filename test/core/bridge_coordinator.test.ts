@@ -2515,9 +2515,12 @@ test('/helps threads renders usage, examples, and notes for a specific command',
   assert.match(text, /命令：\/threads/);
   assert.match(text, /说明：查看当前 provider 的线程列表首页/);
   assert.match(text, /用法：/);
+  assert.match(text, /\/threads all/);
+  assert.match(text, /\/threads del 2/);
+  assert.match(text, /\/threads restore 2/);
   assert.match(text, /\/threads -h/);
   assert.match(text, /\/open 2/);
-  assert.match(text, /微信里推荐先 \/threads，再用序号操作/);
+  assert.match(text, /默认只显示未归档线程/);
 });
 
 test('slash commands support first-argument help flags like -h', async () => {
@@ -2531,6 +2534,8 @@ test('slash commands support first-argument help flags like -h', async () => {
 
   const text = result.messages[0]?.text ?? '';
   assert.match(text, /命令：\/threads/);
+  assert.match(text, /\/threads del 2/);
+  assert.match(text, /\/threads restore 2/);
   assert.match(text, /\/threads -h/);
   assert.match(text, /\/peek 2/);
 });
@@ -3182,7 +3187,7 @@ test('/threads renders a paged thread browser with previews and commands', async
   assert.match(text, /当前绑定：OpenAI Default thread 1/);
   assert.match(text, /\* \d+\. OpenAI Default thread 1/);
   assert.match(text, /预览：hello from wx/);
-  assert.match(text, /操作：\/open \d+  \/peek \d+  \/rename \d+ 新名字  \/search 关键词  \/threads/);
+  assert.match(text, /操作：\/open \d+  \/peek \d+  \/rename \d+ 新名字  \/threads del \d+  \/threads all  \/search 关键词/);
 });
 
 test('/threads shows thread id in current binding when the current thread has no title', async () => {
@@ -3400,6 +3405,146 @@ test('/rename updates the local thread alias used by /threads', async () => {
   });
 
   assert.match(result.messages[0]?.text ?? '', /微信桥接排障/);
+});
+
+test('/threads del archives a thread from the default list, and /threads restore revives it from the all view', async () => {
+  const { runtime } = makeRuntime();
+
+  const older = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-archive-older',
+    text: 'older thread',
+  });
+  const newer = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-archive-newer',
+    text: 'newer thread',
+  });
+
+  const firstList = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-browser-archive',
+    text: '/threads',
+  });
+  assert.match(firstList.messages[0]?.text ?? '', /newer thread/);
+
+  const archived = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-browser-archive',
+    text: '/threads del 1',
+  });
+  assert.match(archived.messages[0]?.text ?? '', new RegExp(`已归档线程：${newer.session?.codexThreadId}`));
+
+  const hiddenFromDefault = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-browser-archive',
+    text: '/threads',
+  });
+  assert.doesNotMatch(hiddenFromDefault.messages[0]?.text ?? '', /newer thread/);
+  assert.match(hiddenFromDefault.messages[0]?.text ?? '', /older thread/);
+
+  const allView = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-browser-archive',
+    text: '/threads all',
+  });
+  assert.match(allView.messages[0]?.text ?? '', /视图：全部（含已归档）/);
+  assert.match(allView.messages[0]?.text ?? '', /OpenAI Default thread 2 \[已归档\]/);
+  assert.match(allView.messages[0]?.text ?? '', /预览：newer thread/);
+  assert.match(allView.messages[0]?.text ?? '', /\/threads restore 1/);
+
+  const restored = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-browser-archive',
+    text: '/threads restore 1',
+  });
+  assert.match(restored.messages[0]?.text ?? '', new RegExp(`已恢复线程：${newer.session?.codexThreadId}`));
+
+  const visibleAgain = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-browser-archive',
+    text: '/threads',
+  });
+  assert.match(visibleAgain.messages[0]?.text ?? '', /newer thread/);
+  assert.doesNotMatch(visibleAgain.messages[0]?.text ?? '', /\[已归档\]/);
+  assert.ok(older.session?.codexThreadId);
+});
+
+test('/threads del and /threads restore accept multiple indexes from the current page without index drift', async () => {
+  const { runtime } = makeRuntime();
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-batch-1',
+    text: 'thread one',
+  });
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-batch-2',
+    text: 'thread two',
+  });
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-batch-3',
+    text: 'thread three',
+  });
+
+  const list = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-browser-batch',
+    text: '/threads',
+  });
+  const listText = list.messages[0]?.text ?? '';
+  assert.match(listText, /预览：thread three/);
+  assert.match(listText, /预览：thread two/);
+  assert.match(listText, /预览：thread one/);
+
+  const archived = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-browser-batch',
+    text: '/threads del 1 3',
+  });
+  const archivedText = archived.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(archivedText, /已归档线程：openai-default-thread-3/);
+  assert.match(archivedText, /已归档线程：openai-default-thread-1/);
+
+  const defaultView = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-browser-batch',
+    text: '/threads',
+  });
+  const defaultText = defaultView.messages[0]?.text ?? '';
+  assert.doesNotMatch(defaultText, /thread three/);
+  assert.match(defaultText, /thread two/);
+  assert.doesNotMatch(defaultText, /thread one/);
+
+  const allView = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-browser-batch',
+    text: '/threads all',
+  });
+  const allText = allView.messages[0]?.text ?? '';
+  assert.match(allText, /OpenAI Default thread 3 \[已归档\]/);
+  assert.match(allText, /OpenAI Default thread 1 \[已归档\]/);
+
+  const restored = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-browser-batch',
+    text: '/threads restore 1 3',
+  });
+  const restoredText = restored.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(restoredText, /已恢复线程：openai-default-thread-3/);
+  assert.match(restoredText, /已恢复线程：openai-default-thread-1/);
+
+  const visibleAgain = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-browser-batch',
+    text: '/threads',
+  });
+  const visibleAgainText = visibleAgain.messages[0]?.text ?? '';
+  assert.match(visibleAgainText, /thread three/);
+  assert.match(visibleAgainText, /thread two/);
+  assert.match(visibleAgainText, /thread one/);
 });
 
 test('/peek shows recent conversation turns for the selected thread', async () => {

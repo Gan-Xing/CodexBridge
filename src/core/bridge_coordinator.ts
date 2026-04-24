@@ -515,7 +515,7 @@ export class BridgeCoordinator {
       case 'weibo':
         return this.handleWeiboCommand(event, command.args);
       case 'threads':
-        return this.handleThreadsCommand(event);
+        return this.handleThreadsCommand(event, command.args);
       case 'search':
         return this.handleSearchCommand(event, command.args);
       case 'next':
@@ -1401,7 +1401,27 @@ export class BridgeCoordinator {
     });
   }
 
-  async handleThreadsCommand(event) {
+  async handleThreadsCommand(event, args = []) {
+    const action = String(args[0] ?? '').trim().toLowerCase();
+    if (action === 'all') {
+      return this.renderThreadsHomePage(event, { includeArchived: true });
+    }
+    if (action === 'del') {
+      return this.handleThreadsArchiveCommand(event, args.slice(1));
+    }
+    if (action === 'restore') {
+      return this.handleThreadsRestoreCommand(event, args.slice(1));
+    }
+    if (action) {
+      return messageResponse([
+        this.t('coordinator.threads.usage'),
+        this.t('coordinator.threads.help'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    return this.renderThreadsHomePage(event, { includeArchived: false });
+  }
+
+  async renderThreadsHomePage(event, { includeArchived = false } = {}) {
     const scopeRef = toScopeRef(event);
     const current = this.bridgeSessions.resolveScopeSession(scopeRef);
     const providerProfileId = current?.providerProfileId ?? this.resolveDefaultProviderProfileId();
@@ -1411,6 +1431,7 @@ export class BridgeCoordinator {
       previousCursors: [],
       searchTerm: null,
       pageNumber: 1,
+      includeArchived,
     });
   }
 
@@ -1431,6 +1452,7 @@ export class BridgeCoordinator {
       previousCursors: [],
       searchTerm,
       pageNumber: 1,
+      includeArchived: false,
     });
   }
 
@@ -1448,6 +1470,7 @@ export class BridgeCoordinator {
       previousCursors: [...state.previousCursors, state.cursor],
       searchTerm: state.searchTerm,
       pageNumber: state.pageNumber + 1,
+      includeArchived: Boolean(state.includeArchived),
     });
   }
 
@@ -1467,7 +1490,102 @@ export class BridgeCoordinator {
       previousCursors,
       searchTerm: state.searchTerm,
       pageNumber: Math.max(1, state.pageNumber - 1),
+      includeArchived: Boolean(state.includeArchived),
     });
+  }
+
+  async handleThreadsArchiveCommand(event, args) {
+    const activeResponse = await this.rejectIfActiveTurnForCommand(event, 'threads');
+    if (activeResponse) {
+      return activeResponse;
+    }
+    const targets = args.map((item) => String(item ?? '').trim()).filter(Boolean);
+    if (!targets.length) {
+      return messageResponse([
+        this.t('coordinator.threads.delUsage'),
+        this.t('coordinator.threads.help'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const resolvedThreads = this.resolveRequestedThreads(event, targets);
+    const dedupedThreadIds = new Set();
+    const lines = [];
+    let archivedCount = 0;
+
+    for (const resolvedThread of resolvedThreads) {
+      if (!resolvedThread.ok) {
+        lines.push(resolvedThread.message);
+        continue;
+      }
+      const dedupeKey = `${resolvedThread.providerProfileId}:${resolvedThread.threadId}`;
+      if (dedupedThreadIds.has(dedupeKey)) {
+        continue;
+      }
+      dedupedThreadIds.add(dedupeKey);
+      if (typeof resolvedThread.archivedAt === 'number') {
+        lines.push(this.t('coordinator.thread.archiveAlreadyArchived', { threadId: resolvedThread.threadId }));
+        continue;
+      }
+      this.bridgeSessions.setProviderThreadArchived(resolvedThread.providerProfileId, resolvedThread.threadId, true);
+      this.patchThreadBrowserArchiveStatus(event, resolvedThread.providerProfileId, resolvedThread.threadId, true);
+      lines.push(this.t('coordinator.thread.archived', { threadId: resolvedThread.threadId }));
+      archivedCount += 1;
+    }
+
+    if (archivedCount > 0) {
+      lines.push(this.t('coordinator.thread.archiveActions'));
+    }
+
+    return messageResponse(lines, this.buildScopedSessionMeta(event));
+  }
+
+  async handleThreadsRestoreCommand(event, args) {
+    const activeResponse = await this.rejectIfActiveTurnForCommand(event, 'threads');
+    if (activeResponse) {
+      return activeResponse;
+    }
+    const targets = args.map((item) => String(item ?? '').trim()).filter(Boolean);
+    if (!targets.length) {
+      return messageResponse([
+        this.t('coordinator.threads.restoreUsage'),
+        this.t('coordinator.threads.help'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const state = this.getThreadBrowserState(event);
+    if (!state || !state.includeArchived) {
+      return messageResponse([
+        this.t('coordinator.thread.restoreNeedAll'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const resolvedThreads = this.resolveRequestedThreads(event, targets);
+    const dedupedThreadIds = new Set();
+    const lines = [];
+    let restoredCount = 0;
+
+    for (const resolvedThread of resolvedThreads) {
+      if (!resolvedThread.ok) {
+        lines.push(resolvedThread.message);
+        continue;
+      }
+      const dedupeKey = `${resolvedThread.providerProfileId}:${resolvedThread.threadId}`;
+      if (dedupedThreadIds.has(dedupeKey)) {
+        continue;
+      }
+      dedupedThreadIds.add(dedupeKey);
+      if (typeof resolvedThread.archivedAt !== 'number') {
+        lines.push(this.t('coordinator.thread.restoreNotArchived', { threadId: resolvedThread.threadId }));
+        continue;
+      }
+      this.bridgeSessions.setProviderThreadArchived(resolvedThread.providerProfileId, resolvedThread.threadId, false);
+      this.patchThreadBrowserArchiveStatus(event, resolvedThread.providerProfileId, resolvedThread.threadId, false);
+      lines.push(this.t('coordinator.thread.restored', { threadId: resolvedThread.threadId }));
+      restoredCount += 1;
+    }
+
+    if (restoredCount > 0) {
+      lines.push(this.t('coordinator.thread.restoreActions'));
+    }
+
+    return messageResponse(lines, this.buildScopedSessionMeta(event));
   }
 
   async handleOpenCommand(event, args) {
@@ -2576,6 +2694,7 @@ export class BridgeCoordinator {
     previousCursors,
     searchTerm,
     pageNumber,
+    includeArchived,
   }) {
     const scopeRef = toScopeRef(event);
     const current = this.bridgeSessions.resolveScopeSession(scopeRef);
@@ -2584,12 +2703,26 @@ export class BridgeCoordinator {
       limit: THREAD_PAGE_SIZE,
       cursor,
       searchTerm,
+      includeArchived,
     });
+    if (result.items.length === 0 && previousCursors.length > 0) {
+      const fallbackPreviousCursors = previousCursors.slice(0, -1);
+      const fallbackCursor = previousCursors.at(-1) ?? null;
+      return this.renderThreadsPage(event, {
+        providerProfileId,
+        cursor: fallbackCursor,
+        previousCursors: fallbackPreviousCursors,
+        searchTerm,
+        pageNumber: Math.max(1, pageNumber - 1),
+        includeArchived,
+      });
+    }
     if (result.items.length === 0) {
       if (searchTerm) {
         return textResponse([
           this.t('coordinator.threadList.title', { providerProfileId: providerProfile.id }),
           this.t('coordinator.threadList.search', { term: searchTerm }),
+          ...(includeArchived ? [this.t('coordinator.threadList.includeArchived')] : []),
           '',
           this.t('coordinator.threadList.noMatch'),
           this.t('coordinator.threadList.viewAll'),
@@ -2597,6 +2730,7 @@ export class BridgeCoordinator {
       }
       return textResponse([
         this.t('coordinator.threadList.title', { providerProfileId: providerProfile.id }),
+        ...(includeArchived ? [this.t('coordinator.threadList.includeArchived')] : []),
         '',
         this.t('coordinator.threadList.empty'),
         this.t('coordinator.threadList.emptyAction'),
@@ -2611,6 +2745,7 @@ export class BridgeCoordinator {
       searchTerm,
       pageNumber,
       items: result.items,
+      includeArchived,
       updatedAt: this.now(),
     });
     return textResponse(renderThreadsPageMessage({
@@ -2620,6 +2755,7 @@ export class BridgeCoordinator {
       items: result.items,
       pageNumber,
       searchTerm,
+      includeArchived,
       hasPreviousPage: previousCursors.length > 0,
       hasNextPage: Boolean(result.nextCursor),
     }), current ? buildSessionMeta(current) : undefined);
@@ -3489,44 +3625,76 @@ export class BridgeCoordinator {
     state.updatedAt = this.now();
   }
 
-  resolveRequestedThread(event, requested) {
+  patchThreadBrowserArchiveStatus(event, providerProfileId, threadId, archived) {
+    const state = this.getThreadBrowserState(event);
+    if (!state || state.providerProfileId !== providerProfileId) {
+      return;
+    }
+    if (archived && !state.includeArchived) {
+      state.items = state.items.filter((item) => item.threadId !== threadId);
+      state.updatedAt = this.now();
+      return;
+    }
+    state.items = state.items.map((item) => (
+      item.threadId === threadId
+        ? { ...item, archivedAt: archived ? this.now() : null }
+        : item
+    ));
+    state.updatedAt = this.now();
+  }
+
+  resolveRequestedThread(event, requested, options: { stateOverride?: any } = {}) {
     const value = String(requested ?? '').trim();
     if (!value) {
+      return {
+        ok: false,
+        message: this.t('coordinator.thread.requestTarget'),
+      };
+    }
+    const state = options.stateOverride ?? this.getThreadBrowserState(event);
+    if (/^\d+$/u.test(value)) {
+      if (!state) {
         return {
           ok: false,
-          message: this.t('coordinator.thread.requestTarget'),
+          message: this.t('coordinator.thread.noContext'),
         };
       }
-      if (/^\d+$/u.test(value)) {
-      const state = this.getThreadBrowserState(event);
-        if (!state) {
-          return {
-            ok: false,
-            message: this.t('coordinator.thread.noContext'),
-          };
-        }
       const index = Number(value);
       const item = state.items[index - 1] ?? null;
-        if (!item) {
-          return {
-            ok: false,
-            message: this.t('coordinator.thread.noSuchIndex', { index }),
-          };
-        }
+      if (!item) {
+        return {
+          ok: false,
+          message: this.t('coordinator.thread.noSuchIndex', { index }),
+        };
+      }
       return {
         ok: true,
         providerProfileId: state.providerProfileId,
         threadId: item.threadId,
+        archivedAt: typeof item.archivedAt === 'number' ? item.archivedAt : null,
       };
     }
     const scopeRef = toScopeRef(event);
     const current = this.bridgeSessions.resolveScopeSession(scopeRef);
-    const state = this.getThreadBrowserState(event);
+    const providerProfileId = state?.providerProfileId ?? current?.providerProfileId ?? this.resolveDefaultProviderProfileId();
+    const metadata = this.bridgeSessions.getThreadMetadata(providerProfileId, value);
     return {
       ok: true,
-      providerProfileId: state?.providerProfileId ?? current?.providerProfileId ?? this.resolveDefaultProviderProfileId(),
+      providerProfileId,
       threadId: value,
+      archivedAt: typeof metadata?.archivedAt === 'number' ? metadata.archivedAt : null,
     };
+  }
+
+  resolveRequestedThreads(event, requestedValues) {
+    const state = this.getThreadBrowserState(event);
+    const stateSnapshot = state
+      ? {
+        ...state,
+        items: [...state.items],
+      }
+      : null;
+    return requestedValues.map((requested) => this.resolveRequestedThread(event, requested, { stateOverride: stateSnapshot }));
   }
 
   resolveDefaultProviderProfileId() {
@@ -4923,6 +5091,7 @@ function renderThreadsPageMessage({
   items,
   pageNumber,
   searchTerm,
+  includeArchived,
   hasPreviousPage,
   hasNextPage,
 }) {
@@ -4937,6 +5106,9 @@ function renderThreadsPageMessage({
     i18n.t('coordinator.threadList.currentBinding', { title: currentTitle }),
     i18n.t('coordinator.threadList.page', { pageNumber }),
   ];
+  if (includeArchived) {
+    lines.push(i18n.t('coordinator.threadList.includeArchived'));
+  }
   if (searchTerm) {
     lines.push(i18n.t('coordinator.threadList.search', { term: searchTerm }));
   }
@@ -4945,33 +5117,44 @@ function renderThreadsPageMessage({
     const marker = currentSession?.providerProfileId === providerProfile.id && currentSession.codexThreadId === item.threadId
       ? '*'
       : ' ';
-    lines.push(`${marker} ${index + 1}. ${formatThreadTitle(item.title, item.preview, i18n)}`);
+    const archivedTag = typeof item.archivedAt === 'number'
+      ? ` ${i18n.t('coordinator.threadList.archivedTag')}`
+      : '';
+    lines.push(`${marker} ${index + 1}. ${formatThreadTitle(item.title, item.preview, i18n)}${archivedTag}`);
     lines.push(`   ${i18n.t('coordinator.threadList.preview', { preview: normalizeThreadPreview(item.preview, i18n) })}`);
     lines.push(`   ${i18n.t('coordinator.threadList.updatedAt', { value: formatRelativeTime(item.updatedAt, i18n) })}`);
     lines.push('');
   }
   lines.push(buildThreadsFooter({
     i18n,
+    includeArchived,
     hasPreviousPage,
     hasNextPage,
     exampleIndex: Math.min(2, Math.max(1, items.length)),
+    restoreIndex: includeArchived
+      ? Math.max(1, items.findIndex((item) => typeof item.archivedAt === 'number') + 1 || 1)
+      : null,
   }));
   return lines.join('\n').trim();
 }
 
-function buildThreadsFooter({ i18n, hasPreviousPage, hasNextPage, exampleIndex }: {
+function buildThreadsFooter({ i18n, includeArchived, hasPreviousPage, hasNextPage, exampleIndex, restoreIndex }: {
   i18n: Translator;
+  includeArchived: boolean;
   hasPreviousPage: boolean;
   hasNextPage: boolean;
   exampleIndex: number;
+  restoreIndex: number | null;
 }) {
   const index = Number(exampleIndex || 1);
+  const resolvedRestoreIndex = Number(restoreIndex || index || 1);
   const commands = [
     `/open ${index}`,
     `/peek ${index}`,
     `/rename ${index} ${i18n.t('common.example.newName')}`,
+    includeArchived ? `/threads restore ${resolvedRestoreIndex}` : `/threads del ${index}`,
+    includeArchived ? '/threads' : '/threads all',
     `/search ${i18n.t('common.example.keyword')}`,
-    '/threads',
   ];
   if (hasPreviousPage) {
     commands.push('/prev');
@@ -5556,10 +5739,16 @@ function getCommandHelpSpecs(i18n: Translator) {
     summary: i18n.t('coordinator.help.summary.threads'),
     usage: [
       '/threads',
+      '/threads all',
+      '/threads del 2',
+      '/threads restore 2',
       '/threads -h',
     ],
     examples: [
       '/threads',
+      '/threads del 2',
+      '/threads all',
+      '/threads restore 2',
       '/next',
       '/open 2',
       '/peek 2',

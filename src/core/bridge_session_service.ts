@@ -313,7 +313,8 @@ export class BridgeSessionService {
       limit = 5,
       cursor = null,
       searchTerm = null,
-    }: { limit?: number; cursor?: string | null; searchTerm?: string | null } = {},
+      includeArchived = false,
+    }: { limit?: number; cursor?: string | null; searchTerm?: string | null; includeArchived?: boolean } = {},
   ) {
     const providerProfile = this.providerProfiles.get(providerProfileId);
     if (!providerProfile) {
@@ -321,22 +322,49 @@ export class BridgeSessionService {
     }
     const localSessions = this.listSessionsForProviderProfile(providerProfile.id);
     const localByThreadId = new Map(localSessions.map((session) => [session.codexThreadId, session]));
+    const metadataByThreadId = new Map(
+      (this.threadMetadata?.listByProviderProfileId(providerProfile.id) ?? [])
+        .map((metadata) => [metadata.threadId, metadata] as const),
+    );
     const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
-    const remoteResult = await providerPlugin.listThreads({
-      providerProfile,
-      limit,
-      cursor,
-      searchTerm,
-    });
-    const remoteThreads = Array.isArray(remoteResult)
-      ? remoteResult
-      : Array.isArray(remoteResult?.items)
-        ? remoteResult.items
-        : [];
-    return {
-      items: remoteThreads.map((remoteThread) => {
+    let nextCursor = cursor;
+    const items: Array<{
+      threadId: string;
+      title: string | null;
+      cwd: string | null;
+      updatedAt: number | null;
+      preview: string | null;
+      turns: unknown[];
+      bridgeSessionId: string | null;
+      archivedAt: number | null;
+    }> = [];
+    const seenThreadIds = new Set<string>();
+
+    while (items.length < limit) {
+      const remoteResult = await providerPlugin.listThreads({
+        providerProfile,
+        limit,
+        cursor: nextCursor,
+        searchTerm,
+      });
+      const remoteThreads = Array.isArray(remoteResult)
+        ? remoteResult
+        : Array.isArray(remoteResult?.items)
+          ? remoteResult.items
+          : [];
+
+      for (const remoteThread of remoteThreads) {
+        if (!remoteThread?.threadId || seenThreadIds.has(remoteThread.threadId)) {
+          continue;
+        }
+        seenThreadIds.add(remoteThread.threadId);
         const localSession = localByThreadId.get(remoteThread.threadId) ?? null;
-        return {
+        const metadata = metadataByThreadId.get(remoteThread.threadId) ?? null;
+        const archivedAt = typeof metadata?.archivedAt === 'number' ? metadata.archivedAt : null;
+        if (!includeArchived && archivedAt) {
+          continue;
+        }
+        items.push({
           threadId: remoteThread.threadId,
           title: this.resolveThreadDisplayTitle({
             providerProfileId: providerProfile.id,
@@ -349,9 +377,24 @@ export class BridgeSessionService {
           preview: remoteThread.preview ?? null,
           turns: Array.isArray(remoteThread.turns) ? remoteThread.turns : [],
           bridgeSessionId: localSession?.id ?? null,
-        };
-      }),
-      nextCursor: typeof remoteResult?.nextCursor === 'string' ? remoteResult.nextCursor : null,
+          archivedAt,
+        });
+        if (items.length >= limit) {
+          break;
+        }
+      }
+
+      const resolvedNextCursor = typeof remoteResult?.nextCursor === 'string' ? remoteResult.nextCursor : null;
+      if (!resolvedNextCursor || resolvedNextCursor === nextCursor) {
+        nextCursor = null;
+        break;
+      }
+      nextCursor = resolvedNextCursor;
+    }
+
+    return {
+      items,
+      nextCursor,
     };
   }
 
@@ -436,10 +479,12 @@ export class BridgeSessionService {
 
   renameProviderThread(providerProfileId: string, threadId: string, alias: string) {
     const normalizedAlias = String(alias ?? '').trim();
+    const current = this.getThreadMetadata(providerProfileId, threadId);
     const nextMetadata: ThreadMetadata = {
       providerProfileId,
       threadId,
       alias: normalizedAlias || null,
+      archivedAt: typeof current?.archivedAt === 'number' ? current.archivedAt : null,
       updatedAt: this.now(),
     };
     this.threadMetadata?.save(nextMetadata);
@@ -449,6 +494,19 @@ export class BridgeSessionService {
         title: normalizedAlias || session.title,
       });
     }
+    return nextMetadata;
+  }
+
+  setProviderThreadArchived(providerProfileId: string, threadId: string, archived: boolean) {
+    const current = this.getThreadMetadata(providerProfileId, threadId);
+    const nextMetadata: ThreadMetadata = {
+      providerProfileId,
+      threadId,
+      alias: current?.alias ?? null,
+      archivedAt: archived ? this.now() : null,
+      updatedAt: this.now(),
+    };
+    this.threadMetadata?.save(nextMetadata);
     return nextMetadata;
   }
 

@@ -173,3 +173,54 @@ test('file-backed repositories preserve thread aliases across runtime restarts',
 
   assert.match(result.messages[0]?.text ?? '', /微信桥接排障/);
 });
+
+test('file-backed repositories preserve archived thread metadata across runtime restarts', async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-json-store-'));
+  const providerProfile = makeProviderProfile('openai-default', 'openai-native', 'OpenAI Default');
+  const providerPlugin = new FakeProviderPlugin('openai-native');
+
+  const runtimeA = createCodexBridgeRuntime({
+    providerPlugins: [providerPlugin],
+    providerProfiles: [providerProfile],
+    defaultProviderProfileId: providerProfile.id,
+    repositories: createFileJsonRepositories(stateDir),
+  });
+
+  await runtimeA.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-archive-store-1',
+    text: 'archive me',
+  });
+  await runtimeA.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-browser',
+    text: '/threads',
+  });
+  await runtimeA.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-browser',
+    text: '/threads del 1',
+  });
+
+  const runtimeB = createCodexBridgeRuntime({
+    providerPlugins: [providerPlugin],
+    providerProfiles: [providerProfile],
+    defaultProviderProfileId: providerProfile.id,
+    repositories: createFileJsonRepositories(stateDir),
+  });
+
+  const defaultView = await runtimeB.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-browser',
+    text: '/threads',
+  });
+  assert.doesNotMatch(defaultView.messages[0]?.text ?? '', /archive me/);
+
+  const allView = await runtimeB.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-browser',
+    text: '/threads all',
+  });
+  assert.match(allView.messages[0]?.text ?? '', /OpenAI Default thread 1 \[已归档\]/);
+  assert.match(allView.messages[0]?.text ?? '', /预览：archive me/);
+});

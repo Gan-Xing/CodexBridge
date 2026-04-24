@@ -54,6 +54,7 @@ export interface ThreadMetadata {
   providerProfileId: string;
   threadId: string;
   alias: string | null;
+  archivedAt?: number | null;
   updatedAt: number;
 }
 
