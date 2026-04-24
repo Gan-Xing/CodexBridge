@@ -1,21 +1,39 @@
 # CodexBridge Roadmap TODO
 
-This document tracks the current direction and the deferred backlog that is
-still intentionally not finished.
+This document tracks the backlog that is still intentionally unfinished.
+Completed items are removed from the active checklist instead of being left as
+stale TODOs.
+
+## Current Snapshot
+
+Already landed and no longer part of the active backlog:
+
+- `/review` for uncommitted changes and base-branch review
+- `/skills` visibility and on/off management
+- WeChat thread browsing with `/threads`, `/open`, `/search`, `/peek`, `/rename`
+- Thread cleanup and organization flows such as archive/restore and pin/unpin
+- Native-ish reconnect, retry, approval, and attachment delivery hardening
+
+Important clarification:
+
+- A separate `/resume` command is **not** a current priority because bridge UX
+  already treats `/open <thread>` as the practical “resume this old session”
+  path.
+- A separate `/cwd` command is **not** a current priority because `/status`
+  already exposes the current bound session and working-directory context well
+  enough for now.
 
 ## Current Priority: Expand Codex Native Capability
 
 The next phase should favor native Codex capability parity over adding more
-bridge-only command glue. The practical split is:
+bridge-only slash-command glue.
 
 ### P0: Native command surface parity
 
-- [ ] Add `/review` for uncommitted changes, base-branch diff review, and last-turn review summaries
 - [ ] Add `/plan` or `/plan-mode` so chat threads can explicitly enter native planning mode before execution
 - [ ] Add `/mcp` status and management flows on top of native `codex mcp` primitives
 - [ ] Add `/plugins` visibility and basic marketplace/status flows on top of native `codex plugin` primitives
-- [ ] Add `/skills` visibility so the bridge can show which native skills are available in the current Codex runtime
-- [ ] Add `/resume` and `/fork` style session controls where native Codex already exposes those session primitives
+- [ ] Decide whether native `/fork` needs a bridge command surface that is meaningfully different from current `/open`
 - [ ] Keep improving native approval, interrupted-turn, reconnect, and retry handling around long-running tasks
 - [ ] Continue expanding provider-native artifact delivery instead of adding more bridge-only glue
 - [ ] Support more Codex-native output kinds with consistent attachment metadata and delivery policy
@@ -39,11 +57,12 @@ bridge-only command glue. The practical split is:
 ### Guardrail
 
 - [ ] Do not prioritize new bridge-only slash commands ahead of high-value native Codex parity work unless the native layer is unavailable
+- [ ] Do not add bridge-only aliases when existing commands already cover the user need well enough, such as `/open` for resume-style continuation or `/status` for cwd/session inspection
 
 ## Later Direction: Telegram Runtime
 
-The bridge-side Telegram plugin contract now exists, but the real transport
-stack is still a later-phase item.
+The bridge-side Telegram plugin contract exists, but the real transport stack is
+still a later-phase item.
 
 - [ ] Add a real Telegram inbound poller or webhook runtime
 - [ ] Add real Telegram outbound transport for text, typing, media, and files
