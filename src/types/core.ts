@@ -57,6 +57,53 @@ export interface ThreadMetadata {
   updatedAt: number;
 }
 
+export type AutomationMode = 'standalone' | 'thread';
+
+export type AutomationStatus = 'active' | 'paused';
+
+export type AutomationSchedule =
+  | {
+    kind: 'interval';
+    everySeconds: number;
+    label: string;
+  }
+  | {
+    kind: 'daily';
+    hour: number;
+    minute: number;
+    timeZone: string;
+    label: string;
+  }
+  | {
+    kind: 'cron';
+    expression: string;
+    timeZone: string;
+    label: string;
+  };
+
+export interface AutomationJob {
+  id: string;
+  platform: string;
+  externalScopeId: string;
+  title: string;
+  mode: AutomationMode;
+  providerProfileId: string;
+  bridgeSessionId: string;
+  cwd: string | null;
+  prompt: string;
+  locale: string | null;
+  schedule: AutomationSchedule;
+  status: AutomationStatus;
+  running: boolean;
+  nextRunAt: number;
+  lastRunAt: number | null;
+  lastDeliveredAt: number | null;
+  lastResultPreview: string | null;
+  lastError: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface TurnArtifactIntent {
   requested: boolean;
   preferredKind: 'image' | 'file' | 'video' | 'audio' | null;

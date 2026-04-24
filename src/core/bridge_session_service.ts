@@ -106,6 +106,10 @@ export class BridgeSessionService {
     return this.sessionRouter.requireBoundSession(scopeRef);
   }
 
+  getSessionById(bridgeSessionId: string): BridgeSession | null {
+    return this.bridgeSessions.get(bridgeSessionId);
+  }
+
   async resolveOrCreateScopeSession(scopeRef: PlatformScopeRef, options: SessionCreationOptions): Promise<BridgeSession> {
     const existing = this.resolveScopeSession(scopeRef);
     if (existing) {
@@ -149,6 +153,52 @@ export class BridgeSessionService {
     };
     this.bridgeSessions.save(session);
     this.sessionRouter.bindScope(scopeRef, session.id, now);
+    this.sessionSettings.save({
+      bridgeSessionId: session.id,
+      model: initialSettings.model ?? null,
+      reasoningEffort: initialSettings.reasoningEffort ?? null,
+      serviceTier: initialSettings.serviceTier ?? null,
+      personality: initialSettings.personality ?? null,
+      accessPreset: initialSettings.accessPreset ?? null,
+      approvalPolicy: initialSettings.approvalPolicy ?? null,
+      sandboxMode: initialSettings.sandboxMode ?? null,
+      locale: initialSettings.locale ?? null,
+      metadata: initialSettings.metadata ?? {},
+      updatedAt: now,
+    });
+    return session;
+  }
+
+  async createDetachedSession(options: SessionCreationOptions): Promise<BridgeSession> {
+    const {
+      providerProfileId,
+      cwd = null,
+      title = null,
+      initialSettings = {},
+      providerStartOptions = {},
+    } = options;
+    const providerProfile = this.providerProfiles.get(providerProfileId);
+    if (!providerProfile) {
+      throw new NotFoundError(this.i18n.t('service.unknownProviderProfile', { id: providerProfileId }));
+    }
+    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+    const thread = await providerPlugin.startThread({
+      providerProfile,
+      cwd,
+      title,
+      metadata: providerStartOptions,
+    });
+    const now = this.now();
+    const session: BridgeSession = {
+      id: crypto.randomUUID(),
+      providerProfileId: providerProfile.id,
+      codexThreadId: thread.threadId,
+      cwd: thread.cwd ?? cwd,
+      title: thread.title ?? title,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.bridgeSessions.save(session);
     this.sessionSettings.save({
       bridgeSessionId: session.id,
       model: initialSettings.model ?? null,

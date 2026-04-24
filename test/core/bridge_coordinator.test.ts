@@ -18,7 +18,12 @@ class FakeProviderPlugin {
   respondToApprovalCalls: any[];
   listModelsCalls: any[];
   reconnectProfileCalls: any[];
+  listSkillsCalls: any[];
+  setSkillEnabledCalls: any[];
   usageReport: any;
+  skillEntries: any[];
+  skillErrors: any[];
+  listSkillsError: any;
   threadCounter: number;
   baseTime: number;
   clock: number;
@@ -111,7 +116,12 @@ class FakeProviderPlugin {
     this.respondToApprovalCalls = [];
     this.listModelsCalls = [];
     this.reconnectProfileCalls = [];
+    this.listSkillsCalls = [];
+    this.setSkillEnabledCalls = [];
     this.usageReport = null;
+    this.skillEntries = [];
+    this.skillErrors = [];
+    this.listSkillsError = null;
     this.threadCounter = 0;
     this.baseTime = Date.now();
     this.clock = 0;
@@ -261,6 +271,31 @@ class FakeProviderPlugin {
     this.respondToApprovalCalls.push({ providerProfile, request, option });
   }
 
+  async listSkills({ providerProfile, cwd = null, forceReload = false }: any = {}) {
+    this.listSkillsCalls.push({ providerProfile, cwd, forceReload });
+    if (this.listSkillsError) {
+      throw this.listSkillsError;
+    }
+    return {
+      cwd: cwd ?? '/tmp/work',
+      skills: this.skillEntries,
+      errors: this.skillErrors,
+    };
+  }
+
+  async setSkillEnabled({ providerProfile, enabled, name = null, path = null }) {
+    this.setSkillEnabledCalls.push({ providerProfile, enabled, name, path });
+    this.skillEntries = this.skillEntries.map((entry) => {
+      if ((path && entry.path === path) || (name && entry.name === name)) {
+        return {
+          ...entry,
+          enabled,
+        };
+      }
+      return entry;
+    });
+  }
+
   async listModels() {
     this.listModelsCalls.push({});
     return this.models;
@@ -298,6 +333,7 @@ function makeRuntime({
   platformPlugins = [],
   codexAuthManager = null,
   codexInstructionsManager = null,
+  weiboHotSearch = null,
 } = {}) {
   const openai = new FakeProviderPlugin('openai-native', { replyPrefix: 'openai' });
   const minimax = new FakeProviderPlugin('minimax-via-cliproxy', { replyPrefix: 'minimax' });
@@ -314,6 +350,7 @@ function makeRuntime({
     restartBridge,
     codexAuthManager,
     codexInstructionsManager,
+    weiboHotSearch,
   });
   return { runtime, openai, minimax };
 }
@@ -3244,6 +3281,37 @@ test('/search filters the thread browser by preview or title', async () => {
   assert.doesNotMatch(result.messages[0]?.text ?? '', /beta followup/);
 });
 
+test('/weibo returns the requested hot-search top list', async () => {
+  const { runtime } = makeRuntime({
+    weiboHotSearch: {
+      async getTop({ limit = 10 } = {}) {
+        assert.equal(limit, 3);
+        return {
+          fetchedAt: Date.UTC(2026, 3, 24, 11, 30, 0),
+          items: [
+            { position: 1, title: '话题一', label: '爆', category: '综艺', hotValue: 22854505 },
+            { position: 2, title: '话题二', label: '新', category: null, hotValue: 2236764 },
+            { position: 3, title: '话题三', label: null, category: null, hotValue: null },
+          ],
+        };
+      },
+    },
+  });
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-weibo-1',
+    text: '/weibo top 3',
+  });
+
+  assert.equal(result.type, 'message');
+  const text = result.messages.map((message) => String(message.text ?? '')).join('\n');
+  assert.match(text, /微博热搜 Top 3/);
+  assert.match(text, /1\. 话题一 \(爆 \| 综艺 \| 热度 22,854,505\)/);
+  assert.match(text, /2\. 话题二 \(新 \| 热度 2,236,764\)/);
+  assert.match(text, /3\. 话题三/);
+});
+
 test('/open binds the scope to an existing provider thread', async () => {
   const { runtime } = makeRuntime();
 
@@ -3621,6 +3689,360 @@ test('/review clears the active scope turn if the initial progress delivery fail
   assert.match(result.messages[0]?.text ?? '', /代码审查失败：preview send failed/);
   assert.equal(openai.startReviewCalls.length, 0);
   assert.equal(runtime.services.activeTurns.resolveScopeTurn(scopeRef), null);
+});
+
+test('/skills lists visible skills for the current cwd and /skills show explains the selected skill', async () => {
+  const { runtime, openai } = makeRuntime({
+    defaultCwd: '/tmp/openai-default',
+  });
+  openai.skillEntries = [
+    {
+      name: 'news-digest',
+      displayName: 'News Digest',
+      description: '汇总新闻并生成中文摘要。',
+      shortDescription: '每天抓新闻并做摘要',
+      enabled: true,
+      path: '/tmp/skills/news-digest/SKILL.md',
+      scope: 'user',
+      defaultPrompt: '总结今天的重要新闻',
+      dependencies: [{ type: 'tool', value: 'news' }],
+    },
+    {
+      name: 'deploy-watch',
+      description: '检查部署状态并回报异常。',
+      shortDescription: '部署巡检',
+      enabled: false,
+      path: '/tmp/skills/deploy-watch/SKILL.md',
+      scope: 'repo',
+      dependencies: [],
+    },
+  ];
+
+  const listResult = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-skills-1',
+    text: '/skills',
+  });
+  const listText = listResult.messages.map((entry) => entry.text ?? '').join('\n');
+
+  assert.match(listText, /可用技能 \| \/tmp\/openai-default \| 2 项/);
+  assert.match(listText, /1\. News Digest \[开启\] \[user\]/);
+  assert.match(listText, /2\. deploy-watch \[关闭\] \[repo\]/);
+
+  const showResult = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-skills-1',
+    text: '/skills show 1',
+  });
+  const showText = showResult.messages.map((entry) => entry.text ?? '').join('\n');
+
+  assert.match(showText, /技能详情 \| 1\. News Digest/);
+  assert.match(showText, /用途：汇总新闻并生成中文摘要。/);
+  assert.match(showText, /默认提示：总结今天的重要新闻/);
+  assert.match(showText, /依赖：tool:news/);
+});
+
+test('/skills search uses broad matching and /skills on-off toggles the selected skill', async () => {
+  const { runtime, openai } = makeRuntime({
+    defaultCwd: '/tmp/openai-default',
+  });
+  openai.skillEntries = [
+    {
+      name: 'daily-news',
+      description: '每天抓取新闻并汇总重点。',
+      shortDescription: '新闻摘要',
+      enabled: false,
+      path: '/tmp/skills/daily-news/SKILL.md',
+      scope: 'user',
+      dependencies: [],
+    },
+    {
+      name: 'repo-review',
+      description: '审查当前仓库的改动。',
+      shortDescription: '代码审查',
+      enabled: true,
+      path: '/tmp/skills/repo-review/SKILL.md',
+      scope: 'repo',
+      dependencies: [],
+    },
+  ];
+
+  const searchResult = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-skills-2',
+    text: '/skills search 新闻',
+  });
+  const searchText = searchResult.messages.map((entry) => entry.text ?? '').join('\n');
+  assert.match(searchText, /搜索：新闻/);
+  assert.match(searchText, /1\. daily-news \[关闭\] \[user\]/);
+  assert.doesNotMatch(searchText, /repo-review/);
+
+  const enableResult = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-skills-2',
+    text: '/skills on 1',
+  });
+  assert.equal(openai.setSkillEnabledCalls.length, 1);
+  assert.equal(openai.setSkillEnabledCalls[0]?.enabled, true);
+  assert.equal(openai.setSkillEnabledCalls[0]?.path, '/tmp/skills/daily-news/SKILL.md');
+  assert.match(enableResult.messages[0]?.text ?? '', /已启用 skill。/);
+  assert.match(enableResult.messages[2]?.text ?? '', /状态：开启/);
+
+  const disableResult = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-skills-2',
+    text: '/skills off daily-news',
+  });
+  assert.equal(openai.setSkillEnabledCalls.length, 2);
+  assert.equal(openai.setSkillEnabledCalls[1]?.enabled, false);
+  assert.match(disableResult.messages[0]?.text ?? '', /已禁用 skill。/);
+  assert.match(disableResult.messages[2]?.text ?? '', /状态：关闭/);
+});
+
+test('/skills returns a visible error when provider skill lookup fails', async () => {
+  const { runtime, openai } = makeRuntime({
+    defaultCwd: '/tmp/openai-default',
+  });
+  openai.listSkillsError = new Error('Timed out connecting to ws://127.0.0.1:36867 after launching "codex".');
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-skills-3',
+    text: '/skills',
+  });
+
+  assert.equal(result.type, 'message');
+  assert.match(result.messages[0]?.text ?? '', /读取 skills 失败：Timed out connecting/u);
+});
+
+test('/auto add creates a draft first and /auto confirm persists the standalone automation job', async () => {
+  const { runtime, openai } = makeRuntime({
+    defaultCwd: '/tmp/codexbridge-auto-standalone',
+  });
+
+  const drafted = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-1',
+    text: '/auto add every 30m | 检查部署状态，有变化再告诉我',
+  });
+
+  assert.equal(openai.startThreadCalls.length, 0);
+  assert.match(drafted.messages[0]?.text ?? '', /自动化草案 \| 检查部署状态，有变化再告诉我/);
+  assert.match(drafted.messages[1]?.text ?? '', /模式：独立执行/);
+  assert.match(drafted.messages[2]?.text ?? '', /计划：every 30m/);
+  assert.match(drafted.messages[6]?.text ?? '', /确认：\/auto confirm/);
+
+  const added = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-1',
+    text: '/auto confirm',
+  });
+
+  assert.equal(openai.startThreadCalls.length, 1);
+  assert.match(added.messages[0]?.text ?? '', /自动化任务已创建/);
+  assert.match(added.messages[1]?.text ?? '', /标题：检查部署状态，有变化再告诉我/);
+
+  const listed = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-1',
+    text: '/auto list',
+  });
+
+  const text = listed.messages.map((entry: any) => entry.text).join('\n');
+  assert.match(text, /自动化任务 \| 1 项/);
+  assert.match(text, /1\. 检查部署状态，有变化再告诉我/);
+  assert.match(text, /模式：独立执行/);
+  assert.match(text, /计划：every 30m/);
+});
+
+test('/auto add natural language produces a draft through provider normalization before /auto confirm', async () => {
+  const { runtime, openai } = makeRuntime({
+    defaultCwd: '/tmp/codexbridge-auto-natural',
+  });
+  const originalStartTurn = openai.startTurn.bind(openai);
+  openai.startTurn = async (params: any) => {
+    const parserInput = String(params?.inputText ?? '');
+    if (parserInput.includes('automation-draft normalizer') || parserInput.includes('automation 草案规范化器')) {
+      return {
+        outputText: JSON.stringify({
+          valid: true,
+          title: 'news 早报',
+          mode: 'standalone',
+          schedule: {
+            kind: 'daily',
+            hour: 7,
+            minute: 0,
+          },
+          task: '调用 news skill 给我发送到微信',
+        }),
+      };
+    }
+    return originalStartTurn(params);
+  };
+
+  const drafted = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-natural-1',
+    text: '/auto add 每天早上7点调用 news skill 给我发送到微信',
+  });
+
+  const draftText = drafted.messages.map((entry: any) => entry.text ?? '').join('\n');
+  assert.match(draftText, /自动化草案 \| news 早报/);
+  assert.match(draftText, /计划：daily 07:00 UTC/);
+  assert.match(draftText, /任务：调用 news skill 给我发送到微信/);
+  assert.equal(openai.startThreadCalls.length, 1);
+
+  const confirmed = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-natural-1',
+    text: '/auto confirm',
+  });
+  const confirmText = confirmed.messages.map((entry: any) => entry.text ?? '').join('\n');
+  assert.match(confirmText, /自动化任务已创建/);
+  assert.match(confirmText, /标题：news 早报/);
+  assert.equal(openai.startThreadCalls.length, 2);
+});
+
+test('/auto rename and /auto del update and remove automation jobs', async () => {
+  const { runtime } = makeRuntime({
+    defaultCwd: '/tmp/codexbridge-auto-rename',
+  });
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-2',
+    text: '/auto add daily 09:00 | 每天整理昨天的提交摘要',
+  });
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-2',
+    text: '/auto confirm',
+  });
+
+  const renamed = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-2',
+    text: '/auto rename 1 晚间汇总',
+  });
+  assert.match(renamed.messages[0]?.text ?? '', /自动化任务标题已更新/);
+  assert.match(renamed.messages[1]?.text ?? '', /标题：晚间汇总/);
+
+  const deleted = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-2',
+    text: '/auto del 1',
+  });
+  assert.match(deleted.messages[0]?.text ?? '', /自动化任务已删除/);
+
+  const listed = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-2',
+    text: '/auto',
+  });
+  assert.equal(listed.messages[0]?.text ?? '', '自动化任务 | 0 项');
+});
+
+test('/auto show without args opens the only automation job and shows a future next-run time', async () => {
+  const { runtime } = makeRuntime({
+    defaultCwd: '/tmp/codexbridge-auto-show-single',
+  });
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-show-single',
+    text: '/auto add every 30m | 检查系统状态并发给我',
+  });
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-show-single',
+    text: '/auto confirm',
+  });
+
+  const detail = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-show-single',
+    text: '/auto show',
+  });
+
+  const text = detail.messages.map((entry: any) => entry.text ?? '').join('\n');
+  assert.match(text, /自动化详情 \| 检查系统状态并发给我/);
+  assert.match(text, /下次执行：/);
+  assert.match(text, /后|202\d-\d\d-\d\d/);
+});
+
+test('/auto show without args asks for an index when multiple automation jobs exist', async () => {
+  const { runtime } = makeRuntime({
+    defaultCwd: '/tmp/codexbridge-auto-show-multi',
+  });
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-show-multi',
+    text: '/auto add every 30m | 检查系统状态并发给我',
+  });
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-show-multi',
+    text: '/auto confirm',
+  });
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-show-multi',
+    text: '/auto add daily 09:00 | 每天整理昨天的提交摘要',
+  });
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-show-multi',
+    text: '/auto confirm',
+  });
+
+  const detail = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-show-multi',
+    text: '/auto show',
+  });
+
+  assert.equal(detail.messages[0]?.text ?? '', '请指定自动化任务序号，例如：/auto show 1');
+});
+
+test('/auto add thread requires an existing bound session', async () => {
+  const { runtime } = makeRuntime({
+    defaultCwd: '/tmp/codexbridge-auto-thread',
+  });
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-3',
+    text: '/auto add thread every 10m | 继续跟进当前线程里的部署情况',
+  });
+
+  assert.equal(result.messages[0]?.text ?? '', 'thread 模式需要当前 scope 已绑定会话。先发送普通消息或 /new 建立会话后再试。');
+});
+
+test('/auto cancel clears the pending automation draft', async () => {
+  const { runtime } = makeRuntime({
+    defaultCwd: '/tmp/codexbridge-auto-cancel',
+  });
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-cancel-1',
+    text: '/auto add every 30m | 检查系统状态并发给我',
+  });
+
+  const cancelled = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-cancel-1',
+    text: '/auto cancel',
+  });
+  assert.match(cancelled.messages[0]?.text ?? '', /已取消当前自动化草案/);
+
+  const confirmed = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-cancel-1',
+    text: '/auto confirm',
+  });
+  assert.match(confirmed.messages[0]?.text ?? '', /当前没有待确认的自动化草案/);
 });
 
 test('ordinary messages after /stop do not eagerly resume the thread when startTurn succeeds', async () => {

@@ -104,12 +104,14 @@ interface PendingScopeNotice {
 interface WeixinBridgeRuntimeOptions {
   platformPlugin: PlatformPluginLike;
   bridgeCoordinator: BridgeCoordinatorLike;
+  automationJobs?: any;
   onError?: (error: unknown) => Promise<void> | void;
   previewSoftTargetBytes?: number;
   previewHardLimitBytes?: number;
   previewIntervalMs?: number;
   typingKeepaliveMs?: number;
   inboundAttachmentMergeWindowMs?: number;
+  automationPollMs?: number;
   locale?: string | null;
 }
 
@@ -120,6 +122,8 @@ export class WeixinBridgeRuntime {
   platformPlugin: PlatformPluginLike;
 
   bridgeCoordinator: BridgeCoordinatorLike;
+
+  automationJobs: any;
 
   onError: (error: unknown) => Promise<void> | void;
 
@@ -132,6 +136,8 @@ export class WeixinBridgeRuntime {
   typingKeepaliveMs: number;
 
   inboundAttachmentMergeWindowMs: number;
+
+  automationPollMs: number;
 
   i18n: Translator;
 
@@ -147,25 +153,33 @@ export class WeixinBridgeRuntime {
 
   recentScopeNotices: Map<string, { content: string; sentAt: number }>;
 
+  automationSweepTimer: ReturnType<typeof setInterval> | null;
+
+  automationSweepInFlight: Promise<void> | null;
+
   constructor({
     platformPlugin,
     bridgeCoordinator,
+    automationJobs = null,
     onError = async () => {},
     previewSoftTargetBytes = 2048,
     previewHardLimitBytes = 2048,
     previewIntervalMs = 3000,
     typingKeepaliveMs = WeixinBridgeRuntime.DEFAULT_TYPING_KEEPALIVE_MS,
     inboundAttachmentMergeWindowMs = 3000,
+    automationPollMs = 30_000,
     locale = null,
   }) {
     this.platformPlugin = platformPlugin;
     this.bridgeCoordinator = bridgeCoordinator;
+    this.automationJobs = automationJobs;
     this.onError = onError;
     this.previewSoftTargetBytes = previewSoftTargetBytes;
     this.previewHardLimitBytes = previewHardLimitBytes;
     this.previewIntervalMs = previewIntervalMs;
     this.typingKeepaliveMs = typingKeepaliveMs;
     this.inboundAttachmentMergeWindowMs = inboundAttachmentMergeWindowMs;
+    this.automationPollMs = automationPollMs;
     this.i18n = createI18n(locale);
     this.poller = null;
     this.backgroundTasks = new Set();
@@ -173,10 +187,14 @@ export class WeixinBridgeRuntime {
     this.pendingInboundMerges = new Map();
     this.pendingScopeNotices = new Map();
     this.recentScopeNotices = new Map();
+    this.automationSweepTimer = null;
+    this.automationSweepInFlight = null;
   }
 
   async start(): Promise<void> {
     await this.platformPlugin.start();
+    this.automationJobs?.resetRunningJobs?.();
+    this.startAutomationScheduler();
     this.poller = new WeixinPoller({
       plugin: this.platformPlugin,
       onEvent: async (event) => this.dispatchInboundEvent(event),
@@ -190,6 +208,7 @@ export class WeixinBridgeRuntime {
   async stop() {
     this.poller?.stop();
     this.poller = null;
+    this.stopAutomationScheduler();
     await this.flushAllPendingInboundMerges();
     await this.waitForIdle();
     await this.platformPlugin.stop();
@@ -243,6 +262,9 @@ export class WeixinBridgeRuntime {
 
   async waitForIdle(): Promise<void> {
     await this.flushAllPendingInboundMerges();
+    if (this.automationSweepInFlight) {
+      await this.automationSweepInFlight.catch(() => {});
+    }
     const tasks = [...this.backgroundTasks];
     if (tasks.length === 0) {
       return;
@@ -1089,6 +1111,131 @@ export class WeixinBridgeRuntime {
     }
   }
 
+  startAutomationScheduler(): void {
+    if (!this.automationJobs || this.automationPollMs <= 0) {
+      return;
+    }
+    this.stopAutomationScheduler();
+    void this.runAutomationSweep();
+    this.automationSweepTimer = setInterval(() => {
+      void this.runAutomationSweep();
+    }, this.automationPollMs);
+  }
+
+  stopAutomationScheduler(): void {
+    if (!this.automationSweepTimer) {
+      return;
+    }
+    clearInterval(this.automationSweepTimer);
+    this.automationSweepTimer = null;
+  }
+
+  async runAutomationSweep(): Promise<void> {
+    if (!this.automationJobs) {
+      return;
+    }
+    if (this.automationSweepInFlight) {
+      return this.automationSweepInFlight;
+    }
+    const task = this.runAutomationSweepInternal()
+      .catch(async (error) => {
+        await this.onError(error);
+      })
+      .finally(() => {
+        if (this.automationSweepInFlight === task) {
+          this.automationSweepInFlight = null;
+        }
+      });
+    this.automationSweepInFlight = task;
+    return task;
+  }
+
+  async runAutomationSweepInternal(): Promise<void> {
+    const jobs = this.automationJobs?.claimDueJobs?.('weixin') ?? [];
+    if (!Array.isArray(jobs) || jobs.length === 0) {
+      return;
+    }
+    for (const job of jobs) {
+      const task = this.runAutomationJob(job);
+      this.trackBackgroundTask(task);
+    }
+  }
+
+  async runAutomationJob(job: any): Promise<RuntimeResponse> {
+    const scopeId = String(job?.externalScopeId ?? '');
+    if (!scopeId || await this.isScopeBusyForAutomation(job)) {
+      this.automationJobs?.deferJob?.(job.id, Date.now() + 60_000);
+      return {
+        type: 'message',
+        messages: [],
+      };
+    }
+
+    const event: InboundTextEvent = {
+      platform: String(job.platform ?? 'weixin'),
+      externalScopeId: scopeId,
+      text: String(job.prompt ?? '').trim(),
+      cwd: typeof job.cwd === 'string' ? job.cwd : null,
+      locale: typeof job.locale === 'string' ? job.locale : null,
+      metadata: {
+        codexbridge: {
+          overrideBridgeSessionId: job.bridgeSessionId,
+          automationJobId: job.id,
+          automationMode: job.mode,
+        },
+      },
+    };
+
+    try {
+      const response = await this.enqueueScopeWork(scopeId, async () => this.processInboundEventWithOptions(event, {
+        deferPostResponseAction: false,
+      }));
+      const preview = buildAutomationResultPreview(response);
+      this.automationJobs?.completeJob?.(job.id, {
+        resultPreview: preview,
+        error: null,
+        deliveredAt: Date.now(),
+      });
+      return response;
+    } catch (error) {
+      const message = formatAutomationError(error);
+      this.automationJobs?.completeJob?.(job.id, {
+        resultPreview: null,
+        error: message,
+        deliveredAt: Date.now(),
+      });
+      await this.sendTextWithRetry({
+        externalScopeId: scopeId,
+        content: this.i18n.t('runtime.error.automationFailed', {
+          title: String(job.title ?? 'automation'),
+          error: message,
+        }),
+      });
+      throw error;
+    }
+  }
+
+  async isScopeBusyForAutomation(job: any): Promise<boolean> {
+    const scopeId = String(job?.externalScopeId ?? '');
+    if (!scopeId) {
+      return true;
+    }
+    if (this.pendingInboundMerges.has(scopeId) || this.scopeChains.has(scopeId)) {
+      return true;
+    }
+    const scopeRef = {
+      platform: String(job?.platform ?? 'weixin'),
+      externalScopeId: scopeId,
+    };
+    if (typeof (this.bridgeCoordinator as any)?.reconcileActiveTurn === 'function') {
+      const activeTurn = await (this.bridgeCoordinator as any).reconcileActiveTurn(scopeRef);
+      if (activeTurn) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   async flushPendingScopeNotice(externalScopeId: string): Promise<void> {
     const scopeId = String(externalScopeId ?? '').trim();
     if (!scopeId) {
@@ -1235,6 +1382,26 @@ function extractResponseArtifactMessages(response: RuntimeResponse): OutputArtif
   return response.messages
     .map((message) => normalizeResponseArtifact(message))
     .filter(Boolean) as OutputArtifact[];
+}
+
+function buildAutomationResultPreview(response: RuntimeResponse): string | null {
+  const finalText = extractResponseMessageText(response);
+  if (finalText) {
+    return truncateDebugText(finalText, 160) || finalText.slice(0, 160);
+  }
+  const artifacts = extractResponseArtifactMessages(response);
+  if (artifacts.length > 0) {
+    const first = artifacts[0];
+    return `${first.kind}: ${first.displayName ?? first.path}`;
+  }
+  return null;
+}
+
+function formatAutomationError(error: unknown): string {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+  return String(error ?? 'unknown error');
 }
 
 function normalizeResponseArtifact(message: RuntimeResponseMessage): OutputArtifact | null {

@@ -8,6 +8,10 @@ import { writeSequencedStderrLine } from '../../core/sequenced_stderr.js';
 import { readCodexAccountIdentity } from './auth_state.js';
 import type {
   ProviderApprovalRequest,
+  ProviderSkillError,
+  ProviderSkillInfo,
+  ProviderSkillsListResult,
+  ProviderSkillToolDependency,
   ProviderUsageReport,
   ProviderThreadListResult,
   ProviderThreadStartResult,
@@ -15,6 +19,8 @@ import type {
   ProviderTurnProgress,
   ProviderTurnResult,
 } from '../../types/provider.js';
+
+const APP_SERVER_CONNECT_TIMEOUT_MS = 20_000;
 
 interface CodexAppLogger {
   debug?: (message: string) => void;
@@ -63,6 +69,46 @@ interface CodexAppCreditsSnapshot {
   balance?: string | null;
   hasCredits?: boolean | null;
   unlimited?: boolean | null;
+}
+
+interface CodexAppSkillToolDependency {
+  type?: string | null;
+  value?: string | null;
+  command?: string | null;
+  description?: string | null;
+  transport?: string | null;
+  url?: string | null;
+}
+
+interface CodexAppSkillInterface {
+  displayName?: string | null;
+  defaultPrompt?: string | null;
+  shortDescription?: string | null;
+  brandColor?: string | null;
+}
+
+interface CodexAppSkillMetadata {
+  name?: string | null;
+  description?: string | null;
+  enabled?: boolean | null;
+  path?: string | null;
+  scope?: string | null;
+  shortDescription?: string | null;
+  interface?: CodexAppSkillInterface | null;
+  dependencies?: {
+    tools?: CodexAppSkillToolDependency[] | null;
+  } | null;
+}
+
+interface CodexAppSkillErrorInfo {
+  path?: string | null;
+  message?: string | null;
+}
+
+interface CodexAppSkillsListEntry {
+  cwd?: string | null;
+  errors?: CodexAppSkillErrorInfo[] | null;
+  skills?: CodexAppSkillMetadata[] | null;
 }
 
 interface PendingRequest {
@@ -539,6 +585,44 @@ export class CodexAppClient extends EventEmitter {
     return mapAppServerRateLimits(result);
   }
 
+  async listSkills({
+    cwd = null,
+    forceReload = false,
+  }: {
+    cwd?: string | null;
+    forceReload?: boolean;
+  } = {}): Promise<ProviderSkillsListResult> {
+    const result: any = await this.request('skills/list', {
+      cwds: cwd ? [cwd] : [],
+      forceReload,
+    }, { timeoutMs: 30_000 });
+    const rows = Array.isArray(result?.data) ? result.data : [];
+    const entry = rows.find((item: CodexAppSkillsListEntry) => normalizeNullableString(item?.cwd) === cwd)
+      ?? rows[0]
+      ?? null;
+    return {
+      cwd: normalizeNullableString(entry?.cwd) ?? cwd ?? null,
+      skills: Array.isArray(entry?.skills) ? entry.skills.map(mapSkillMetadata).filter(Boolean) : [],
+      errors: Array.isArray(entry?.errors) ? entry.errors.map(mapSkillErrorInfo).filter(Boolean) : [],
+    };
+  }
+
+  async setSkillEnabled({
+    enabled,
+    name = null,
+    path = null,
+  }: {
+    enabled: boolean;
+    name?: string | null;
+    path?: string | null;
+  }): Promise<void> {
+    await this.request('skills/config/write', {
+      enabled,
+      name,
+      path,
+    }, { timeoutMs: 30_000 });
+  }
+
   async startServer(): Promise<void> {
     if (this.autolaunch && this.launchCommand?.trim()) {
       const launcher = this.spawnImpl(this.launchCommand, {
@@ -608,7 +692,7 @@ export class CodexAppClient extends EventEmitter {
   async connectWebSocket(): Promise<void> {
     const url = `ws://127.0.0.1:${this.port}`;
     const started = Date.now();
-    while (Date.now() - started < 10_000) {
+    while (Date.now() - started < APP_SERVER_CONNECT_TIMEOUT_MS) {
       if (this.childStartError) {
         throw this.childStartError;
       }
@@ -2144,6 +2228,60 @@ function mapAppServerRateLimits(payload: CodexAppRateLimitsResponse | null | und
   }
 
   return report;
+}
+
+function mapSkillToolDependency(raw: CodexAppSkillToolDependency): ProviderSkillToolDependency | null {
+  const type = normalizeNullableString(raw?.type);
+  const value = normalizeNullableString(raw?.value);
+  if (!type || !value) {
+    return null;
+  }
+  return {
+    type,
+    value,
+    command: normalizeNullableString(raw?.command),
+    description: normalizeNullableString(raw?.description),
+    transport: normalizeNullableString(raw?.transport),
+    url: normalizeNullableString(raw?.url),
+  };
+}
+
+function mapSkillMetadata(raw: CodexAppSkillMetadata): ProviderSkillInfo | null {
+  const name = normalizeNullableString(raw?.name);
+  const description = normalizeNullableString(raw?.description);
+  const skillPath = normalizeNullableString(raw?.path);
+  const scope = normalizeNullableString(raw?.scope);
+  if (!name || !description || !skillPath || !scope) {
+    return null;
+  }
+  const dependencies = Array.isArray(raw?.dependencies?.tools)
+    ? raw.dependencies.tools.map(mapSkillToolDependency).filter(Boolean)
+    : [];
+  return {
+    name,
+    description,
+    enabled: raw?.enabled !== false,
+    path: skillPath,
+    scope,
+    shortDescription: normalizeNullableString(raw?.interface?.shortDescription)
+      ?? normalizeNullableString(raw?.shortDescription),
+    displayName: normalizeNullableString(raw?.interface?.displayName),
+    defaultPrompt: normalizeNullableString(raw?.interface?.defaultPrompt),
+    brandColor: normalizeNullableString(raw?.interface?.brandColor),
+    dependencies,
+  };
+}
+
+function mapSkillErrorInfo(raw: CodexAppSkillErrorInfo): ProviderSkillError | null {
+  const skillPath = normalizeNullableString(raw?.path);
+  const message = normalizeNullableString(raw?.message);
+  if (!skillPath || !message) {
+    return null;
+  }
+  return {
+    path: skillPath,
+    message,
+  };
 }
 
 function appServerBucketName(snapshot: CodexAppRateLimitSnapshot): string {

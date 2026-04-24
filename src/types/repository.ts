@@ -1,4 +1,4 @@
-import type { BridgeSession, SessionSettings, ThreadMetadata } from './core.js';
+import type { AutomationJob, BridgeSession, SessionSettings, ThreadMetadata } from './core.js';
 import type { ProviderProfile } from './provider.js';
 
 export interface PlatformBinding {
@@ -38,3 +38,9 @@ export interface ThreadMetadataRepository {
   listByProviderProfileId(providerProfileId: string): ThreadMetadata[];
 }
 
+export interface AutomationJobRepository {
+  getById(id: string): AutomationJob | null;
+  save(job: AutomationJob): AutomationJob;
+  delete(id: string): void;
+  list(): AutomationJob[];
+}

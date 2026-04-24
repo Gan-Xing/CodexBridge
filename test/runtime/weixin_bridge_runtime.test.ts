@@ -5,6 +5,7 @@ import { createI18n } from '../../src/i18n/index.js';
 
 interface RuntimeHarnessOptions {
   coordinator: any;
+  automationJobs?: any;
   sendText: (payload: { externalScopeId: string; content: string }) => Promise<any> | any;
   sendMedia?: (payload: { externalScopeId: string; filePath: string; caption?: string | null }) => Promise<any> | any;
   sendTyping?: (payload: { externalScopeId: string; status: 'start' | 'stop' }) => Promise<void> | void;
@@ -13,11 +14,13 @@ interface RuntimeHarnessOptions {
   previewIntervalMs?: number;
   typingKeepaliveMs?: number;
   inboundAttachmentMergeWindowMs?: number;
+  automationPollMs?: number;
   pollEvents?: any[];
 }
 
 function makeRuntime({
   coordinator,
+  automationJobs = null,
   sendText,
   sendMedia,
   sendTyping,
@@ -26,6 +29,7 @@ function makeRuntime({
   previewIntervalMs = 0,
   typingKeepaliveMs = 8000,
   inboundAttachmentMergeWindowMs = 3000,
+  automationPollMs = 30_000,
   pollEvents = null,
 }: RuntimeHarnessOptions) {
   return new WeixinBridgeRuntime({
@@ -71,10 +75,12 @@ function makeRuntime({
       },
     },
     bridgeCoordinator: coordinator,
+    automationJobs,
     previewSoftTargetBytes,
     previewIntervalMs,
     typingKeepaliveMs,
     inboundAttachmentMergeWindowMs,
+    automationPollMs,
   });
 }
 
@@ -513,6 +519,113 @@ test('WeixinBridgeRuntime sends media-only response messages through platform se
       caption: '截图说明',
     },
   ]);
+});
+
+test('WeixinBridgeRuntime runs due automation jobs against the same WeChat scope and records completion', async () => {
+  const sent: Array<{ externalScopeId: string; content: string }> = [];
+  const deferredCalls: Array<{ id: string; nextRunAt: number }> = [];
+  const completedCalls: Array<{ id: string; resultPreview?: string | null; error?: string | null; deliveredAt?: number | null }> = [];
+  const job = {
+    id: 'auto-1',
+    platform: 'weixin',
+    externalScopeId: 'wxid_1',
+    title: '部署巡检',
+    mode: 'standalone',
+    bridgeSessionId: 'session-auto-1',
+    cwd: '/tmp/codexbridge-auto',
+    locale: 'zh-CN',
+    prompt: '检查部署是否完成',
+  };
+  const seenEvents: any[] = [];
+  const runtime = makeRuntime({
+    automationJobs: {
+      claimDueJobs() {
+        return [job];
+      },
+      deferJob(id: string, nextRunAt: number) {
+        deferredCalls.push({ id, nextRunAt });
+      },
+      completeJob(id: string, payload: any) {
+        completedCalls.push({ id, ...payload });
+      },
+      resetRunningJobs() {},
+    },
+    sendText: async ({ externalScopeId, content }) => {
+      sent.push({ externalScopeId, content });
+    },
+    coordinator: {
+      async reconcileActiveTurn() {
+        return null;
+      },
+      async handleInboundEvent(event: any) {
+        seenEvents.push(event);
+        return completeResponse('自动化执行完成。');
+      },
+    },
+  });
+
+  await runtime.runAutomationSweep();
+  await runtime.waitForIdle();
+
+  assert.equal(deferredCalls.length, 0);
+  assert.equal(seenEvents.length, 1);
+  assert.equal(seenEvents[0]?.metadata?.codexbridge?.overrideBridgeSessionId, 'session-auto-1');
+  assert.equal(seenEvents[0]?.metadata?.codexbridge?.automationJobId, 'auto-1');
+  assert.deepEqual(sent, [
+    { externalScopeId: 'wxid_1', content: '自动化执行完成。' },
+  ]);
+  assert.equal(completedCalls.length, 1);
+  assert.equal(completedCalls[0]?.id, 'auto-1');
+  assert.equal(completedCalls[0]?.resultPreview, '自动化执行完成。');
+  assert.equal(completedCalls[0]?.error, null);
+  assert.ok(typeof completedCalls[0]?.deliveredAt === 'number');
+});
+
+test('WeixinBridgeRuntime defers due automation jobs when the scope is busy', async () => {
+  const deferredCalls: Array<{ id: string; nextRunAt: number }> = [];
+  const job = {
+    id: 'auto-2',
+    platform: 'weixin',
+    externalScopeId: 'wxid_1',
+    title: '排障巡检',
+    mode: 'standalone',
+    bridgeSessionId: 'session-auto-2',
+    cwd: '/tmp/codexbridge-auto',
+    locale: 'zh-CN',
+    prompt: '继续排查问题',
+  };
+  const runtime = makeRuntime({
+    automationJobs: {
+      claimDueJobs() {
+        return [job];
+      },
+      deferJob(id: string, nextRunAt: number) {
+        deferredCalls.push({ id, nextRunAt });
+      },
+      completeJob() {
+        throw new Error('completeJob should not be called while scope is busy');
+      },
+      resetRunningJobs() {},
+    },
+    sendText: async () => {
+      throw new Error('sendText should not be called while scope is busy');
+    },
+    coordinator: {
+      async reconcileActiveTurn() {
+        return { turnId: 'turn-live' };
+      },
+      async handleInboundEvent() {
+        throw new Error('handleInboundEvent should not run while scope is busy');
+      },
+    },
+  });
+
+  await runtime.runAutomationSweep();
+  await runtime.waitForIdle();
+
+  assert.equal(deferredCalls.length, 1);
+  assert.equal(deferredCalls[0]?.id, 'auto-2');
+  assert.equal(typeof deferredCalls[0]?.nextRunAt, 'number');
 });
 
 test('WeixinBridgeRuntime sends artifact-based response messages through platform sendMedia', async () => {

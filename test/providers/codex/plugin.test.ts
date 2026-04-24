@@ -245,6 +245,57 @@ test('CodexProviderPlugin startReview runs native review through the injected re
   assert.equal(result.threadId, 'codex-review-cli-1');
 });
 
+test('CodexProviderPlugin lists visible skills and forwards enable-disable writes to the app client', async () => {
+  const listCalls: any[] = [];
+  const writeCalls: any[] = [];
+  const plugin = makePlugin(() => ({
+    async start() {},
+    async listSkills(params: any) {
+      listCalls.push(params);
+      return {
+        cwd: '/tmp/work',
+        skills: [{
+          name: 'news-digest',
+          description: 'Summarize the news.',
+          enabled: true,
+          path: '/tmp/skills/news-digest/SKILL.md',
+          scope: 'user',
+          shortDescription: 'Daily news summary',
+          displayName: 'News Digest',
+          defaultPrompt: 'Summarize today’s key news',
+          brandColor: '#00AAFF',
+          dependencies: [{ type: 'tool', value: 'news' }],
+        }],
+        errors: [],
+      };
+    },
+    async setSkillEnabled(params: any) {
+      writeCalls.push(params);
+    },
+  }));
+
+  const listed = await plugin.listSkills({
+    providerProfile: makeProfile(),
+    cwd: '/tmp/work',
+    forceReload: true,
+  });
+  await plugin.setSkillEnabled({
+    providerProfile: makeProfile(),
+    enabled: false,
+    path: '/tmp/skills/news-digest/SKILL.md',
+    name: 'news-digest',
+  });
+
+  assert.equal(listCalls.length, 1);
+  assert.equal(listCalls[0]?.cwd, '/tmp/work');
+  assert.equal(listCalls[0]?.forceReload, true);
+  assert.equal(listed.skills[0]?.displayName, 'News Digest');
+  assert.deepEqual(listed.skills[0]?.dependencies, [{ type: 'tool', value: 'news' }]);
+  assert.equal(writeCalls.length, 1);
+  assert.equal(writeCalls[0]?.enabled, false);
+  assert.equal(writeCalls[0]?.path, '/tmp/skills/news-digest/SKILL.md');
+});
+
 test('CodexProviderPlugin turns inbound attachments into text prompt plus localImage inputs', async () => {
   let seenInput = null;
   let seenInputText = null;

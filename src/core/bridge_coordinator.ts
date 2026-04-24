@@ -26,12 +26,23 @@ import {
   CodexInstructionsManager,
   type CodexInstructionsSnapshot,
 } from '../providers/codex/instructions_state.js';
-import type { TurnArtifactDeliveryState, UploadBatchItem, UploadBatchState } from '../types/core.js';
+import type { WeiboHotSearchServiceLike } from '../services/weibo_hot_search.js';
+import type {
+  AutomationMode,
+  AutomationSchedule,
+  PlatformScopeRef,
+  SessionSettings,
+  TurnArtifactDeliveryState,
+  UploadBatchItem,
+  UploadBatchState,
+} from '../types/core.js';
 import type { InboundAttachment, InboundTextEvent } from '../types/platform.js';
 import type {
   OutputArtifact,
   ProviderApprovalRequest,
   ProviderReviewTarget,
+  ProviderSkillInfo,
+  ProviderSkillsListResult,
   ProviderTurnProgress,
 } from '../types/provider.js';
 
@@ -89,6 +100,36 @@ type RetryableRequestSnapshot = {
   attachments: InboundAttachment[];
   cwd: string | null;
   storedAt: number;
+};
+
+type AutomationDraftCandidate = {
+  title: string;
+  mode: AutomationMode;
+  schedule: AutomationSchedule;
+  prompt: string;
+};
+
+type PendingAutomationDraft = {
+  createdAt: number;
+  rawInput: string;
+  normalizedBy: 'explicit' | 'codex';
+  title: string;
+  mode: AutomationMode;
+  schedule: AutomationSchedule;
+  prompt: string;
+  providerProfileId: string;
+  locale: string | null;
+  cwd: string | null;
+  initialSettings: Partial<SessionSettings>;
+  threadBridgeSessionId: string | null;
+};
+
+type SkillBrowserState = {
+  cwd: string | null;
+  searchTerm: string | null;
+  items: ProviderSkillInfo[];
+  errors: Array<{ path: string; message: string }>;
+  updatedAt: number;
 };
 
 type CodexLoginAccountSummary = {
@@ -149,6 +190,10 @@ interface CodexInstructionsManagerLike {
   clearInstructions(): Promise<CodexInstructionsSnapshot>;
 }
 
+interface HandleWeiboCommandResult {
+  limit: number;
+}
+
 type StopCheckpointSnapshot = {
   threadId: string;
   stoppedAt: number;
@@ -161,25 +206,30 @@ type StopCheckpointSnapshot = {
 
 export class BridgeCoordinator {
   bridgeSessions: any;
+  automationJobs: any;
   activeTurns: any;
   providerProfiles: any;
   providerRegistry: any;
   defaultProviderProfileId: any;
   defaultCwd: any;
   restartBridge: any;
+  weiboHotSearch: WeiboHotSearchServiceLike | null;
 
   codexAuthManager: CodexAuthManagerLike | null;
   codexInstructionsManager: CodexInstructionsManagerLike;
   now: any;
   threadBrowserStates: Map<any, any>;
+  skillBrowserStates: Map<any, SkillBrowserState>;
   localeOverridesByScope: Map<string, SupportedLocale>;
   pendingArtifactClarificationsByScope: Map<string, { originalText: string; askedAt: number }>;
   pendingInstructionsEditsByScope: Map<string, { startedAt: number }>;
+  pendingAutomationDraftsByScope: Map<string, PendingAutomationDraft>;
   localeContext: AsyncLocalStorage<SupportedLocale>;
   i18n: Translator;
 
   constructor({
     bridgeSessions,
+    automationJobs = null,
     activeTurns = null,
     providerProfiles,
     providerRegistry,
@@ -188,23 +238,28 @@ export class BridgeCoordinator {
     restartBridge = null,
     codexAuthManager = null,
     codexInstructionsManager = null,
+    weiboHotSearch = null,
     now = () => Date.now(),
     locale = null,
   }) {
     this.bridgeSessions = bridgeSessions;
+    this.automationJobs = automationJobs;
     this.activeTurns = activeTurns;
     this.providerProfiles = providerProfiles;
     this.providerRegistry = providerRegistry;
     this.defaultProviderProfileId = defaultProviderProfileId;
     this.defaultCwd = normalizeCwd(defaultCwd);
     this.restartBridge = restartBridge;
+    this.weiboHotSearch = weiboHotSearch;
     this.codexAuthManager = codexAuthManager;
     this.codexInstructionsManager = codexInstructionsManager ?? new CodexInstructionsManager();
     this.now = now;
     this.threadBrowserStates = new Map();
+    this.skillBrowserStates = new Map();
     this.localeOverridesByScope = new Map();
     this.pendingArtifactClarificationsByScope = new Map();
     this.pendingInstructionsEditsByScope = new Map();
+    this.pendingAutomationDraftsByScope = new Map();
     this.localeContext = new AsyncLocalStorage();
     this.i18n = createI18n(locale);
   }
@@ -222,7 +277,7 @@ export class BridgeCoordinator {
   }
 
   resolveLocaleForEvent(scopeRef, event) {
-    const session = this.bridgeSessions.resolveScopeSession(scopeRef);
+    const session = this.resolveSessionForEvent(scopeRef, event);
     if (session) {
       const settings = this.bridgeSessions.getSessionSettings(session.id);
       if (settings?.locale) {
@@ -291,7 +346,7 @@ export class BridgeCoordinator {
       return clarification.response;
     }
     const effectiveEvent = clarification.event ?? event;
-    const currentSession = this.bridgeSessions.resolveScopeSession(scopeRef);
+    const currentSession = this.resolveSessionForEvent(scopeRef, effectiveEvent);
     const uploadState = currentSession ? this.getUploadsStateForSession(currentSession.id) : null;
     if (uploadState?.active) {
       debugCoordinator('conversation_turn_blocked_uploads', {
@@ -315,16 +370,20 @@ export class BridgeCoordinator {
     let session = null;
     try {
       const locale = this.resolveScopeLocale(scopeRef, effectiveEvent);
-      session = await this.bridgeSessions.resolveOrCreateScopeSession(scopeRef, {
-        providerProfileId: this.resolveDefaultProviderProfileId(),
-        cwd: this.resolveEventCwd(effectiveEvent),
-        initialSettings: {
-          locale,
-        },
-        providerStartOptions: {
-          sourcePlatform: effectiveEvent.platform,
-        },
-      });
+      if (currentSession) {
+        session = currentSession;
+      } else {
+        session = await this.bridgeSessions.resolveOrCreateScopeSession(scopeRef, {
+          providerProfileId: this.resolveDefaultProviderProfileId(),
+          cwd: this.resolveEventCwd(effectiveEvent),
+          initialSettings: {
+            locale,
+          },
+          providerStartOptions: {
+            sourcePlatform: effectiveEvent.platform,
+          },
+        });
+      }
       debugCoordinator('conversation_turn_session_resolved', {
         platform: scopeRef.platform,
         scopeId: scopeRef.externalScopeId,
@@ -338,7 +397,9 @@ export class BridgeCoordinator {
         providerProfileId: session.providerProfileId,
         threadId: session.codexThreadId,
       });
-      this.storeRetryableRequest(session.id, effectiveEvent);
+      if (!isAutomationEvent(effectiveEvent)) {
+        this.storeRetryableRequest(session.id, effectiveEvent);
+      }
       const { result, session: nextSession } = await this.startTurnWithRecovery(scopeRef, session, effectiveEvent, options);
       debugCoordinator('conversation_turn_result', {
         platform: scopeRef.platform,
@@ -447,6 +508,12 @@ export class BridgeCoordinator {
         return this.handleStopCommand(event);
       case 'review':
         return this.handleReviewCommand(event, command.args, options);
+      case 'skills':
+        return this.handleSkillsCommand(event, command.args);
+      case 'automation':
+        return this.handleAutomationCommand(event, command.args);
+      case 'weibo':
+        return this.handleWeiboCommand(event, command.args);
       case 'threads':
         return this.handleThreadsCommand(event);
       case 'search':
@@ -864,6 +931,18 @@ export class BridgeCoordinator {
 
   clearPendingInstructionsEdit(event) {
     this.pendingInstructionsEditsByScope.delete(buildInstructionsEditKey(event));
+  }
+
+  getPendingAutomationDraft(scopeRef: PlatformScopeRef): PendingAutomationDraft | null {
+    return this.pendingAutomationDraftsByScope.get(buildAutomationDraftKey(scopeRef)) ?? null;
+  }
+
+  setPendingAutomationDraft(scopeRef: PlatformScopeRef, draft: PendingAutomationDraft) {
+    this.pendingAutomationDraftsByScope.set(buildAutomationDraftKey(scopeRef), draft);
+  }
+
+  clearPendingAutomationDraft(scopeRef: PlatformScopeRef) {
+    this.pendingAutomationDraftsByScope.delete(buildAutomationDraftKey(scopeRef));
   }
 
   async handlePendingInstructionsEdit(event) {
@@ -2334,6 +2413,163 @@ export class BridgeCoordinator {
     }
   }
 
+  async handleSkillsCommand(event, args = []) {
+    const scopeRef = toScopeRef(event);
+    const normalizedArgs = Array.isArray(args) ? args.map((value) => String(value ?? '').trim()).filter(Boolean) : [];
+    const session = this.resolveSessionForEvent(scopeRef, event);
+    const providerProfile = session
+      ? this.requireProviderProfile(session.providerProfileId)
+      : this.resolveScopeProviderProfile(scopeRef);
+    try {
+      const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+      if (typeof providerPlugin.listSkills !== 'function') {
+        return messageResponse([
+          this.t('coordinator.skills.unsupported'),
+        ], session ? buildSessionMeta(session) : this.buildScopedSessionMeta(event));
+      }
+
+      const subcommand = String(normalizedArgs[0] ?? '').trim().toLowerCase();
+      if (!subcommand || subcommand === 'list') {
+        return await this.handleSkillsListCommand(event, providerProfile, false);
+      }
+      if (subcommand === 'reload') {
+        return await this.handleSkillsListCommand(event, providerProfile, true);
+      }
+      if (subcommand === 'search') {
+        return await this.handleSkillsSearchCommand(event, providerProfile, normalizedArgs.slice(1).join(' '));
+      }
+      if (subcommand === 'show') {
+        return await this.handleSkillsShowCommand(event, providerProfile, normalizedArgs.slice(1).join(' '));
+      }
+      if (subcommand === 'on' || subcommand === 'enable') {
+        return await this.handleSkillsToggleCommand(event, providerProfile, normalizedArgs.slice(1).join(' '), true);
+      }
+      if (subcommand === 'off' || subcommand === 'disable') {
+        return await this.handleSkillsToggleCommand(event, providerProfile, normalizedArgs.slice(1).join(' '), false);
+      }
+      return await this.handleHelpsCommand(event, ['skills']);
+    } catch (error) {
+      return messageResponse([
+        this.t('coordinator.skills.failed', { error: formatUserError(error) }),
+      ], session ? buildSessionMeta(session) : this.buildScopedSessionMeta(event));
+    }
+  }
+
+  async handleSkillsListCommand(event, providerProfile, forceReload = false) {
+    const result = await this.fetchSkillsForEvent(event, providerProfile, {
+      forceReload,
+      searchTerm: null,
+    });
+    if (result.skills.length === 0) {
+      const lines = [
+        this.t('coordinator.skills.listTitle', {
+          cwd: result.cwd ?? this.t('common.notSet'),
+          count: 0,
+        }),
+        this.t('coordinator.skills.empty'),
+      ];
+      if (result.errors.length > 0) {
+        lines.push(this.t('coordinator.skills.errorCount', { count: result.errors.length }));
+      }
+      return messageResponse(lines, this.buildScopedSessionMeta(event));
+    }
+    return messageResponse(
+      renderSkillsListLines({
+        i18n: this.currentI18n,
+        cwd: result.cwd,
+        items: result.skills,
+        errors: result.errors,
+        searchTerm: null,
+      }),
+      this.buildScopedSessionMeta(event),
+    );
+  }
+
+  async handleSkillsSearchCommand(event, providerProfile, searchTerm) {
+    const query = String(searchTerm ?? '').trim();
+    if (!query) {
+      return this.handleHelpsCommand(event, ['skills']);
+    }
+    const result = await this.fetchSkillsForEvent(event, providerProfile, {
+      forceReload: false,
+      searchTerm: query,
+    });
+    if (result.skills.length === 0) {
+      return messageResponse([
+        this.t('coordinator.skills.listTitle', {
+          cwd: result.cwd ?? this.t('common.notSet'),
+          count: 0,
+        }),
+        this.t('coordinator.skills.searchLabel', { term: query }),
+        this.t('coordinator.skills.noMatch'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    return messageResponse(
+      renderSkillsListLines({
+        i18n: this.currentI18n,
+        cwd: result.cwd,
+        items: result.skills,
+        errors: result.errors,
+        searchTerm: query,
+      }),
+      this.buildScopedSessionMeta(event),
+    );
+  }
+
+  async handleSkillsShowCommand(event, providerProfile, token) {
+    const resolved = await this.resolveSkillSelection(event, providerProfile, token);
+    if (!resolved) {
+      return messageResponse([
+        this.t('coordinator.skills.notFound', { value: String(token ?? '').trim() || '?' }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    return messageResponse(
+      renderSkillDetailLines({
+        i18n: this.currentI18n,
+        index: resolved.index,
+        cwd: resolved.cwd,
+        skill: resolved.skill,
+      }),
+      this.buildScopedSessionMeta(event),
+    );
+  }
+
+  async handleSkillsToggleCommand(event, providerProfile, token, enabled) {
+    const resolved = await this.resolveSkillSelection(event, providerProfile, token);
+    if (!resolved) {
+      return messageResponse([
+        this.t('coordinator.skills.notFound', { value: String(token ?? '').trim() || '?' }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+    if (typeof providerPlugin.setSkillEnabled !== 'function') {
+      return messageResponse([
+        this.t('coordinator.skills.unsupported'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    await providerPlugin.setSkillEnabled({
+      providerProfile,
+      enabled,
+      path: resolved.skill.path,
+      name: resolved.skill.name,
+    });
+    const refreshed = await this.fetchSkillsForEvent(event, providerProfile, {
+      forceReload: true,
+      searchTerm: this.skillBrowserStates.get(formatPlatformScopeKey(event.platform, event.externalScopeId))?.searchTerm ?? null,
+    });
+    const currentSkill = refreshed.skills.find((entry) => entry.path === resolved.skill.path || entry.name === resolved.skill.name)
+      ?? resolved.skill;
+    return messageResponse([
+      enabled
+        ? this.t('coordinator.skills.enabled')
+        : this.t('coordinator.skills.disabled'),
+      this.t('coordinator.skills.nameLabel', { value: currentSkill.displayName || currentSkill.name }),
+      this.t('coordinator.skills.statusLabel', {
+        value: currentSkill.enabled ? this.t('common.enabled') : this.t('common.disabled'),
+      }),
+    ], this.buildScopedSessionMeta(event));
+  }
+
   async renderThreadsPage(event, {
     providerProfileId,
     cursor,
@@ -2390,8 +2626,106 @@ export class BridgeCoordinator {
   }
 
   buildScopedSessionMeta(event) {
-    const session = this.bridgeSessions.resolveScopeSession(toScopeRef(event));
+    const session = this.resolveSessionForEvent(toScopeRef(event), event);
     return session ? buildSessionMeta(session) : undefined;
+  }
+
+  async fetchSkillsForEvent(event, providerProfile, {
+    forceReload = false,
+    searchTerm = null,
+  }: {
+    forceReload?: boolean;
+    searchTerm?: string | null;
+  } = {}) {
+    const scopeKey = formatPlatformScopeKey(event.platform, event.externalScopeId);
+    const session = this.resolveSessionForEvent(toScopeRef(event), event);
+    const cwd = normalizeCwd(session?.cwd) ?? this.resolveEventCwd(event) ?? this.defaultCwd ?? null;
+    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+    const result: ProviderSkillsListResult = await providerPlugin.listSkills({
+      providerProfile,
+      cwd,
+      forceReload,
+    });
+    const filteredSkills = filterSkillsBySearchTerm(result.skills, searchTerm);
+    this.skillBrowserStates.set(scopeKey, {
+      cwd: result.cwd ?? cwd,
+      searchTerm: normalizeNullableString(searchTerm),
+      items: filteredSkills,
+      errors: result.errors,
+      updatedAt: this.now(),
+    });
+    return {
+      cwd: result.cwd ?? cwd,
+      skills: filteredSkills,
+      errors: result.errors,
+    };
+  }
+
+  async resolveSkillSelection(event, providerProfile, token) {
+    const rawToken = String(token ?? '').trim();
+    const scopeKey = formatPlatformScopeKey(event.platform, event.externalScopeId);
+    let state = this.skillBrowserStates.get(scopeKey) ?? null;
+    if (!state) {
+      await this.fetchSkillsForEvent(event, providerProfile, {
+        forceReload: false,
+        searchTerm: null,
+      });
+      state = this.skillBrowserStates.get(scopeKey) ?? null;
+    }
+    if (!state) {
+      return null;
+    }
+    const numeric = Number.parseInt(rawToken, 10);
+    if (rawToken && Number.isInteger(numeric) && numeric >= 1 && numeric <= state.items.length) {
+      return {
+        index: numeric,
+        cwd: state.cwd,
+        skill: state.items[numeric - 1],
+      };
+    }
+    const normalized = normalizeSkillLookupToken(rawToken);
+    if (!normalized) {
+      if (state.items.length === 1) {
+        return {
+          index: 1,
+          cwd: state.cwd,
+          skill: state.items[0],
+        };
+      }
+      return null;
+    }
+    const byExact = state.items.find((entry) => {
+      const candidates = [
+        entry.name,
+        entry.displayName ?? '',
+        path.basename(entry.path),
+      ];
+      return candidates.some((candidate) => normalizeSkillLookupToken(candidate) === normalized);
+    });
+    if (byExact) {
+      return {
+        index: state.items.indexOf(byExact) + 1,
+        cwd: state.cwd,
+        skill: byExact,
+      };
+    }
+    const byPartial = state.items.find((entry) => {
+      const haystack = [
+        entry.name,
+        entry.displayName ?? '',
+        entry.description,
+        entry.shortDescription ?? '',
+      ].map((candidate) => normalizeSkillLookupToken(candidate)).join(' ');
+      return haystack.includes(normalized);
+    });
+    if (!byPartial) {
+      return null;
+    }
+    return {
+      index: state.items.indexOf(byPartial) + 1,
+      cwd: state.cwd,
+      skill: byPartial,
+    };
   }
 
   resolveScopedSessionMeta(scopeRef) {
@@ -2404,6 +2738,490 @@ export class BridgeCoordinator {
     const current = this.bridgeSessions.resolveScopeSession(scopeRef);
     const providerProfileId = current?.providerProfileId ?? this.resolveDefaultProviderProfileId();
     return this.requireProviderProfile(providerProfileId);
+  }
+
+  resolveSessionForEvent(scopeRef, event) {
+    const overrideSessionId = resolveOverrideBridgeSessionId(event);
+    if (overrideSessionId) {
+      return this.bridgeSessions.getSessionById?.(overrideSessionId) ?? null;
+    }
+    return this.bridgeSessions.resolveScopeSession(scopeRef);
+  }
+
+  async handleAutomationCommand(event, args = []) {
+    if (!this.automationJobs) {
+      return messageResponse([
+        this.t('coordinator.auto.unsupported'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const scopeRef = toScopeRef(event);
+    const normalizedArgs = Array.isArray(args) ? args.map((value) => String(value ?? '').trim()) : [];
+    const subcommand = String(normalizedArgs[0] ?? '').trim().toLowerCase();
+    if (!subcommand) {
+      const pendingDraft = this.getPendingAutomationDraft(scopeRef);
+      if (pendingDraft) {
+        return this.renderAutomationDraftResponse(event, pendingDraft);
+      }
+      return this.handleAutomationListCommand(event);
+    }
+    if (['confirm'].includes(subcommand)) {
+      return this.handleAutomationConfirmCommand(event);
+    }
+    if (['edit'].includes(subcommand)) {
+      return this.handleAutomationEditCommand(event);
+    }
+    if (['cancel'].includes(subcommand)) {
+      return this.handleAutomationCancelCommand(event);
+    }
+    if (['list'].includes(subcommand)) {
+      return this.handleAutomationListCommand(event);
+    }
+    if (['show'].includes(subcommand)) {
+      return this.handleAutomationShowCommand(event, normalizedArgs[1] ?? '');
+    }
+    if (['pause'].includes(subcommand)) {
+      return this.handleAutomationPauseCommand(event, normalizedArgs[1] ?? '');
+    }
+    if (['resume'].includes(subcommand)) {
+      return this.handleAutomationResumeCommand(event, normalizedArgs[1] ?? '');
+    }
+    if (['delete', 'del'].includes(subcommand)) {
+      return this.handleAutomationDeleteCommand(event, normalizedArgs[1] ?? '');
+    }
+    if (['rename'].includes(subcommand)) {
+      return this.handleAutomationRenameCommand(event, normalizedArgs[1] ?? '', extractAutomationRenameTitle(event.text));
+    }
+    if (['add'].includes(subcommand)) {
+      return this.handleAutomationAddCommand(event);
+    }
+    return this.handleHelpsCommand(event, ['automation']);
+  }
+
+  async handleWeiboCommand(event, args = []) {
+    if (!this.weiboHotSearch) {
+      return messageResponse([
+        this.t('coordinator.weibo.unsupported'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const parsed = parseWeiboCommandArgs(args);
+    if (!parsed) {
+      return this.handleHelpsCommand(event, ['weibo']);
+    }
+    try {
+      const snapshot = await this.weiboHotSearch.getTop({ limit: parsed.limit });
+      const lines = [
+        this.t('coordinator.weibo.title', {
+          count: snapshot.items.length,
+          fetchedAt: formatCommandTimestamp(snapshot.fetchedAt, this.currentI18n.locale),
+        }),
+      ];
+      for (const item of snapshot.items) {
+        lines.push(formatWeiboHotSearchLine(item, this.currentI18n));
+      }
+      return messageResponse(lines, this.buildScopedSessionMeta(event));
+    } catch (error) {
+      return messageResponse([
+        this.t('coordinator.weibo.failed', { error: formatErrorMessage(error) }),
+      ], this.buildScopedSessionMeta(event));
+    }
+  }
+
+  handleAutomationListCommand(event) {
+    const scopeRef = toScopeRef(event);
+    const jobs = this.automationJobs.listForScope(scopeRef);
+    if (jobs.length === 0) {
+      return messageResponse([
+        this.t('coordinator.auto.listTitle', { count: 0 }),
+        this.t('coordinator.auto.empty'),
+        this.t('coordinator.auto.emptyHint'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const lines = [
+      this.t('coordinator.auto.listTitle', { count: jobs.length }),
+    ];
+    for (const [index, job] of jobs.entries()) {
+      lines.push(this.t('coordinator.auto.item', {
+        index: index + 1,
+        title: job.title,
+      }));
+      lines.push(this.t('coordinator.auto.mode', {
+        value: formatAutomationMode(job.mode, this.currentI18n),
+      }));
+      lines.push(this.t('coordinator.auto.schedule', { value: job.schedule.label }));
+      lines.push(this.t('coordinator.auto.status', {
+        value: formatAutomationStatusLabel(job.status, job.running, this.currentI18n),
+      }));
+      lines.push(this.t('coordinator.auto.nextRun', {
+        value: formatRelativeTimeLocalized(job.nextRunAt, this.currentI18n.locale, this.now()),
+      }));
+    }
+    lines.push(this.t('coordinator.auto.actionsHint'));
+    return messageResponse(lines, this.buildScopedSessionMeta(event));
+  }
+
+  handleAutomationShowCommand(event, token) {
+    const normalizedToken = String(token ?? '').trim();
+    let resolved = this.resolveAutomationJobForScope(event, normalizedToken);
+    if (!resolved && !normalizedToken) {
+      const scopeRef = toScopeRef(event);
+      const jobs = this.automationJobs.listForScope(scopeRef);
+      if (jobs.length === 1) {
+        resolved = {
+          job: jobs[0],
+          index: 1,
+        };
+      } else if (jobs.length > 1) {
+        return messageResponse([
+          this.t('coordinator.auto.specifyIndex'),
+        ], this.buildScopedSessionMeta(event));
+      }
+    }
+    if (!resolved) {
+      return messageResponse([
+        this.t('coordinator.auto.notFound', { value: normalizedToken || '?' }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const job = resolved.job;
+    const lines = [
+      this.t('coordinator.auto.detailTitle', { title: job.title }),
+      this.t('coordinator.auto.mode', { value: formatAutomationMode(job.mode, this.currentI18n) }),
+      this.t('coordinator.auto.schedule', { value: job.schedule.label }),
+      this.t('coordinator.auto.status', { value: formatAutomationStatusLabel(job.status, job.running, this.currentI18n) }),
+      this.t('coordinator.auto.providerProfile', { value: job.providerProfileId }),
+      this.t('coordinator.auto.workingDirectory', { value: job.cwd ?? this.t('common.notSet') }),
+      this.t('coordinator.auto.prompt', { value: job.prompt }),
+      this.t('coordinator.auto.nextRun', { value: formatRelativeTimeLocalized(job.nextRunAt, this.currentI18n.locale, this.now()) }),
+      this.t('coordinator.auto.lastRun', {
+        value: job.lastRunAt ? formatRelativeTimeLocalized(job.lastRunAt, this.currentI18n.locale, this.now()) : this.t('common.none'),
+      }),
+    ];
+    if (job.lastResultPreview) {
+      lines.push(this.t('coordinator.auto.lastResult', { value: job.lastResultPreview }));
+    }
+    if (job.lastError) {
+      lines.push(this.t('coordinator.auto.lastError', { value: job.lastError }));
+    }
+    lines.push(this.t('coordinator.auto.detailActions', { index: resolved.index }));
+    return messageResponse(lines, this.buildScopedSessionMeta(event));
+  }
+
+  handleAutomationPauseCommand(event, token) {
+    const resolved = this.resolveAutomationJobForScope(event, token);
+    if (!resolved) {
+      return messageResponse([
+        this.t('coordinator.auto.notFound', { value: token || '?' }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const job = this.automationJobs.pauseJob(resolved.job.id);
+    return messageResponse([
+      this.t('coordinator.auto.paused'),
+      this.t('coordinator.auto.title', { value: job.title }),
+    ], this.buildScopedSessionMeta(event));
+  }
+
+  handleAutomationResumeCommand(event, token) {
+    const resolved = this.resolveAutomationJobForScope(event, token);
+    if (!resolved) {
+      return messageResponse([
+        this.t('coordinator.auto.notFound', { value: token || '?' }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const job = this.automationJobs.resumeJob(resolved.job.id);
+    return messageResponse([
+      this.t('coordinator.auto.resumed'),
+      this.t('coordinator.auto.title', { value: job.title }),
+      this.t('coordinator.auto.nextRun', {
+        value: formatRelativeTimeLocalized(job.nextRunAt, this.currentI18n.locale, this.now()),
+      }),
+    ], this.buildScopedSessionMeta(event));
+  }
+
+  handleAutomationDeleteCommand(event, token) {
+    const resolved = this.resolveAutomationJobForScope(event, token);
+    if (!resolved) {
+      return messageResponse([
+        this.t('coordinator.auto.notFound', { value: token || '?' }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    this.automationJobs.deleteJob(resolved.job.id);
+    return messageResponse([
+      this.t('coordinator.auto.deleted'),
+      this.t('coordinator.auto.title', { value: resolved.job.title }),
+    ], this.buildScopedSessionMeta(event));
+  }
+
+  handleAutomationRenameCommand(event, token, title) {
+    const resolved = this.resolveAutomationJobForScope(event, token);
+    if (!resolved) {
+      return messageResponse([
+        this.t('coordinator.auto.notFound', { value: token || '?' }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    if (!title) {
+      return this.handleHelpsCommand(event, ['automation']);
+    }
+    const job = this.automationJobs.renameJob(resolved.job.id, title);
+    return messageResponse([
+      this.t('coordinator.auto.renamed'),
+      this.t('coordinator.auto.title', { value: job.title }),
+    ], this.buildScopedSessionMeta(event));
+  }
+
+  async handleAutomationAddCommand(event) {
+    const activeResponse = await this.rejectIfActiveTurnForCommand(event, 'automation');
+    if (activeResponse) {
+      return activeResponse;
+    }
+    const scopeRef = toScopeRef(event);
+    const rawInput = extractAutomationAddBody(event.text);
+    if (!rawInput) {
+      return this.handleHelpsCommand(event, ['automation']);
+    }
+    const parsed = parseAutomationAddSpec(event.text);
+    if (parsed?.mode === 'thread' && !this.bridgeSessions.resolveScopeSession(scopeRef)) {
+      return messageResponse([
+        this.t('coordinator.auto.threadModeNeedsSession'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    let draft = null;
+    if (parsed) {
+      draft = this.buildPendingAutomationDraft(event, scopeRef, parsed, rawInput, 'explicit');
+    } else {
+      draft = await this.normalizeAutomationDraftFromNaturalLanguage(event, scopeRef, rawInput);
+    }
+    if (!draft) {
+      return messageResponse([
+        this.t('coordinator.auto.parseFailed'),
+        this.t('coordinator.auto.emptyHint'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    this.setPendingAutomationDraft(scopeRef, draft);
+    return this.renderAutomationDraftResponse(event, draft);
+  }
+
+  async handleAutomationConfirmCommand(event) {
+    const activeResponse = await this.rejectIfActiveTurnForCommand(event, 'automation');
+    if (activeResponse) {
+      return activeResponse;
+    }
+    const scopeRef = toScopeRef(event);
+    const draft = this.getPendingAutomationDraft(scopeRef);
+    if (!draft) {
+      return messageResponse([
+        this.t('coordinator.auto.noDraft'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    let targetSession = null;
+    if (draft.mode === 'thread') {
+      targetSession = draft.threadBridgeSessionId
+        ? this.bridgeSessions.getSessionById?.(draft.threadBridgeSessionId) ?? null
+        : null;
+      if (!targetSession) {
+        this.clearPendingAutomationDraft(scopeRef);
+        return messageResponse([
+          this.t('coordinator.auto.threadModeNeedsSession'),
+        ], this.buildScopedSessionMeta(event));
+      }
+    } else {
+      targetSession = await this.bridgeSessions.createDetachedSession({
+        providerProfileId: draft.providerProfileId,
+        cwd: draft.cwd,
+        title: `Automation | ${draft.title}`,
+        initialSettings: {
+          ...draft.initialSettings,
+        },
+        providerStartOptions: {
+          sourcePlatform: event.platform,
+          source: 'automation',
+        },
+      });
+    }
+    const job = this.automationJobs.createJob({
+      scopeRef,
+      title: draft.title,
+      mode: draft.mode,
+      providerProfileId: draft.providerProfileId,
+      bridgeSessionId: targetSession.id,
+      cwd: draft.cwd,
+      prompt: draft.prompt,
+      locale: draft.locale,
+      schedule: draft.schedule,
+    });
+    this.clearPendingAutomationDraft(scopeRef);
+    return messageResponse([
+      this.t('coordinator.auto.added'),
+      this.t('coordinator.auto.title', { value: job.title }),
+      this.t('coordinator.auto.mode', { value: formatAutomationMode(job.mode, this.currentI18n) }),
+      this.t('coordinator.auto.schedule', { value: job.schedule.label }),
+      this.t('coordinator.auto.nextRun', {
+        value: formatRelativeTimeLocalized(job.nextRunAt, this.currentI18n.locale, this.now()),
+      }),
+      this.t('coordinator.auto.deliveryTarget'),
+    ], this.buildScopedSessionMeta(event));
+  }
+
+  async handleAutomationEditCommand(event) {
+    const activeResponse = await this.rejectIfActiveTurnForCommand(event, 'automation');
+    if (activeResponse) {
+      return activeResponse;
+    }
+    const replacement = extractAutomationEditBody(event.text);
+    if (!replacement) {
+      return this.handleHelpsCommand(event, ['automation']);
+    }
+    return this.handleAutomationAddCommand({
+      ...event,
+      text: `/auto add ${replacement}`,
+    });
+  }
+
+  handleAutomationCancelCommand(event) {
+    const scopeRef = toScopeRef(event);
+    const draft = this.getPendingAutomationDraft(scopeRef);
+    if (!draft) {
+      return messageResponse([
+        this.t('coordinator.auto.noDraft'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    this.clearPendingAutomationDraft(scopeRef);
+    return messageResponse([
+      this.t('coordinator.auto.draftCancelled'),
+    ], this.buildScopedSessionMeta(event));
+  }
+
+  renderAutomationDraftResponse(event, draft: PendingAutomationDraft) {
+    return messageResponse([
+      this.t('coordinator.auto.draftTitle', { title: draft.title }),
+      this.t('coordinator.auto.mode', { value: formatAutomationMode(draft.mode, this.currentI18n) }),
+      this.t('coordinator.auto.schedule', { value: draft.schedule.label }),
+      this.t('coordinator.auto.prompt', { value: draft.prompt }),
+      this.t('coordinator.auto.deliveryTarget'),
+      this.t('coordinator.auto.draftNotice'),
+      this.t('coordinator.auto.confirmHint'),
+      this.t('coordinator.auto.editHint'),
+      this.t('coordinator.auto.cancelHint'),
+    ], this.buildScopedSessionMeta(event));
+  }
+
+  buildPendingAutomationDraft(
+    event,
+    scopeRef: PlatformScopeRef,
+    candidate: AutomationDraftCandidate,
+    rawInput: string,
+    normalizedBy: 'explicit' | 'codex',
+  ): PendingAutomationDraft | null {
+    const boundSession = this.bridgeSessions.resolveScopeSession(scopeRef);
+    const providerProfile = boundSession
+      ? this.requireProviderProfile(boundSession.providerProfileId)
+      : this.resolveScopeProviderProfile(scopeRef);
+    if (candidate.mode === 'thread' && !boundSession) {
+      return null;
+    }
+    const inheritedSettings = boundSession
+      ? this.bridgeSessions.getSessionSettings(boundSession.id)
+      : null;
+    const locale = inheritedSettings?.locale ?? this.resolveScopeLocale(scopeRef, event);
+    const cwd = normalizeCwd(boundSession?.cwd) ?? this.resolveEventCwd(event) ?? null;
+    return {
+      createdAt: this.now(),
+      rawInput,
+      normalizedBy,
+      title: candidate.title,
+      mode: candidate.mode,
+      schedule: cloneAutomationSchedule(candidate.schedule),
+      prompt: candidate.prompt,
+      providerProfileId: providerProfile.id,
+      locale,
+      cwd,
+      initialSettings: {
+        locale,
+        model: inheritedSettings?.model ?? null,
+        reasoningEffort: inheritedSettings?.reasoningEffort ?? null,
+        serviceTier: inheritedSettings?.serviceTier ?? null,
+        personality: inheritedSettings?.personality ?? null,
+        accessPreset: inheritedSettings?.accessPreset ?? null,
+        approvalPolicy: inheritedSettings?.approvalPolicy ?? null,
+        sandboxMode: inheritedSettings?.sandboxMode ?? null,
+      },
+      threadBridgeSessionId: candidate.mode === 'thread' ? boundSession?.id ?? null : null,
+    };
+  }
+
+  async normalizeAutomationDraftFromNaturalLanguage(event, scopeRef: PlatformScopeRef, rawInput: string): Promise<PendingAutomationDraft | null> {
+    const boundSession = this.bridgeSessions.resolveScopeSession(scopeRef);
+    const providerProfile = boundSession
+      ? this.requireProviderProfile(boundSession.providerProfileId)
+      : this.resolveScopeProviderProfile(scopeRef);
+    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+    const inheritedSettings = boundSession
+      ? this.bridgeSessions.getSessionSettings(boundSession.id)
+      : null;
+    const locale = inheritedSettings?.locale ?? this.resolveScopeLocale(scopeRef, event);
+    const cwd = normalizeCwd(boundSession?.cwd) ?? this.resolveEventCwd(event) ?? null;
+    const thread = await providerPlugin.startThread({
+      providerProfile,
+      cwd,
+      title: 'Automation Draft Parser',
+      metadata: {
+        sourcePlatform: event.platform,
+        source: 'automation-draft',
+      },
+    });
+    const parserSession = {
+      id: crypto.randomUUID(),
+      providerProfileId: providerProfile.id,
+      codexThreadId: thread.threadId,
+      cwd: thread.cwd ?? cwd,
+      title: thread.title ?? 'Automation Draft Parser',
+      createdAt: this.now(),
+      updatedAt: this.now(),
+    };
+    const parserPrompt = buildAutomationDraftPrompt(rawInput, locale);
+    const parserEvent = {
+      ...event,
+      text: parserPrompt,
+      cwd: parserSession.cwd ?? null,
+      locale,
+      attachments: [],
+    };
+    const result = await providerPlugin.startTurn({
+      providerProfile,
+      bridgeSession: parserSession,
+      sessionSettings: {
+        bridgeSessionId: parserSession.id,
+        model: inheritedSettings?.model ?? null,
+        reasoningEffort: inheritedSettings?.reasoningEffort ?? null,
+        serviceTier: inheritedSettings?.serviceTier ?? null,
+        personality: null,
+        accessPreset: 'read-only',
+        approvalPolicy: 'never',
+        sandboxMode: 'read-only',
+        locale,
+        metadata: {},
+        updatedAt: this.now(),
+      },
+      event: parserEvent,
+      inputText: parserPrompt,
+    });
+    const candidate = parseAutomationDraftCandidate(result.outputText);
+    if (!candidate) {
+      return null;
+    }
+    return this.buildPendingAutomationDraft(event, scopeRef, candidate, rawInput, 'codex');
+  }
+
+  resolveAutomationJobForScope(event, token) {
+    const scopeRef = toScopeRef(event);
+    const job = this.automationJobs.resolveForScope(scopeRef, token);
+    if (!job) {
+      return null;
+    }
+    const jobs = this.automationJobs.listForScope(scopeRef);
+    const index = jobs.findIndex((entry) => entry.id === job.id);
+    return {
+      job,
+      index: index >= 0 ? index + 1 : null,
+    };
   }
 
   renderModelLines(models) {
@@ -3128,6 +3946,8 @@ function buildActiveTurnMeta(activeTurn) {
 
 function renderCommandBlockedMessage(commandName, interruptRequested, i18n: Translator) {
   const action = {
+    automation: i18n.t('coordinator.action.automation'),
+    weibo: i18n.t('coordinator.action.weibo'),
     new: i18n.t('coordinator.action.new'),
     uploads: i18n.t('coordinator.action.uploads'),
     review: i18n.t('coordinator.action.review'),
@@ -3551,6 +4371,437 @@ function parseReviewTargetArgs(args: readonly string[]): ProviderReviewTarget | 
       : null;
   }
   return null;
+}
+
+function parseAutomationAddSpec(text: string) {
+  const input = String(text ?? '').trim();
+  const match = input.match(/^\/\S+\s+add\s+(.+)$/iu);
+  if (!match) {
+    return null;
+  }
+  const rawBody = String(match[1] ?? '').trim();
+  if (!rawBody) {
+    return null;
+  }
+  const separatorIndex = rawBody.indexOf('|');
+  if (separatorIndex < 0) {
+    return null;
+  }
+  const left = rawBody.slice(0, separatorIndex).trim();
+  const prompt = rawBody.slice(separatorIndex + 1).trim();
+  if (!left || !prompt) {
+    return null;
+  }
+
+  let mode: 'standalone' | 'thread' = 'standalone';
+  let scheduleSpec = left;
+  const modeMatch = left.match(/^(standalone|thread)\b\s*(.*)$/iu);
+  if (modeMatch) {
+    mode = modeMatch[1].toLowerCase() === 'thread' ? 'thread' : 'standalone';
+    scheduleSpec = String(modeMatch[2] ?? '').trim();
+  }
+  if (!scheduleSpec) {
+    return null;
+  }
+
+  const intervalMatch = scheduleSpec.match(/^every\s+(.+)$/iu);
+  if (intervalMatch) {
+    const everySeconds = parseAutomationIntervalSeconds(intervalMatch[1]);
+    if (!everySeconds) {
+      return null;
+    }
+    const label = `every ${formatAutomationIntervalLabel(everySeconds)}`;
+    return {
+      mode,
+      prompt,
+      title: deriveAutomationTitle(prompt),
+      schedule: {
+        kind: 'interval' as const,
+        everySeconds,
+        label,
+      },
+    };
+  }
+
+  const dailyMatch = scheduleSpec.match(/^daily\s+(\d{1,2}):(\d{2})$/iu);
+  if (dailyMatch) {
+    const hour = Number(dailyMatch[1]);
+    const minute = Number(dailyMatch[2]);
+    if (!Number.isInteger(hour) || !Number.isInteger(minute) || hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+      return null;
+    }
+    return {
+      mode,
+      prompt,
+      title: deriveAutomationTitle(prompt),
+      schedule: {
+        kind: 'daily' as const,
+        hour,
+        minute,
+        timeZone: 'UTC',
+        label: `daily ${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')} UTC`,
+      },
+    };
+  }
+
+  const cronMatch = scheduleSpec.match(/^cron\s+(.+)$/iu);
+  if (cronMatch) {
+    const expression = String(cronMatch[1] ?? '').trim();
+    if (expression.split(/\s+/u).length !== 5) {
+      return null;
+    }
+    return {
+      mode,
+      prompt,
+      title: deriveAutomationTitle(prompt),
+      schedule: {
+        kind: 'cron' as const,
+        expression,
+        timeZone: 'UTC',
+        label: `cron ${expression} UTC`,
+      },
+    };
+  }
+
+  return null;
+}
+
+function extractAutomationAddBody(text: string): string {
+  const normalized = String(text ?? '').trim();
+  const match = normalized.match(/^\/\S+\s+add\s+([\s\S]+)$/iu);
+  return compactWhitespace(match?.[1] ?? '');
+}
+
+function buildAutomationDraftKey(scopeRef: PlatformScopeRef): string {
+  return formatPlatformScopeKey(scopeRef.platform, scopeRef.externalScopeId);
+}
+
+function buildAutomationDraftPrompt(rawInput: string, locale: SupportedLocale): string {
+  const localizedModeHint = locale === 'zh-CN'
+    ? '默认 mode 是 standalone；只有用户明确说“继续当前线程/当前对话/沿用当前上下文”时才用 thread。'
+    : 'Default mode is standalone. Use thread only when the user explicitly asks to continue the current thread or reuse the current conversation context.';
+  const localizedInstruction = locale === 'zh-CN'
+    ? `你是 CodexBridge 的 automation 草案规范化器。请把用户的自然语言请求转换成 JSON，仅返回 JSON，不要加解释。
+
+支持的结果格式：
+{
+  "valid": true,
+  "title": "简短标题",
+  "mode": "standalone" | "thread",
+  "schedule": {
+    "kind": "interval",
+    "everySeconds": 1800
+  }
+}
+或
+{
+  "valid": true,
+  "title": "简短标题",
+  "mode": "standalone" | "thread",
+  "schedule": {
+    "kind": "daily",
+    "hour": 7,
+    "minute": 0
+  }
+}
+或
+{
+  "valid": true,
+  "title": "简短标题",
+  "mode": "standalone" | "thread",
+  "schedule": {
+    "kind": "cron",
+    "expression": "0 18 * * 1-5"
+  }
+}
+并且总是附带：
+{
+  "task": "真正执行时要发送给 Codex 的任务文本"
+}
+
+规则：
+- 只允许三种 schedule.kind：interval / daily / cron
+- interval 必须给 everySeconds，单位秒，且至少 60
+- daily 和 cron 按 UTC 理解
+- 用户提到“工作日/周一到周五”等规则时，优先输出 cron
+- ${localizedModeHint}
+- 保留用户提到的 skill 名称到 task 里
+- 不要把“发送到微信/通知我/发给我”删掉，但 delivery 本身由桥接处理
+- 如果无法可靠解析，返回：
+  {"valid": false, "reason": "简短原因"}
+
+用户请求：
+${rawInput}`
+    : `You are the CodexBridge automation-draft normalizer. Convert the user's natural-language request into JSON and return JSON only with no explanation.
+
+Supported result formats:
+{
+  "valid": true,
+  "title": "short title",
+  "mode": "standalone" | "thread",
+  "schedule": {
+    "kind": "interval",
+    "everySeconds": 1800
+  },
+  "task": "task text to run later"
+}
+or
+{
+  "valid": true,
+  "title": "short title",
+  "mode": "standalone" | "thread",
+  "schedule": {
+    "kind": "daily",
+    "hour": 7,
+    "minute": 0
+  },
+  "task": "task text to run later"
+}
+or
+{
+  "valid": true,
+  "title": "short title",
+  "mode": "standalone" | "thread",
+  "schedule": {
+    "kind": "cron",
+    "expression": "0 18 * * 1-5"
+  },
+  "task": "task text to run later"
+}
+
+Rules:
+- Only use interval / daily / cron
+- interval requires everySeconds in seconds and must be at least 60
+- daily and cron are interpreted in UTC
+- Prefer cron when the user says weekdays / workdays / Monday-Friday
+- ${localizedModeHint}
+- Preserve skill names in the task text
+- Do not remove "send to WeChat / notify me / send me" intent from the task text
+- If the request cannot be parsed reliably, return:
+  {"valid": false, "reason": "short reason"}
+
+User request:
+${rawInput}`;
+  return localizedInstruction.trim();
+}
+
+function parseAutomationDraftCandidate(text: string): AutomationDraftCandidate | null {
+  const payload = extractFirstJsonObject(text);
+  if (!payload) {
+    return null;
+  }
+  let parsed: any;
+  try {
+    parsed = JSON.parse(payload);
+  } catch {
+    return null;
+  }
+  if (!parsed || parsed.valid === false) {
+    return null;
+  }
+  const prompt = compactWhitespace(String(parsed.task ?? ''));
+  if (!prompt) {
+    return null;
+  }
+  const title = compactWhitespace(String(parsed.title ?? '')) || deriveAutomationTitle(prompt);
+  const modeValue = String(parsed.mode ?? 'standalone').trim().toLowerCase();
+  const mode: AutomationMode = modeValue === 'thread' ? 'thread' : 'standalone';
+  const schedule = normalizeAutomationSchedule(parsed.schedule ?? null);
+  if (!schedule) {
+    return null;
+  }
+  return {
+    title,
+    mode,
+    schedule,
+    prompt,
+  };
+}
+
+function normalizeAutomationSchedule(value: any): AutomationSchedule | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const kind = String(value.kind ?? '').trim().toLowerCase();
+  if (kind === 'interval') {
+    const everySeconds = Math.max(60, Math.floor(Number(value.everySeconds ?? 0)));
+    if (!Number.isFinite(everySeconds) || everySeconds < 60) {
+      return null;
+    }
+    return {
+      kind: 'interval',
+      everySeconds,
+      label: `every ${formatAutomationIntervalLabel(everySeconds)}`,
+    };
+  }
+  if (kind === 'daily') {
+    const hour = Number(value.hour);
+    const minute = Number(value.minute);
+    if (!Number.isInteger(hour) || !Number.isInteger(minute) || hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+      return null;
+    }
+    return {
+      kind: 'daily',
+      hour,
+      minute,
+      timeZone: 'UTC',
+      label: `daily ${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')} UTC`,
+    };
+  }
+  if (kind === 'cron') {
+    const expression = compactWhitespace(String(value.expression ?? ''));
+    if (expression.split(/\s+/u).length !== 5) {
+      return null;
+    }
+    return {
+      kind: 'cron',
+      expression,
+      timeZone: 'UTC',
+      label: `cron ${expression} UTC`,
+    };
+  }
+  return null;
+}
+
+function cloneAutomationSchedule(schedule: AutomationSchedule): AutomationSchedule {
+  if (schedule.kind === 'interval') {
+    return {
+      kind: 'interval',
+      everySeconds: schedule.everySeconds,
+      label: schedule.label,
+    };
+  }
+  if (schedule.kind === 'daily') {
+    return {
+      kind: 'daily',
+      hour: schedule.hour,
+      minute: schedule.minute,
+      timeZone: schedule.timeZone,
+      label: schedule.label,
+    };
+  }
+  return {
+    kind: 'cron',
+    expression: schedule.expression,
+    timeZone: schedule.timeZone,
+    label: schedule.label,
+  };
+}
+
+function extractFirstJsonObject(text: string): string | null {
+  const raw = String(text ?? '').trim();
+  if (!raw) {
+    return null;
+  }
+  const fencedMatch = raw.match(/```json\s*([\s\S]+?)```/iu) ?? raw.match(/```\s*([\s\S]+?)```/iu);
+  const candidate = String(fencedMatch?.[1] ?? raw).trim();
+  const firstBrace = candidate.indexOf('{');
+  const lastBrace = candidate.lastIndexOf('}');
+  if (firstBrace < 0 || lastBrace <= firstBrace) {
+    return null;
+  }
+  return candidate.slice(firstBrace, lastBrace + 1);
+}
+
+function parseAutomationIntervalSeconds(value: string): number | null {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  const match = normalized.match(/^(\d+)\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)$/u);
+  if (!match) {
+    return null;
+  }
+  const amount = Number(match[1]);
+  if (!Number.isInteger(amount) || amount <= 0) {
+    return null;
+  }
+  const unit = match[2];
+  if (['s', 'sec', 'secs', 'second', 'seconds'].includes(unit)) {
+    return amount;
+  }
+  if (['m', 'min', 'mins', 'minute', 'minutes'].includes(unit)) {
+    return amount * 60;
+  }
+  if (['h', 'hr', 'hrs', 'hour', 'hours'].includes(unit)) {
+    return amount * 3_600;
+  }
+  return amount * 86_400;
+}
+
+function formatAutomationIntervalLabel(seconds: number): string {
+  const normalized = Math.max(60, Math.floor(Number(seconds ?? 0)));
+  if (normalized % 86_400 === 0) {
+    return `${normalized / 86_400}d`;
+  }
+  if (normalized % 3_600 === 0) {
+    return `${normalized / 3_600}h`;
+  }
+  if (normalized % 60 === 0) {
+    return `${normalized / 60}m`;
+  }
+  return `${normalized}s`;
+}
+
+function deriveAutomationTitle(prompt: string): string {
+  const normalized = compactWhitespace(prompt);
+  if (!normalized) {
+    return 'Automation';
+  }
+  return normalized.length <= 28 ? normalized : `${normalized.slice(0, 28)}...`;
+}
+
+function extractAutomationRenameTitle(text: string): string {
+  const normalized = String(text ?? '').trim();
+  const match = normalized.match(/^\/\S+\s+rename\s+\S+\s+([\s\S]+)$/iu);
+  return compactWhitespace(match?.[1] ?? '');
+}
+
+function extractAutomationEditBody(text: string): string {
+  const normalized = String(text ?? '').trim();
+  const match = normalized.match(/^\/\S+\s+edit\s+([\s\S]+)$/iu);
+  return compactWhitespace(match?.[1] ?? '');
+}
+
+function resolveOverrideBridgeSessionId(event: InboundTextEvent | null | undefined): string | null {
+  const metadata = event?.metadata;
+  if (!metadata || typeof metadata !== 'object') {
+    return null;
+  }
+  const codexbridge = (metadata as Record<string, unknown>).codexbridge;
+  if (!codexbridge || typeof codexbridge !== 'object') {
+    return null;
+  }
+  const overrideBridgeSessionId = (codexbridge as Record<string, unknown>).overrideBridgeSessionId;
+  const normalized = typeof overrideBridgeSessionId === 'string' ? overrideBridgeSessionId.trim() : '';
+  return normalized || null;
+}
+
+function isAutomationEvent(event: InboundTextEvent | null | undefined): boolean {
+  const metadata = event?.metadata;
+  if (!metadata || typeof metadata !== 'object') {
+    return false;
+  }
+  const codexbridge = (metadata as Record<string, unknown>).codexbridge;
+  if (!codexbridge || typeof codexbridge !== 'object') {
+    return false;
+  }
+  const automationJobId = (codexbridge as Record<string, unknown>).automationJobId;
+  return typeof automationJobId === 'string' && automationJobId.trim().length > 0;
+}
+
+function formatAutomationMode(mode: string, i18n: Translator): string {
+  if (mode === 'thread') {
+    return i18n.t('coordinator.auto.mode.thread');
+  }
+  return i18n.t('coordinator.auto.mode.standalone');
+}
+
+function formatAutomationStatusLabel(status: string, running: boolean, i18n: Translator): string {
+  if (running) {
+    return i18n.t('coordinator.auto.status.running');
+  }
+  if (status === 'paused') {
+    return i18n.t('coordinator.auto.status.paused');
+  }
+  return i18n.t('coordinator.auto.status.active');
 }
 
 function buildThreadBrowserKey(event) {
@@ -4025,6 +5276,84 @@ function getCommandHelpSpecs(i18n: Translator) {
       i18n.t('coordinator.help.note.review'),
     ],
   }),
+  skills: freezeCommandHelp({
+    name: 'skills',
+    aliases: ['sk'],
+    summary: i18n.t('coordinator.help.summary.skills'),
+    usage: [
+      '/skills',
+      '/skills search <关键词>',
+      '/skills show <序号|名称>',
+      '/skills on <序号|名称>',
+      '/skills off <序号|名称>',
+      '/skills reload',
+      '/skills -h',
+    ],
+    examples: [
+      '/skills',
+      '/skills search 新闻',
+      '/skills show 1',
+      '/skills on 2',
+      '/skills off 2',
+      '/skills reload',
+    ],
+    notes: [
+      i18n.t('coordinator.help.note.skills'),
+    ],
+  }),
+  automation: freezeCommandHelp({
+    name: 'automation',
+    aliases: ['auto'],
+    summary: i18n.t('coordinator.help.summary.automation'),
+    usage: [
+      '/auto',
+      '/auto add 每30分钟检查一次系统状态，有变化发送给我',
+      '/auto add 每天早上7点调用 news skill 给我发送到微信',
+      '/auto add 工作日晚上6点检查部署状态，异常时通知我',
+      '/auto confirm',
+      '/auto edit 每小时检查一次部署状态，有变化发送给我',
+      '/auto cancel',
+      '/auto list',
+      '/auto show <index>',
+      '/auto pause <index>',
+      '/auto resume <index>',
+      '/auto delete <index>',
+      '/auto del <index>',
+      '/auto rename <index> <新标题>',
+      '/auto -h',
+    ],
+    examples: [
+      '/auto add 每30分钟检查一次系统状态，有变化发送给我',
+      '/auto confirm',
+      '/auto add thread every 15m | 继续跟进当前线程里的排障进展',
+      '/auto list',
+      '/auto rename 1 晚间部署巡检',
+      '/auto del 1',
+    ],
+    notes: [
+      i18n.t('coordinator.help.note.automation'),
+    ],
+  }),
+  weibo: freezeCommandHelp({
+    name: 'weibo',
+    aliases: ['wb'],
+    summary: i18n.t('coordinator.help.summary.weibo'),
+    usage: [
+      '/weibo',
+      '/weibo 10',
+      '/weibo top 10',
+      '/weibo -h',
+    ],
+    examples: [
+      '/weibo',
+      '/weibo top 10',
+      '/auto add every 5m | /weibo top 10',
+      '/auto confirm',
+    ],
+    notes: [
+      i18n.t('coordinator.help.note.weibo'),
+    ],
+  }),
   new: freezeCommandHelp({
     name: 'new',
     aliases: ['n'],
@@ -4417,6 +5746,9 @@ const COMMAND_HELP_ORDER = Object.freeze([
   'login',
   'stop',
   'review',
+  'skills',
+  'automation',
+  'weibo',
   'new',
   'uploads',
   'provider',
@@ -4452,6 +5784,9 @@ const COMMAND_ALIAS_DEFINITIONS = Object.freeze({
   login: ['lg'],
   stop: ['sp'],
   review: ['rv'],
+  skills: ['sk'],
+  automation: ['auto'],
+  weibo: ['wb'],
   new: ['n'],
   uploads: ['up', 'ul'],
   provider: ['pd'],
@@ -4654,6 +5989,151 @@ function truncateInlineText(value: string, limit = 120): string {
     return normalized;
   }
   return `${normalized.slice(0, Math.max(0, limit - 1))}…`;
+}
+
+function normalizeSkillLookupToken(value: unknown): string {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s/_-]+/gu, ' ');
+}
+
+function scoreSkillMatch(skill: ProviderSkillInfo, searchTerm: string): number {
+  const normalizedQuery = normalizeSkillLookupToken(searchTerm);
+  if (!normalizedQuery) {
+    return 0;
+  }
+  const fields = [
+    skill.name,
+    skill.displayName ?? '',
+    skill.description,
+    skill.shortDescription ?? '',
+    path.basename(skill.path),
+  ].map((value) => normalizeSkillLookupToken(value));
+  let score = 0;
+  for (const field of fields) {
+    if (!field) {
+      continue;
+    }
+    if (field === normalizedQuery) {
+      score += 200;
+      continue;
+    }
+    if (field.startsWith(normalizedQuery)) {
+      score += 120;
+      continue;
+    }
+    if (field.includes(normalizedQuery)) {
+      score += 80;
+    }
+  }
+  const tokens = normalizedQuery.split(/\s+/u).filter(Boolean);
+  for (const token of tokens) {
+    for (const field of fields) {
+      if (field.includes(token)) {
+        score += token.length >= 3 ? 16 : 8;
+      }
+    }
+  }
+  return score;
+}
+
+function filterSkillsBySearchTerm(skills: ProviderSkillInfo[], searchTerm: string | null): ProviderSkillInfo[] {
+  const normalizedQuery = normalizeNullableString(searchTerm);
+  if (!normalizedQuery) {
+    return [...skills].sort(compareSkillsForDisplay);
+  }
+  return skills
+    .map((skill) => ({
+      skill,
+      score: scoreSkillMatch(skill, normalizedQuery),
+    }))
+    .filter((entry) => entry.score > 0)
+    .sort((left, right) => {
+      if (right.score !== left.score) {
+        return right.score - left.score;
+      }
+      return compareSkillsForDisplay(left.skill, right.skill);
+    })
+    .map((entry) => entry.skill);
+}
+
+function compareSkillsForDisplay(left: ProviderSkillInfo, right: ProviderSkillInfo): number {
+  if (left.enabled !== right.enabled) {
+    return left.enabled ? -1 : 1;
+  }
+  return left.name.localeCompare(right.name);
+}
+
+function renderSkillsListLines({
+  i18n,
+  cwd,
+  items,
+  errors,
+  searchTerm,
+}: {
+  i18n: Translator;
+  cwd: string | null;
+  items: ProviderSkillInfo[];
+  errors: Array<{ path: string; message: string }>;
+  searchTerm: string | null;
+}) {
+  const lines = [
+    i18n.t('coordinator.skills.listTitle', {
+      cwd: cwd ?? i18n.t('common.notSet'),
+      count: items.length,
+    }),
+  ];
+  if (searchTerm) {
+    lines.push(i18n.t('coordinator.skills.searchLabel', { term: searchTerm }));
+  }
+  for (const [index, skill] of items.entries()) {
+    const status = skill.enabled ? i18n.t('common.enabled') : i18n.t('common.disabled');
+    lines.push(`${index + 1}. ${skill.displayName || skill.name} [${status}] [${skill.scope}]`);
+    lines.push(`   ${truncateInlineText(skill.shortDescription || skill.description, 88)}`);
+  }
+  if (errors.length > 0) {
+    lines.push(i18n.t('coordinator.skills.errorCount', { count: errors.length }));
+  }
+  lines.push(i18n.t('coordinator.skills.actionsHint'));
+  return lines;
+}
+
+function renderSkillDetailLines({
+  i18n,
+  index,
+  cwd,
+  skill,
+}: {
+  i18n: Translator;
+  index: number;
+  cwd: string | null;
+  skill: ProviderSkillInfo;
+}) {
+  const lines = [
+    i18n.t('coordinator.skills.detailTitle', { index, name: skill.displayName || skill.name }),
+    i18n.t('coordinator.skills.cwdLabel', { value: cwd ?? i18n.t('common.notSet') }),
+    i18n.t('coordinator.skills.statusLabel', {
+      value: skill.enabled ? i18n.t('common.enabled') : i18n.t('common.disabled'),
+    }),
+    i18n.t('coordinator.skills.scopeLabel', { value: skill.scope }),
+    i18n.t('coordinator.skills.nameLabel', { value: skill.name }),
+    i18n.t('coordinator.skills.pathLabel', { value: skill.path }),
+    i18n.t('coordinator.skills.purposeLabel', { value: skill.description }),
+  ];
+  if (skill.shortDescription) {
+    lines.push(i18n.t('coordinator.skills.shortDescriptionLabel', { value: skill.shortDescription }));
+  }
+  if (skill.defaultPrompt) {
+    lines.push(i18n.t('coordinator.skills.defaultPromptLabel', { value: skill.defaultPrompt }));
+  }
+  if (skill.dependencies && skill.dependencies.length > 0) {
+    lines.push(i18n.t('coordinator.skills.dependenciesLabel', {
+      value: skill.dependencies.map((entry) => `${entry.type}:${entry.value}`).join(', '),
+    }));
+  }
+  lines.push(i18n.t('coordinator.skills.detailActionsHint', { index }));
+  return lines;
 }
 
 function normalizeNullableString(value: unknown): string | null {
@@ -5213,6 +6693,75 @@ function formatApprovalKind(kind: ProviderApprovalRequest['kind'], i18n: Transla
     return i18n.t('coordinator.allow.kind.fileChange');
   }
   return i18n.t('coordinator.allow.kind.command');
+}
+
+function parseWeiboCommandArgs(args): HandleWeiboCommandResult | null {
+  const normalizedArgs = Array.isArray(args)
+    ? args.map((value) => String(value ?? '').trim()).filter(Boolean)
+    : [];
+  if (normalizedArgs.length === 0) {
+    return { limit: 10 };
+  }
+  if (normalizedArgs.length === 1) {
+    const limit = parseWeiboLimit(normalizedArgs[0]);
+    return limit ? { limit } : null;
+  }
+  if (normalizedArgs.length === 2 && ['top', 'hot'].includes(normalizedArgs[0].toLowerCase())) {
+    const limit = parseWeiboLimit(normalizedArgs[1]);
+    return limit ? { limit } : null;
+  }
+  return null;
+}
+
+function parseWeiboLimit(value: string): number | null {
+  const parsed = Number.parseInt(String(value ?? '').trim(), 10);
+  if (!Number.isInteger(parsed) || parsed <= 0 || parsed > 20) {
+    return null;
+  }
+  return parsed;
+}
+
+function formatWeiboHotSearchLine(
+  item: { position: number; title: string; label: string | null; category: string | null; hotValue: number | null },
+  i18n: Translator,
+): string {
+  const suffix: string[] = [];
+  if (item.label) {
+    suffix.push(item.label);
+  }
+  if (item.category) {
+    suffix.push(item.category);
+  }
+  if (item.hotValue) {
+    suffix.push(`${i18n.locale === 'zh-CN' ? '热度' : 'Heat'} ${formatCompactInteger(item.hotValue)}`);
+  }
+  return `${item.position}. ${item.title}${suffix.length > 0 ? ` (${suffix.join(' | ')})` : ''}`;
+}
+
+function formatCompactInteger(value: number): string {
+  return new Intl.NumberFormat('en-US').format(Math.max(0, Math.round(Number(value) || 0)));
+}
+
+function formatCommandTimestamp(value: number, locale: SupportedLocale): string {
+  return new Intl.DateTimeFormat(locale === 'zh-CN' ? 'zh-CN' : 'en-US', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+    timeZone: 'UTC',
+    timeZoneName: 'short',
+  }).format(new Date(value));
+}
+
+function formatErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+  const fallback = String(error ?? '').trim();
+  return fallback || 'Unknown error';
 }
 
 function debugCoordinator(event: string, payload: unknown) {

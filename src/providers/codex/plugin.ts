@@ -7,6 +7,7 @@ import type { InboundAttachment, InboundTextEvent } from '../../types/platform.j
 import type {
   ProviderApprovalRequest,
   ProviderProfile,
+  ProviderSkillsListResult,
   ProviderThreadListResult,
   ProviderThreadStartResult,
   ProviderThreadSummary,
@@ -312,6 +313,41 @@ export class CodexProviderPlugin {
       buckets: Array.isArray(report?.buckets) ? report.buckets : [],
       credits: report?.credits ?? null,
     };
+  }
+
+  async listSkills({
+    providerProfile,
+    cwd = null,
+    forceReload = false,
+  }: {
+    providerProfile: ProviderProfile;
+    cwd?: string | null;
+    forceReload?: boolean;
+  }): Promise<ProviderSkillsListResult> {
+    const client = await this.ensureClient(providerProfile);
+    return client.listSkills({
+      cwd,
+      forceReload,
+    });
+  }
+
+  async setSkillEnabled({
+    providerProfile,
+    enabled,
+    name = null,
+    path = null,
+  }: {
+    providerProfile: ProviderProfile;
+    enabled: boolean;
+    name?: string | null;
+    path?: string | null;
+  }): Promise<void> {
+    const client = await this.ensureClient(providerProfile);
+    await client.setSkillEnabled({
+      enabled,
+      name,
+      path,
+    });
   }
 
   getClient(profileId: string): any {

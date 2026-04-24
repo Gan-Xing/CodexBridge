@@ -1,7 +1,10 @@
 import { ActiveTurnRegistry } from '../core/active_turn_registry.js';
+import { AutomationJobService } from '../core/automation_job_service.js';
 import { BridgeSessionService } from '../core/bridge_session_service.js';
 import { BridgeCoordinator } from '../core/bridge_coordinator.js';
+import { WeiboHotSearchService } from '../services/weibo_hot_search.js';
 import { SessionRouter } from '../core/session_router.js';
+import { InMemoryAutomationJobRepository } from '../store/in_memory/in_memory_automation_job_repository.js';
 import { InMemoryBridgeSessionRepository } from '../store/in_memory/in_memory_bridge_session_repository.js';
 import { InMemoryPlatformBindingRepository } from '../store/in_memory/in_memory_platform_binding_repository.js';
 import { InMemoryProviderProfileRepository } from '../store/in_memory/in_memory_provider_profile_repository.js';
@@ -16,6 +19,7 @@ interface RuntimeRepositories {
   platformBindings?: any;
   sessionSettings?: any;
   threadMetadata?: any;
+  automationJobs?: any;
 }
 
 interface CreateCodexBridgeRuntimeOptions {
@@ -29,6 +33,7 @@ interface CreateCodexBridgeRuntimeOptions {
   restartBridge?: ((params: { event: any }) => Promise<void>) | null;
   codexAuthManager?: any;
   codexInstructionsManager?: any;
+  weiboHotSearch?: any;
 }
 
 export function createCodexBridgeRuntime({
@@ -42,6 +47,7 @@ export function createCodexBridgeRuntime({
   restartBridge = null,
   codexAuthManager = null,
   codexInstructionsManager = null,
+  weiboHotSearch = null,
 }: CreateCodexBridgeRuntimeOptions = {}) {
   const registry = new PluginRegistry({
     locale,
@@ -58,6 +64,7 @@ export function createCodexBridgeRuntime({
   const platformBindingsRepository = repositories.platformBindings ?? new InMemoryPlatformBindingRepository();
   const sessionSettingsRepository = repositories.sessionSettings ?? new InMemorySessionSettingsRepository();
   const threadMetadataRepository = repositories.threadMetadata ?? new InMemoryThreadMetadataRepository();
+  const automationJobsRepository = repositories.automationJobs ?? new InMemoryAutomationJobRepository();
 
   for (const providerProfile of providerProfiles) {
     providerProfilesRepository.save(providerProfile);
@@ -78,6 +85,11 @@ export function createCodexBridgeRuntime({
     sessionRouter,
     locale,
   });
+  const automationJobs = new AutomationJobService({
+    automationJobs: automationJobsRepository,
+    bridgeSessions,
+    locale,
+  });
   const activeTurns = new ActiveTurnRegistry({ locale });
 
   const resolvedDefaultProviderProfileId = defaultProviderProfileId
@@ -85,6 +97,7 @@ export function createCodexBridgeRuntime({
     ?? null;
   const bridgeCoordinator = new BridgeCoordinator({
     bridgeSessions,
+    automationJobs,
     activeTurns,
     providerProfiles: providerProfilesRepository,
     providerRegistry: registry,
@@ -93,6 +106,7 @@ export function createCodexBridgeRuntime({
     restartBridge,
     codexAuthManager,
     codexInstructionsManager,
+    weiboHotSearch: weiboHotSearch ?? new WeiboHotSearchService(),
     locale,
   });
 
@@ -109,11 +123,13 @@ export function createCodexBridgeRuntime({
       platformBindings: platformBindingsRepository,
       sessionSettings: sessionSettingsRepository,
       threadMetadata: threadMetadataRepository,
+      automationJobs: automationJobsRepository,
     },
     services: {
       activeTurns,
       sessionRouter,
       bridgeSessions,
+      automationJobs,
       bridgeCoordinator,
     },
   };

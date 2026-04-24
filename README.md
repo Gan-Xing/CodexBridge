@@ -38,7 +38,7 @@ Project bootstrap is now focused on:
 
 Current implemented bridge pieces:
 
-- Core session routing with WeChat-friendly slash commands, including `/helps`, `/status`, `/usage`, `/login`, `/stop`, `/review`, `/new`, `/uploads`, `/provider`, `/models`, `/model`, `/personality`, `/instructions`, `/fast`, `/threads`, `/search`, `/next`, `/prev`, `/open`, `/peek`, `/rename`, `/permissions`, `/allow`, `/deny`, `/reconnect`, `/retry`, `/restart`, and `/lang`
+- Core session routing with WeChat-friendly slash commands, including `/helps`, `/status`, `/usage`, `/login`, `/stop`, `/review`, `/skills`, `/automation`, `/weibo`, `/new`, `/uploads`, `/provider`, `/models`, `/model`, `/personality`, `/instructions`, `/fast`, `/threads`, `/search`, `/next`, `/prev`, `/open`, `/peek`, `/rename`, `/permissions`, `/allow`, `/deny`, `/reconnect`, `/retry`, `/restart`, and `/lang`
 - File-backed JSON repositories for persistent bridge state
 - WeChat platform skeleton for Hermes-compatible iLink config loading, QR account state reuse, inbound DM normalization, long-poll client/poller wiring, context-token persistence, text chunking, and outbound text/typing delivery
 - Codex profile loader and initial Codex app-server client/plugin path for shared thread execution
@@ -59,6 +59,16 @@ Recommended entrypoints:
 /review
 /rv
 /review base main
+/skills
+/sk
+/skills search 新闻
+/skills show 1
+/auto
+/auto add 每30分钟检查一次系统状态，有变化发送给我
+/auto confirm
+/auto list
+/auto rename 1 晚间部署巡检
+/auto del 1
 /helps threads
 /stop
 /sp
@@ -116,6 +126,34 @@ Examples:
 /ms
 ```
 
+### `/automation` and `/auto`
+
+Create and manage scheduled background jobs. Results are always delivered back to the same WeChat chat.
+
+Examples:
+
+```text
+/auto
+/auto add 每30分钟检查一次系统状态，有变化发送给我
+/auto add 每天早上7点调用 news skill 给我发送到微信
+/auto add 工作日晚上6点检查部署状态，异常时通知我
+/auto confirm
+/auto edit 每小时检查一次部署状态，有变化发送给我
+/auto cancel
+/auto add every 30m | 检查部署状态，有变化再告诉我
+/auto add thread every 10m | 继续跟进当前线程里的部署情况
+/weibo
+/weibo top 10
+/auto add every 5m | /weibo top 10
+/auto list
+/auto show 1
+/auto pause 1
+/auto resume 1
+/auto rename 1 晚间部署巡检
+/auto delete 1
+/auto del 1
+```
+
 ### `/model` and `/m`
 
 Check or switch the model used for future turns.
@@ -144,6 +182,8 @@ Best-practice rule:
 - use `/helps` for command discovery
 - use `/login` and `/login list` to manage the host Codex account pool before switching accounts with `/login <index>`
 - use `/review`, `/review base <branch>`, or `/review commit <sha>` when you want a native Codex code review without changing the current thread binding
+- use `/skills` to inspect what Codex can currently see in the active project, `/skills search <keyword>` for related matches, and `/skills show <index>` to understand what a skill is for before enabling or disabling it
+- use `/auto add ...` in natural language first; the bridge will draft a schedule, then `/auto confirm` creates the job
 - use `/threads` and numeric indexes on WeChat instead of copying raw thread ids
 - use `/personality` to control the response style for future turns in the current scope
 - use `/instructions` to manage the active Codex `AGENTS.md` custom instructions file

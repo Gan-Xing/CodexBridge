@@ -29,7 +29,7 @@ It borrows the most useful CLI help conventions while staying chat-friendly:
 - `/helps` shows the full command catalog
 - `/helps <command>` shows one command in detail
 - every slash command supports `-h`, `--help`, `-help`, and `-helps`
-- every slash command also supports a short alias such as `/h`, `/st`, `/us`, `/lg`, `/sp`, `/rv`, `/n`, `/up`, `/pd`, `/ms`, `/m`, `/psn`, `/ins`, `/th`, `/se`, `/nx`, `/pv`, `/o`, `/pk`, `/rn`, `/perm`, `/al`, `/dn`, `/rc`, `/rt`, and `/rs`
+- every slash command also supports a short alias such as `/h`, `/st`, `/us`, `/lg`, `/sp`, `/rv`, `/sk`, `/n`, `/up`, `/pd`, `/ms`, `/m`, `/psn`, `/ins`, `/th`, `/se`, `/nx`, `/pv`, `/o`, `/pk`, `/rn`, `/perm`, `/al`, `/dn`, `/rc`, `/rt`, and `/rs`
 - `/lang` and `/lang <zh|en>` to switch reply language for this scope (higher priority than env).
 - thread browsing is index-first on WeChat, so `/open 2` is preferred over copying raw thread ids
 
@@ -46,6 +46,16 @@ It borrows the most useful CLI help conventions while staying chat-friendly:
 /rv
 /review base main
 /review commit HEAD~1
+/skills
+/sk
+/skills search 新闻
+/skills show 1
+/auto
+/auto add 每30分钟检查一次系统状态，有变化发送给我
+/auto confirm
+/auto list
+/auto rename 1 晚间部署巡检
+/auto del 1
 /stop
 /sp
 /provider
@@ -162,6 +172,61 @@ Examples:
 /rv
 /review base main
 /review commit HEAD~1
+```
+
+### `/skills` and `/sk`
+
+List the skills currently visible to Codex for the active session cwd, search for related skills, inspect what a skill is for, and enable or disable it.
+
+- `/skills` shows the current visible skills
+- `/skills search <keyword>` performs a broad relevance match over the visible skills
+- `/skills show <index|name>` explains a skill's purpose, path, scope, default prompt, and dependencies
+- `/skills on <index|name>` enables the selected skill
+- `/skills off <index|name>` disables the selected skill
+- `/skills reload` forces a fresh re-scan for the current cwd
+
+Examples:
+
+```text
+/skills
+/sk
+/skills search 新闻
+/skills show 1
+/skills on 2
+/skills off 2
+/skills reload
+```
+
+### `/automation` and `/auto`
+
+Create and manage scheduled background jobs. Results are always delivered back to the same WeChat chat.
+
+- `/auto add ...` now uses a two-phase flow:
+  - first it creates a draft
+  - then `/auto confirm` persists the job
+- default mode is `standalone`
+- `thread` mode reuses the current bound session and requires an existing scope session
+- `daily` and `cron` schedules are interpreted in `UTC`
+
+Examples:
+
+```text
+/auto
+/auto add 每30分钟检查一次系统状态，有变化发送给我
+/auto add 每天早上7点调用 news skill 给我发送到微信
+/auto add 工作日晚上6点检查部署状态，异常时通知我
+/auto confirm
+/auto edit 每小时检查一次部署状态，有变化发送给我
+/auto cancel
+/auto add every 30m | 检查部署状态，有变化再告诉我
+/auto add thread every 10m | 继续跟进当前线程里的部署情况
+/auto list
+/auto show 1
+/auto pause 1
+/auto resume 1
+/auto rename 1 晚间部署巡检
+/auto delete 1
+/auto del 1
 ```
 
 ### `/new` and `/n`

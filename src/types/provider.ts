@@ -89,6 +89,39 @@ export interface ProviderUsageReport {
   credits?: ProviderUsageCredits | null;
 }
 
+export interface ProviderSkillToolDependency {
+  type: string;
+  value: string;
+  command?: string | null;
+  description?: string | null;
+  transport?: string | null;
+  url?: string | null;
+}
+
+export interface ProviderSkillInfo {
+  name: string;
+  description: string;
+  enabled: boolean;
+  path: string;
+  scope: 'user' | 'repo' | 'system' | 'admin' | string;
+  shortDescription?: string | null;
+  displayName?: string | null;
+  defaultPrompt?: string | null;
+  brandColor?: string | null;
+  dependencies?: ProviderSkillToolDependency[];
+}
+
+export interface ProviderSkillError {
+  path: string;
+  message: string;
+}
+
+export interface ProviderSkillsListResult {
+  cwd: string | null;
+  skills: ProviderSkillInfo[];
+  errors: ProviderSkillError[];
+}
+
 export interface ProviderTurnProgress {
   text: string;
   delta: string;
@@ -222,4 +255,15 @@ export interface ProviderPluginContract {
   getUsage?(params: {
     providerProfile: ProviderProfile;
   }): Promise<ProviderUsageReport | null>;
+  listSkills?(params: {
+    providerProfile: ProviderProfile;
+    cwd?: string | null;
+    forceReload?: boolean;
+  }): Promise<ProviderSkillsListResult>;
+  setSkillEnabled?(params: {
+    providerProfile: ProviderProfile;
+    enabled: boolean;
+    name?: string | null;
+    path?: string | null;
+  }): Promise<void>;
 }
