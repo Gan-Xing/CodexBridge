@@ -144,6 +144,24 @@ export interface ProviderTurnResult {
   artifactDelivery?: TurnArtifactDeliveryState | null;
 }
 
+export type ProviderReviewTarget =
+  | {
+    type: 'uncommittedChanges';
+  }
+  | {
+    type: 'baseBranch';
+    branch: string;
+  }
+  | {
+    type: 'commit';
+    sha: string;
+    title?: string | null;
+  }
+  | {
+    type: 'custom';
+    instructions: string;
+  };
+
 export interface ProviderPluginContract {
   kind: string;
   displayName: string;
@@ -170,6 +188,17 @@ export interface ProviderPluginContract {
     sessionSettings: SessionSettings | null;
     event: InboundTextEvent;
     inputText: string;
+    onProgress?: ((progress: ProviderTurnProgress) => Promise<void> | void) | null;
+    onTurnStarted?: ((meta: Record<string, unknown>) => Promise<void> | void) | null;
+    onApprovalRequest?: ((request: ProviderApprovalRequest) => Promise<void> | void) | null;
+  }): Promise<ProviderTurnResult>;
+  startReview?(params: {
+    providerProfile: ProviderProfile;
+    bridgeSession?: BridgeSession | null;
+    sessionSettings: SessionSettings | null;
+    cwd: string;
+    target: ProviderReviewTarget;
+    locale?: string | null;
     onProgress?: ((progress: ProviderTurnProgress) => Promise<void> | void) | null;
     onTurnStarted?: ((meta: Record<string, unknown>) => Promise<void> | void) | null;
     onApprovalRequest?: ((request: ProviderApprovalRequest) => Promise<void> | void) | null;

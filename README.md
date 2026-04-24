@@ -38,7 +38,7 @@ Project bootstrap is now focused on:
 
 Current implemented bridge pieces:
 
-- Core session routing with WeChat-friendly slash commands, including `/helps`, `/status`, `/usage`, `/login`, `/stop`, `/new`, `/uploads`, `/provider`, `/models`, `/model`, `/personality`, `/instructions`, `/fast`, `/threads`, `/search`, `/next`, `/prev`, `/open`, `/peek`, `/rename`, `/permissions`, `/allow`, `/deny`, `/reconnect`, `/retry`, `/restart`, and `/lang`
+- Core session routing with WeChat-friendly slash commands, including `/helps`, `/status`, `/usage`, `/login`, `/stop`, `/review`, `/new`, `/uploads`, `/provider`, `/models`, `/model`, `/personality`, `/instructions`, `/fast`, `/threads`, `/search`, `/next`, `/prev`, `/open`, `/peek`, `/rename`, `/permissions`, `/allow`, `/deny`, `/reconnect`, `/retry`, `/restart`, and `/lang`
 - File-backed JSON repositories for persistent bridge state
 - WeChat platform skeleton for Hermes-compatible iLink config loading, QR account state reuse, inbound DM normalization, long-poll client/poller wiring, context-token persistence, text chunking, and outbound text/typing delivery
 - Codex profile loader and initial Codex app-server client/plugin path for shared thread execution
@@ -56,6 +56,9 @@ Recommended entrypoints:
 /login
 /lg
 /login list
+/review
+/rv
+/review base main
 /helps threads
 /stop
 /sp
@@ -140,6 +143,7 @@ Best-practice rule:
 
 - use `/helps` for command discovery
 - use `/login` and `/login list` to manage the host Codex account pool before switching accounts with `/login <index>`
+- use `/review`, `/review base <branch>`, or `/review commit <sha>` when you want a native Codex code review without changing the current thread binding
 - use `/threads` and numeric indexes on WeChat instead of copying raw thread ids
 - use `/personality` to control the response style for future turns in the current scope
 - use `/instructions` to manage the active Codex `AGENTS.md` custom instructions file

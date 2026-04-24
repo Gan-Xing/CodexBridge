@@ -13,6 +13,7 @@ class FakeProviderPlugin {
   startThreadCalls: any[];
   resumeThreadCalls: any[];
   startTurnCalls: any[];
+  startReviewCalls: any[];
   interruptTurnCalls: any[];
   respondToApprovalCalls: any[];
   listModelsCalls: any[];
@@ -105,6 +106,7 @@ class FakeProviderPlugin {
     this.startThreadCalls = [];
     this.resumeThreadCalls = [];
     this.startTurnCalls = [];
+    this.startReviewCalls = [];
     this.interruptTurnCalls = [];
     this.respondToApprovalCalls = [];
     this.listModelsCalls = [];
@@ -224,6 +226,30 @@ class FakeProviderPlugin {
       turnId,
       threadId: bridgeSession.codexThreadId,
       title: bridgeSession.title,
+    };
+  }
+
+  async startReview({ providerProfile, bridgeSession = null, sessionSettings, cwd, target, locale = null, onTurnStarted = null }) {
+    this.startReviewCalls.push({ providerProfile, bridgeSession, sessionSettings, cwd, target, locale });
+    const threadId = `review-${this.kind}-${this.startReviewCalls.length}`;
+    const turnId = `${threadId}-turn-1`;
+    if (typeof onTurnStarted === 'function') {
+      await onTurnStarted({ threadId, turnId });
+    }
+    const targetLabel = target?.type === 'baseBranch'
+      ? `base ${target.branch}`
+      : target?.type === 'commit'
+        ? `commit ${target.sha}`
+        : target?.type === 'custom'
+          ? 'custom'
+          : 'uncommitted';
+    return {
+      outputText: `${this.replyPrefix} review: ${targetLabel}`,
+      outputState: 'complete',
+      turnId,
+      threadId,
+      title: `review ${targetLabel}`,
+      finalSource: 'fake_review',
     };
   }
 
@@ -1599,6 +1625,7 @@ test('/helps lists all supported slash commands and help entrypoints', async () 
   assert.match(text, /\/usage \(\/us\) 查看当前 Codex 账号，以及 5 小时 \/ 本周剩余用量/);
   assert.match(text, /\/login \(\/lg\) 管理本机 Codex 登录账号/);
   assert.match(text, /\/stop \(\/sp\) 请求中断当前正在执行的回复/);
+  assert.match(text, /\/review \(\/rv\) 对当前工作区改动运行原生 Codex 代码审查/);
   assert.match(text, /\/uploads \(\/up, \/ul\) 开启上传暂存模式/);
   assert.match(text, /\/provider \(\/pd\) 查看可用 provider/);
   assert.match(text, /\/models \(\/ms\) 列出当前 provider 的可用模型/);
@@ -1633,6 +1660,7 @@ test('/helps renders English help text when locale is set to en', async () => {
   assert.match(text, /\/helps \(\/help, \/h\) Show all slash commands/);
   assert.match(text, /\/usage \(\/us\) Show the current Codex account plus 5-hour and weekly remaining usage/);
   assert.match(text, /\/login \(\/lg\) Manage the host Codex login account/);
+  assert.match(text, /\/review \(\/rv\) Run a native Codex code review for the current workspace changes/);
   assert.match(text, /\/uploads \(\/up, \/ul\) Enter upload staging mode/);
   assert.match(text, /\/allow \(\/al\) Inspect and approve in-turn approval requests/);
   assert.match(text, /\/deny \(\/dn\) Deny the current in-turn approval request/);
@@ -3474,6 +3502,125 @@ test('/retry stops live turns before rerunning the previous request', async () =
     [`${session.codexThreadId}-turn-live`],
   );
   assert.equal(result.messages[0]?.text ?? '', 'openai: hello retry stop');
+});
+
+test('/review runs a native review for uncommitted changes without rebinding the current session thread', async () => {
+  const { runtime, openai } = makeRuntime({
+    defaultCwd: '/tmp/openai-default',
+  });
+  const first = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-review-1',
+    text: 'hello review',
+  });
+  const originalThreadId = first.session?.codexThreadId;
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-review-1',
+    text: '/review',
+  });
+
+  assert.equal(openai.startReviewCalls.length, 1);
+  assert.deepEqual(openai.startReviewCalls[0]?.target, {
+    type: 'uncommittedChanges',
+  });
+  assert.equal(openai.startReviewCalls[0]?.bridgeSession?.codexThreadId, originalThreadId);
+  assert.equal(result.session?.codexThreadId, originalThreadId);
+  assert.match(result.messages[0]?.text ?? '', /代码审查 \| 未提交改动/);
+  assert.match(result.messages[0]?.text ?? '', /openai review: uncommitted/);
+});
+
+test('/review base main targets base-branch review and can run without an existing session', async () => {
+  const { runtime, openai } = makeRuntime({
+    defaultCwd: '/tmp/openai-default',
+  });
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-review-2',
+    text: '/review base main',
+  });
+
+  assert.equal(openai.startReviewCalls.length, 1);
+  assert.equal(openai.startReviewCalls[0]?.cwd, '/tmp/openai-default');
+  assert.deepEqual(openai.startReviewCalls[0]?.target, {
+    type: 'baseBranch',
+    branch: 'main',
+  });
+  assert.equal(result.session ?? null, null);
+  assert.match(result.messages[0]?.text ?? '', /代码审查 \| 相对分支 main/);
+  assert.match(result.messages[0]?.text ?? '', /openai review: base main/);
+});
+
+test('/review emits an immediate localized progress update before waiting for the native review result', async () => {
+  const { runtime } = makeRuntime({
+    defaultCwd: '/tmp/openai-default',
+  });
+  const progressEvents: Array<{ text: string; outputKind: string }> = [];
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-review-progress-1',
+    text: '/review',
+  }, {
+    onProgress: async (progress: any) => {
+      progressEvents.push({
+        text: String(progress?.text ?? ''),
+        outputKind: String(progress?.outputKind ?? ''),
+      });
+    },
+  });
+
+  assert.equal(progressEvents.length >= 1, true);
+  assert.match(progressEvents[0]?.text ?? '', /正在运行代码审查：代码审查 \| 未提交改动。/);
+  assert.equal(progressEvents[0]?.outputKind ?? '', 'commentary');
+  assert.match(result.messages[0]?.text ?? '', /代码审查 \| 未提交改动/);
+});
+
+test('/review forwards the active session locale into the native review request', async () => {
+  const { runtime, openai } = makeRuntime({
+    defaultCwd: '/tmp/openai-default',
+  });
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-review-locale-1',
+    text: '/lang en',
+  });
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-review-locale-1',
+    text: '/review',
+  });
+
+  assert.equal(openai.startReviewCalls.length, 1);
+  assert.equal(openai.startReviewCalls[0]?.locale, 'en');
+});
+
+test('/review clears the active scope turn if the initial progress delivery fails', async () => {
+  const { runtime, openai } = makeRuntime({
+    defaultCwd: '/tmp/openai-default',
+  });
+  const scopeRef = {
+    platform: 'weixin',
+    externalScopeId: 'wx-user-review-progress-fail-1',
+  };
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: scopeRef.externalScopeId,
+    text: '/review',
+  }, {
+    onProgress: async () => {
+      throw new Error('preview send failed');
+    },
+  });
+
+  assert.match(result.messages[0]?.text ?? '', /代码审查失败：preview send failed/);
+  assert.equal(openai.startReviewCalls.length, 0);
+  assert.equal(runtime.services.activeTurns.resolveScopeTurn(scopeRef), null);
 });
 
 test('ordinary messages after /stop do not eagerly resume the thread when startTurn succeeds', async () => {

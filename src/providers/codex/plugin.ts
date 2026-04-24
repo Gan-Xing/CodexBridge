@@ -1,5 +1,6 @@
 import { CodexAppClient, createStderrLogger, readCodexAccountIdentity } from './app_client.js';
 import type { CodexTurnInput } from './app_client.js';
+import { CodexCliReviewRunner } from './review_runner.js';
 import { buildTurnArtifactDeveloperInstructions } from '../../core/turn_artifacts.js';
 import type { BridgeSession, SessionSettings, TurnArtifactContext } from '../../types/core.js';
 import type { InboundAttachment, InboundTextEvent } from '../../types/platform.js';
@@ -12,6 +13,7 @@ import type {
   ProviderTurnProgress,
   ProviderTurnResult,
   ProviderModelInfo,
+  ProviderReviewTarget,
   ProviderUsageReport,
 } from '../../types/provider.js';
 
@@ -32,6 +34,7 @@ type CodexProviderProfile = ProviderProfile & {
 
 interface CodexProviderPluginOptions {
   clientFactory?: any;
+  reviewRunner?: any;
 }
 
 export class CodexProviderPlugin {
@@ -43,6 +46,8 @@ export class CodexProviderPlugin {
 
   clients: Map<string, any>;
 
+  reviewRunner: any;
+
   constructor({
     clientFactory = (profile) => new CodexAppClient({
       codexCliBin: profile.config.cliBin,
@@ -52,11 +57,13 @@ export class CodexProviderPlugin {
       modelCatalogMode: profile.config.modelCatalogMode ?? 'merge',
       logger: createStderrLogger(),
     }),
+    reviewRunner = new CodexCliReviewRunner(),
   }: CodexProviderPluginOptions = {}) {
     this.kind = 'codex';
     this.displayName = 'Codex Engine';
     this.clientFactory = clientFactory;
     this.clients = new Map();
+    this.reviewRunner = reviewRunner;
   }
 
   async startThread({
@@ -86,6 +93,10 @@ export class CodexProviderPlugin {
     threadId: string;
     includeTurns?: boolean;
   }): Promise<ProviderThreadSummary | null> {
+    const reviewThread = this.reviewRunner?.readThread?.(threadId, includeTurns) ?? null;
+    if (reviewThread) {
+      return reviewThread;
+    }
     const client = await this.ensureClient(providerProfile);
     return client.readThread(threadId, includeTurns);
   }
@@ -190,6 +201,49 @@ export class CodexProviderPlugin {
     };
   }
 
+  async startReview({
+    providerProfile,
+    bridgeSession = null,
+    sessionSettings,
+    cwd,
+    target,
+    locale = null,
+    onTurnStarted = null,
+  }: {
+    providerProfile: ProviderProfile;
+    bridgeSession?: BridgeSession | null;
+    sessionSettings: SessionSettings | null;
+    cwd: string;
+    target: ProviderReviewTarget;
+    locale?: string | null;
+    onProgress?: ((progress: ProviderTurnProgress) => Promise<void> | void) | null;
+    onTurnStarted?: ((meta: Record<string, unknown>) => Promise<void> | void) | null;
+    onApprovalRequest?: ((request: ProviderApprovalRequest) => Promise<void> | void) | null;
+  }): Promise<ProviderTurnResult> {
+    const requestedModel = sessionSettings?.model ?? null;
+    const config = providerProfile.config as CodexProviderProfileConfig;
+    const effort = sessionSettings?.reasoningEffort ?? null;
+    const model = requestedModel || config.defaultModel || null;
+    return this.reviewRunner.start({
+      codexCliBin: config.cliBin,
+      cwd,
+      model,
+      effort,
+      serviceTier: normalizeCodexServiceTier(sessionSettings?.serviceTier ?? null),
+      target,
+      locale,
+      onTurnStarted: async (meta: { threadId: string; turnId: string }) => {
+        if (typeof onTurnStarted === 'function') {
+          await onTurnStarted({
+            ...meta,
+            bridgeSessionId: bridgeSession?.id ?? null,
+            providerProfileId: providerProfile.id,
+          });
+        }
+      },
+    });
+  }
+
   async interruptTurn({
     providerProfile,
     threadId,
@@ -199,6 +253,9 @@ export class CodexProviderPlugin {
     threadId: string;
     turnId: string;
   }): Promise<void> {
+    if (await this.reviewRunner?.interrupt?.(turnId)) {
+      return;
+    }
     const client = await this.ensureClient(providerProfile);
     return client.interruptTurn({ threadId, turnId });
   }

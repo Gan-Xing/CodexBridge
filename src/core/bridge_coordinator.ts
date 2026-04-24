@@ -28,7 +28,12 @@ import {
 } from '../providers/codex/instructions_state.js';
 import type { TurnArtifactDeliveryState, UploadBatchItem, UploadBatchState } from '../types/core.js';
 import type { InboundAttachment, InboundTextEvent } from '../types/platform.js';
-import type { OutputArtifact, ProviderApprovalRequest } from '../types/provider.js';
+import type {
+  OutputArtifact,
+  ProviderApprovalRequest,
+  ProviderReviewTarget,
+  ProviderTurnProgress,
+} from '../types/provider.js';
 
 const THREAD_PAGE_SIZE = 5;
 const THREAD_PREVIEW_LIMIT = 72;
@@ -38,6 +43,8 @@ const STATUS_DETAILS_ARG_SET = new Set(['details', 'detail', 'full']);
 const FAST_SERVICE_TIER = 'fast';
 const NORMAL_SERVICE_TIER = 'flex';
 const CODEX_BACKED_PROVIDER_KIND_SET = new Set(['openai-native', 'minimax-via-cliproxy']);
+const REVIEW_PROGRESS_HEARTBEAT_MS = 20_000;
+const REVIEW_PROGRESS_HEARTBEAT_MAX_RUNS = 1;
 
 type CoordinatorResponse = {
   type: 'message';
@@ -52,7 +59,7 @@ type CoordinatorResponse = {
 };
 
 type StartTurnOptions = {
-  onProgress?: unknown;
+  onProgress?: ((progress: ProviderTurnProgress) => Promise<void> | void) | null;
   onTurnStarted?: (meta: {
     turnId: string | null;
     threadId: string | null;
@@ -61,6 +68,8 @@ type StartTurnOptions = {
   }) => Promise<void> | void;
   onApprovalRequest?: (request: ProviderApprovalRequest) => Promise<void> | void;
 };
+
+type ProgressHandler = ((progress: ProviderTurnProgress) => Promise<void> | void) | null;
 
 type RecoveryFailure = Error & {
   reasonCode?: string;
@@ -436,6 +445,8 @@ export class BridgeCoordinator {
       case 'stop':
       case 'interrupt':
         return this.handleStopCommand(event);
+      case 'review':
+        return this.handleReviewCommand(event, command.args, options);
       case 'threads':
         return this.handleThreadsCommand(event);
       case 'search':
@@ -2234,6 +2245,95 @@ export class BridgeCoordinator {
     return messageResponse(lines, buildActiveTurnMeta(active) ?? buildSessionMeta(session));
   }
 
+  async handleReviewCommand(event, args = [], options: StartTurnOptions = {}) {
+    const activeResponse = await this.rejectIfActiveTurnForCommand(event, 'review');
+    if (activeResponse) {
+      return activeResponse;
+    }
+    const target = parseReviewTargetArgs(args);
+    if (!target) {
+      return this.handleHelpsCommand(event, ['review']);
+    }
+    const scopeRef = toScopeRef(event);
+    const currentSession = this.bridgeSessions.resolveScopeSession(scopeRef);
+    const providerProfile = currentSession
+      ? this.requireProviderProfile(currentSession.providerProfileId)
+      : this.resolveScopeProviderProfile(scopeRef);
+    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+    if (typeof providerPlugin.startReview !== 'function') {
+      return messageResponse([
+        this.t('coordinator.review.unsupported'),
+      ], currentSession ? buildSessionMeta(currentSession) : undefined);
+    }
+    const cwd = normalizeCwd(currentSession?.cwd) ?? this.resolveEventCwd(event);
+    if (!cwd) {
+      return messageResponse([
+        this.t('coordinator.review.noCwd'),
+      ], currentSession ? buildSessionMeta(currentSession) : undefined);
+    }
+    let stopReviewHeartbeat = () => {};
+    try {
+      this.activeTurns?.beginScopeTurn(scopeRef, {
+        bridgeSessionId: currentSession?.id ?? null,
+        providerProfileId: providerProfile.id,
+        threadId: currentSession?.codexThreadId ?? null,
+      });
+      await emitProgressUpdate(
+        options.onProgress ?? null,
+        this.t('coordinator.review.started', {
+          target: formatReviewTargetTitle(target, this.currentI18n),
+        }),
+        'commentary',
+      );
+      stopReviewHeartbeat = startProgressHeartbeat(
+        options.onProgress ?? null,
+        () => this.t('coordinator.review.heartbeat', {
+          target: formatReviewTargetTitle(target, this.currentI18n),
+        }),
+        REVIEW_PROGRESS_HEARTBEAT_MS,
+        { maxRuns: REVIEW_PROGRESS_HEARTBEAT_MAX_RUNS },
+      );
+      const sessionSettings = currentSession
+        ? this.bridgeSessions.getSessionSettings(currentSession.id)
+        : null;
+      const result = await providerPlugin.startReview({
+        providerProfile,
+        bridgeSession: currentSession,
+        sessionSettings,
+        cwd,
+        target,
+        locale: this.currentI18n.locale,
+        onProgress: options.onProgress ?? null,
+        onTurnStarted: async (meta: { turnId?: string | null; threadId?: string | null } = {}) => {
+          const active = this.activeTurns?.updateScopeTurn(scopeRef, {
+            bridgeSessionId: currentSession?.id ?? null,
+            providerProfileId: providerProfile.id,
+            threadId: meta.threadId ?? currentSession?.codexThreadId ?? null,
+            turnId: meta.turnId ?? null,
+          }) ?? null;
+          if (active?.interruptRequested && active.turnId && !active.interruptDispatched) {
+            await this.dispatchInterruptForActiveTurn(active);
+          }
+        },
+      });
+      return buildReviewResponse({
+        result,
+        target,
+        i18n: this.currentI18n,
+        session: currentSession ? buildSessionMeta(currentSession) : undefined,
+      });
+    } catch (error) {
+      const failure = classifyTurnFailure(error, this.currentI18n);
+      const message = failure?.errorMessage || formatUserError(error);
+      return messageResponse([
+        this.t('coordinator.review.failed', { error: message }),
+      ], currentSession ? buildSessionMeta(currentSession) : undefined);
+    } finally {
+      stopReviewHeartbeat();
+      await this.releaseActiveTurnIfStillRunning(scopeRef);
+    }
+  }
+
   async renderThreadsPage(event, {
     providerProfileId,
     cursor,
@@ -3030,6 +3130,7 @@ function renderCommandBlockedMessage(commandName, interruptRequested, i18n: Tran
   const action = {
     new: i18n.t('coordinator.action.new'),
     uploads: i18n.t('coordinator.action.uploads'),
+    review: i18n.t('coordinator.action.review'),
     open: i18n.t('coordinator.action.open'),
     models: i18n.t('coordinator.action.models'),
     model: i18n.t('coordinator.action.model'),
@@ -3314,6 +3415,142 @@ function turnResponse(result, i18n: Translator, session = undefined): Coordinato
     messages,
     session: session ?? null,
   };
+}
+
+function buildReviewResponse({
+  result,
+  target,
+  i18n,
+  session = undefined,
+}: {
+  result: {
+    outputText?: string;
+    outputState?: string;
+    previewText?: string;
+  };
+  target: ProviderReviewTarget;
+  i18n: Translator;
+  session?: Record<string, unknown> | undefined;
+}): CoordinatorResponse {
+  const title = formatReviewTargetTitle(target, i18n);
+  const outputText = String(result?.outputText ?? '').trim();
+  const previewText = String(result?.previewText ?? '').trim();
+  if (outputText) {
+    return textResponse(`${title}\n\n${outputText}`, session);
+  }
+  if ((result?.outputState ?? 'complete') === 'partial' && previewText) {
+    return textResponse(`${title}\n\n${previewText}`, session);
+  }
+  if ((result?.outputState ?? '') === 'interrupted') {
+    return messageResponse([i18n.t('runtime.error.interrupted')], session);
+  }
+  return messageResponse([
+    i18n.t('coordinator.review.empty'),
+  ], session);
+}
+
+async function emitProgressUpdate(
+  handler: ProgressHandler,
+  text: string,
+  outputKind = 'commentary',
+): Promise<void> {
+  if (typeof handler !== 'function') {
+    return;
+  }
+  const normalized = String(text ?? '').trim();
+  if (!normalized) {
+    return;
+  }
+  await handler({
+    text: normalized,
+    delta: normalized,
+    outputKind,
+  });
+}
+
+function startProgressHeartbeat(
+  handler: ProgressHandler,
+  getText: () => string,
+  intervalMs: number,
+  options: {
+    maxRuns?: number;
+  } = {},
+): () => void {
+  if (typeof handler !== 'function' || intervalMs <= 0) {
+    return () => {};
+  }
+  const maxRuns = Number.isFinite(options.maxRuns) ? Math.max(0, Number(options.maxRuns)) : Number.POSITIVE_INFINITY;
+  if (maxRuns === 0) {
+    return () => {};
+  }
+  let running = false;
+  let runCount = 0;
+  const timer = setInterval(() => {
+    if (runCount >= maxRuns) {
+      clearInterval(timer);
+      return;
+    }
+    if (running) {
+      return;
+    }
+    running = true;
+    Promise.resolve(emitProgressUpdate(handler, getText(), 'commentary'))
+      .catch(() => {})
+      .finally(() => {
+        runCount += 1;
+        running = false;
+        if (runCount >= maxRuns) {
+          clearInterval(timer);
+        }
+      });
+  }, intervalMs);
+  return () => {
+    clearInterval(timer);
+  };
+}
+
+function formatReviewTargetTitle(target: ProviderReviewTarget, i18n: Translator): string {
+  switch (target.type) {
+    case 'uncommittedChanges':
+      return i18n.t('coordinator.review.target.uncommitted');
+    case 'baseBranch':
+      return i18n.t('coordinator.review.target.base', { branch: target.branch });
+    case 'commit':
+      return i18n.t('coordinator.review.target.commit', { sha: target.sha });
+    case 'custom':
+      return i18n.t('coordinator.review.target.custom');
+    default:
+      return i18n.t('coordinator.review.target.uncommitted');
+  }
+}
+
+function parseReviewTargetArgs(args: readonly string[]): ProviderReviewTarget | null {
+  if (!Array.isArray(args) || args.length === 0) {
+    return { type: 'uncommittedChanges' };
+  }
+  const action = String(args[0] ?? '').trim().toLowerCase();
+  if (!action) {
+    return { type: 'uncommittedChanges' };
+  }
+  if (action === 'base') {
+    const branch = args.slice(1).join(' ').trim();
+    return branch
+      ? {
+        type: 'baseBranch',
+        branch,
+      }
+      : null;
+  }
+  if (action === 'commit') {
+    const sha = String(args[1] ?? '').trim();
+    return sha
+      ? {
+        type: 'commit',
+        sha,
+      }
+      : null;
+  }
+  return null;
 }
 
 function buildThreadBrowserKey(event) {
@@ -3769,6 +4006,25 @@ function getCommandHelpSpecs(i18n: Translator) {
       i18n.t('coordinator.help.note.stop'),
     ],
   }),
+  review: freezeCommandHelp({
+    name: 'review',
+    aliases: ['rv'],
+    summary: i18n.t('coordinator.help.summary.review'),
+    usage: [
+      '/review',
+      '/review base <branch>',
+      '/review commit <sha>',
+      '/review -h',
+    ],
+    examples: [
+      '/review',
+      '/review base main',
+      '/review commit HEAD~1',
+    ],
+    notes: [
+      i18n.t('coordinator.help.note.review'),
+    ],
+  }),
   new: freezeCommandHelp({
     name: 'new',
     aliases: ['n'],
@@ -4160,6 +4416,7 @@ const COMMAND_HELP_ORDER = Object.freeze([
   'usage',
   'login',
   'stop',
+  'review',
   'new',
   'uploads',
   'provider',
@@ -4194,6 +4451,7 @@ const COMMAND_ALIAS_DEFINITIONS = Object.freeze({
   usage: ['us'],
   login: ['lg'],
   stop: ['sp'],
+  review: ['rv'],
   new: ['n'],
   uploads: ['up', 'ul'],
   provider: ['pd'],

@@ -11,6 +11,7 @@ interface RuntimeHarnessOptions {
   commitSyncCursor?: (syncCursor: string) => Promise<void> | void;
   previewSoftTargetBytes?: number;
   previewIntervalMs?: number;
+  typingKeepaliveMs?: number;
   inboundAttachmentMergeWindowMs?: number;
   pollEvents?: any[];
 }
@@ -23,6 +24,7 @@ function makeRuntime({
   commitSyncCursor,
   previewSoftTargetBytes = 1,
   previewIntervalMs = 0,
+  typingKeepaliveMs = 8000,
   inboundAttachmentMergeWindowMs = 3000,
   pollEvents = null,
 }: RuntimeHarnessOptions) {
@@ -71,6 +73,7 @@ function makeRuntime({
     bridgeCoordinator: coordinator,
     previewSoftTargetBytes,
     previewIntervalMs,
+    typingKeepaliveMs,
     inboundAttachmentMergeWindowMs,
   });
 }
@@ -129,6 +132,124 @@ test('WeixinBridgeRuntime forwards poll events into the bridge coordinator and s
     { externalScopeId: 'wxid_1', status: 'stop' },
   ]);
   assert.deepEqual(committed, ['cursor-1']);
+});
+
+test('WeixinBridgeRuntime keeps sending typing notifications while a long-running turn is still processing', async () => {
+  const typing: Array<{ externalScopeId: string; status: 'start' | 'stop' }> = [];
+  const runtime = makeRuntime({
+    typingKeepaliveMs: 5,
+    sendText: async () => {},
+    sendTyping: async ({ externalScopeId, status }) => {
+      typing.push({ externalScopeId, status });
+    },
+    coordinator: {
+      async handleInboundEvent(_event: any) {
+        await new Promise((resolve) => setTimeout(resolve, 16));
+        return completeResponse('done');
+      },
+    },
+  });
+
+  await runtime.runOnce();
+
+  assert.equal(typing[0]?.status, 'start');
+  assert.equal(typing.at(-1)?.status, 'stop');
+  assert.equal(typing.filter((entry) => entry.status === 'start').length >= 2, true);
+});
+
+test('WeixinBridgeRuntime runs /review in the background so the immediate progress preview can be delivered without blocking dispatch', async () => {
+  const sent: Array<{ externalScopeId: string; content: string }> = [];
+  let releaseReview: () => void = () => {};
+  const reviewGate = new Promise<void>((resolve) => {
+    releaseReview = resolve;
+  });
+  const runtime = makeRuntime({
+    previewSoftTargetBytes: 1024,
+    sendText: async ({ externalScopeId, content }) => {
+      sent.push({ externalScopeId, content });
+    },
+    coordinator: {
+      async handleInboundEvent(_event: any, options: any = {}) {
+        await options.onProgress?.({
+          text: '正在运行代码审查：代码审查 | 未提交改动。',
+          delta: '正在运行代码审查：代码审查 | 未提交改动。',
+          outputKind: 'commentary',
+        });
+        await reviewGate;
+        return completeResponse('代码审查 | 未提交改动\n\n最终审查结果。');
+      },
+    },
+  });
+
+  const outcome = await runtime.dispatchInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wxid_1',
+    text: '/review',
+  });
+
+  assert.equal(outcome?.type, 'scheduled');
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(sent, [
+    { externalScopeId: 'wxid_1', content: '正在运行代码审查：代码审查 | 未提交改动。' },
+  ]);
+
+  releaseReview();
+  await runtime.waitForIdle();
+
+  assert.deepEqual(sent, [
+    { externalScopeId: 'wxid_1', content: '正在运行代码审查：代码审查 | 未提交改动。' },
+    { externalScopeId: 'wxid_1', content: '代码审查 | 未提交改动\n\n最终审查结果。' },
+  ]);
+});
+
+test('WeixinBridgeRuntime does not queue /review behind an existing scope task', async () => {
+  const sent: Array<{ externalScopeId: string; content: string }> = [];
+  let releaseTurn: () => void = () => {};
+  const turnGate = new Promise<void>((resolve) => {
+    releaseTurn = resolve;
+  });
+  const runtime = makeRuntime({
+    previewSoftTargetBytes: 1024,
+    sendText: async ({ externalScopeId, content }) => {
+      sent.push({ externalScopeId, content });
+    },
+    coordinator: {
+      async handleInboundEvent(event: any) {
+        if (event.text === 'hello') {
+          await turnGate;
+          return completeResponse('final answer');
+        }
+        return completeResponse('当前有回复在进行中，暂时不能执行 /review。');
+      },
+    },
+  });
+
+  const first = await runtime.dispatchInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wxid_1',
+    text: 'hello',
+  });
+  assert.equal(first?.type, 'scheduled');
+
+  const second = await runtime.dispatchInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wxid_1',
+    text: '/review',
+  });
+  assert.equal(second?.type, 'scheduled');
+
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(sent, [
+    { externalScopeId: 'wxid_1', content: '当前有回复在进行中，暂时不能执行 /review。' },
+  ]);
+
+  releaseTurn();
+  await runtime.waitForIdle();
+
+  assert.deepEqual(sent, [
+    { externalScopeId: 'wxid_1', content: '当前有回复在进行中，暂时不能执行 /review。' },
+    { externalScopeId: 'wxid_1', content: 'final answer' },
+  ]);
 });
 
 test('WeixinBridgeRuntime merges an image-only inbound message with the next text message into one Codex turn', async () => {

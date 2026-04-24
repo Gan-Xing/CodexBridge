@@ -108,12 +108,14 @@ interface WeixinBridgeRuntimeOptions {
   previewSoftTargetBytes?: number;
   previewHardLimitBytes?: number;
   previewIntervalMs?: number;
+  typingKeepaliveMs?: number;
   inboundAttachmentMergeWindowMs?: number;
   locale?: string | null;
 }
 
 export class WeixinBridgeRuntime {
   static readonly NOTICE_COOLDOWN_MS = 30_000;
+  static readonly DEFAULT_TYPING_KEEPALIVE_MS = 8_000;
 
   platformPlugin: PlatformPluginLike;
 
@@ -126,6 +128,8 @@ export class WeixinBridgeRuntime {
   previewHardLimitBytes: number;
 
   previewIntervalMs: number;
+
+  typingKeepaliveMs: number;
 
   inboundAttachmentMergeWindowMs: number;
 
@@ -150,6 +154,7 @@ export class WeixinBridgeRuntime {
     previewSoftTargetBytes = 2048,
     previewHardLimitBytes = 2048,
     previewIntervalMs = 3000,
+    typingKeepaliveMs = WeixinBridgeRuntime.DEFAULT_TYPING_KEEPALIVE_MS,
     inboundAttachmentMergeWindowMs = 3000,
     locale = null,
   }) {
@@ -159,6 +164,7 @@ export class WeixinBridgeRuntime {
     this.previewSoftTargetBytes = previewSoftTargetBytes;
     this.previewHardLimitBytes = previewHardLimitBytes;
     this.previewIntervalMs = previewIntervalMs;
+    this.typingKeepaliveMs = typingKeepaliveMs;
     this.inboundAttachmentMergeWindowMs = inboundAttachmentMergeWindowMs;
     this.i18n = createI18n(locale);
     this.poller = null;
@@ -208,6 +214,17 @@ export class WeixinBridgeRuntime {
     const command = parseSlashCommand(String(event?.text ?? ''));
     if (command) {
       await this.flushPendingInboundMerge(event.externalScopeId);
+      if (shouldScheduleSlashCommand(command)) {
+        const task = this.processInboundEventWithOptions(event, { deferPostResponseAction: true }).catch(async (error) => {
+          await this.onError(error);
+          throw error;
+        });
+        this.trackBackgroundTask(task);
+        return {
+          type: 'scheduled',
+          completion: task,
+        };
+      }
       const response = await this.processInboundEventWithOptions(event, { deferPostResponseAction: true });
       const afterCommit = this.buildAfterCommitAction(response, event);
       return afterCommit ? { afterCommit } : undefined;
@@ -399,6 +416,7 @@ export class WeixinBridgeRuntime {
       attachmentCount: Array.isArray(event?.attachments) ? event.attachments.length : 0,
     });
     const typingStart = this.safeSendTyping(event.externalScopeId, 'start');
+    const stopTypingKeepalive = this.startTypingKeepalive(event.externalScopeId);
     try {
       const response = await this.bridgeCoordinator.handleInboundEvent(event, {
         onProgress: async (progress) => {
@@ -472,7 +490,7 @@ export class WeixinBridgeRuntime {
       return response;
     } finally {
       await typingStart;
-      await this.safeSendTyping(event.externalScopeId, 'stop');
+      await stopTypingKeepalive();
     }
   }
 
@@ -800,6 +818,21 @@ export class WeixinBridgeRuntime {
     } catch {
       // Ignore WeChat typing failures; progress delivery matters more than presence.
     }
+  }
+
+  startTypingKeepalive(externalScopeId: string): () => Promise<void> {
+    if (typeof this.platformPlugin.sendTyping !== 'function' || this.typingKeepaliveMs <= 0) {
+      return async () => {
+        await this.safeSendTyping(externalScopeId, 'stop');
+      };
+    }
+    const timer = setInterval(() => {
+      void this.safeSendTyping(externalScopeId, 'start');
+    }, this.typingKeepaliveMs);
+    return async () => {
+      clearInterval(timer);
+      await this.safeSendTyping(externalScopeId, 'stop');
+    };
   }
 
   async sendTextWithRetry({
@@ -1355,6 +1388,15 @@ function createPendingInboundMerge(event: InboundTextEvent): PendingInboundMerge
     resolve,
     reject,
   };
+}
+
+function shouldScheduleSlashCommand(command: { name?: string | null; args?: string[] | null } | null | undefined): boolean {
+  const name = String(command?.name ?? '').trim().toLowerCase();
+  if (!name || !['review', 'rv'].includes(name)) {
+    return false;
+  }
+  const args = Array.isArray(command?.args) ? command.args : [];
+  return !args.some((arg) => ['-h', '--help', '-help', '-helps'].includes(String(arg ?? '').trim().toLowerCase()));
 }
 
 function shouldDelayInboundEvent(event: InboundTextEvent): boolean {

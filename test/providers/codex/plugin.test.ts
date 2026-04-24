@@ -52,6 +52,13 @@ function makePlugin(clientFactory: any) {
   return new CodexProviderPlugin({ clientFactory: clientFactory as any });
 }
 
+function makePluginWithReviewRunner(clientFactory: any, reviewRunner: any) {
+  return new CodexProviderPlugin({
+    clientFactory: clientFactory as any,
+    reviewRunner: reviewRunner as any,
+  });
+}
+
 test('CodexProviderPlugin uses per-profile clients and forwards default model into startThread/startTurn', async () => {
   const calls = [];
   let seenDeveloperInstructions = null;
@@ -179,6 +186,63 @@ test('CodexProviderPlugin normalizes legacy service tier values before calling t
   });
 
   assert.deepEqual(seenServiceTiers, ['fast', 'flex']);
+});
+
+test('CodexProviderPlugin startReview runs native review through the injected review runner without rebinding a chat thread', async () => {
+  const reviewCalls: any[] = [];
+  const plugin = makePluginWithReviewRunner(() => ({
+    async start() {},
+  }), {
+    async start(params: any) {
+      reviewCalls.push(params);
+      await params.onTurnStarted?.({
+        threadId: 'codex-review-cli-1',
+        turnId: 'codex-review-cli-1-turn-1',
+      });
+      return {
+        outputText: 'review findings',
+        outputState: 'complete',
+        threadId: 'codex-review-cli-1',
+        turnId: 'codex-review-cli-1-turn-1',
+        finalSource: 'codex_review_cli',
+      };
+    },
+    readThread() {
+      return null;
+    },
+    async interrupt() {
+      return false;
+    },
+  });
+
+  const result = await plugin.startReview({
+    providerProfile: makeProfile({ defaultModel: 'gpt-5.4' }),
+    bridgeSession: makeBridgeSession({ codexThreadId: 'thread-1' }),
+    sessionSettings: makeSessionSettings({
+      model: 'gpt-5.4',
+      reasoningEffort: 'xhigh',
+      serviceTier: 'priority',
+    }),
+    cwd: '/tmp/work',
+    target: {
+      type: 'baseBranch',
+      branch: 'main',
+    },
+    locale: 'zh-CN',
+  });
+
+  assert.equal(reviewCalls.length, 1);
+  assert.equal(reviewCalls[0]?.cwd, '/tmp/work');
+  assert.equal(reviewCalls[0]?.model, 'gpt-5.4');
+  assert.equal(reviewCalls[0]?.effort, 'xhigh');
+  assert.equal(reviewCalls[0]?.serviceTier, 'fast');
+  assert.equal(reviewCalls[0]?.locale, 'zh-CN');
+  assert.deepEqual(reviewCalls[0]?.target, {
+    type: 'baseBranch',
+    branch: 'main',
+  });
+  assert.equal(result.outputText, 'review findings');
+  assert.equal(result.threadId, 'codex-review-cli-1');
 });
 
 test('CodexProviderPlugin turns inbound attachments into text prompt plus localImage inputs', async () => {

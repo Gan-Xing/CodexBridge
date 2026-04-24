@@ -29,7 +29,7 @@ It borrows the most useful CLI help conventions while staying chat-friendly:
 - `/helps` shows the full command catalog
 - `/helps <command>` shows one command in detail
 - every slash command supports `-h`, `--help`, `-help`, and `-helps`
-- every slash command also supports a short alias such as `/h`, `/st`, `/us`, `/lg`, `/sp`, `/n`, `/up`, `/pd`, `/ms`, `/m`, `/psn`, `/ins`, `/th`, `/se`, `/nx`, `/pv`, `/o`, `/pk`, `/rn`, `/perm`, `/al`, `/dn`, `/rc`, `/rt`, and `/rs`
+- every slash command also supports a short alias such as `/h`, `/st`, `/us`, `/lg`, `/sp`, `/rv`, `/n`, `/up`, `/pd`, `/ms`, `/m`, `/psn`, `/ins`, `/th`, `/se`, `/nx`, `/pv`, `/o`, `/pk`, `/rn`, `/perm`, `/al`, `/dn`, `/rc`, `/rt`, and `/rs`
 - `/lang` and `/lang <zh|en>` to switch reply language for this scope (higher priority than env).
 - thread browsing is index-first on WeChat, so `/open 2` is preferred over copying raw thread ids
 
@@ -42,6 +42,10 @@ It borrows the most useful CLI help conventions while staying chat-friendly:
 /login
 /lg
 /login list
+/review
+/rv
+/review base main
+/review commit HEAD~1
 /stop
 /sp
 /provider
@@ -139,6 +143,25 @@ Examples:
 ```text
 /stop
 /sp
+```
+
+### `/review` and `/rv`
+
+Run a native Codex code review for the current workspace changes.
+
+- `/review` reviews uncommitted changes
+- `/review base <branch>` reviews the diff against a base branch
+- `/review commit <sha>` reviews the changes introduced by a commit
+- the bridge returns the native text review result directly to WeChat
+- it does not switch the current thread binding
+
+Examples:
+
+```text
+/review
+/rv
+/review base main
+/review commit HEAD~1
 ```
 
 ### `/new` and `/n`
