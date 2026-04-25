@@ -232,6 +232,7 @@ interface CodexAppInfo {
 
 interface CodexAppMcpServerStatus {
   name?: string | null;
+  isEnabled?: boolean | null;
   authStatus?: string | null;
   resourceTemplates?: unknown[] | null;
   resources?: unknown[] | null;
@@ -2796,6 +2797,7 @@ function mapMcpServerStatus(raw: CodexAppMcpServerStatus): ProviderMcpServerStat
   }
   return {
     name,
+    isEnabled: raw?.isEnabled !== false,
     authStatus: normalizeNullableString(raw?.authStatus) ?? 'unsupported',
     toolCount: raw?.tools && typeof raw.tools === 'object' ? Object.keys(raw.tools).length : 0,
     resourceCount: Array.isArray(raw?.resources) ? raw.resources.length : 0,

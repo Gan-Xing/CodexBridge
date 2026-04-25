@@ -214,6 +214,7 @@ export interface ProviderAppInfo {
 
 export interface ProviderMcpServerStatus {
   name: string;
+  isEnabled: boolean;
   authStatus: 'unsupported' | 'notLoggedIn' | 'bearerToken' | 'oAuth' | string;
   toolCount: number;
   resourceCount: number;

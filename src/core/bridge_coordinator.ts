@@ -56,6 +56,7 @@ import type {
 
 const THREAD_PAGE_SIZE = 5;
 const PLUGIN_CATEGORY_PAGE_SIZE = 20;
+const APP_PAGE_SIZE = 12;
 const THREAD_PREVIEW_LIMIT = 72;
 const THREAD_HISTORY_TURN_LIMIT = 3;
 const HELP_FLAG_SET = new Set(['-h', '--help', '-help', '-helps']);
@@ -141,6 +142,17 @@ type SkillBrowserState = {
   updatedAt: number;
 };
 
+type AppBrowserState = {
+  providerProfileId: string;
+  mode: 'default' | 'all' | 'search';
+  searchTerm: string | null;
+  items: ProviderAppInfo[];
+  pageNumber: number;
+  pageCount: number;
+  totalCount: number;
+  updatedAt: number;
+};
+
 type PluginCategoryBucket = {
   key: string;
   label: string;
@@ -154,6 +166,12 @@ type PluginBrowserState = {
   mode: 'featured' | 'category';
   categoryKey: string | null;
   items: ProviderPluginSummary[];
+  updatedAt: number;
+};
+
+type McpBrowserState = {
+  providerProfileId: string;
+  items: ProviderMcpServerStatus[];
   updatedAt: number;
 };
 
@@ -279,7 +297,9 @@ export class BridgeCoordinator {
   now: any;
   threadBrowserStates: Map<any, any>;
   skillBrowserStates: Map<any, SkillBrowserState>;
+  appBrowserStates: Map<any, AppBrowserState>;
   pluginBrowserStates: Map<any, PluginBrowserState>;
+  mcpBrowserStates: Map<any, McpBrowserState>;
   pendingPluginAliasDraftsByScope: Map<string, PendingPluginAliasDraft>;
   localeOverridesByScope: Map<string, SupportedLocale>;
   pendingArtifactClarificationsByScope: Map<string, { originalText: string; askedAt: number }>;
@@ -319,7 +339,9 @@ export class BridgeCoordinator {
     this.now = now;
     this.threadBrowserStates = new Map();
     this.skillBrowserStates = new Map();
+    this.appBrowserStates = new Map();
     this.pluginBrowserStates = new Map();
+    this.mcpBrowserStates = new Map();
     this.pendingPluginAliasDraftsByScope = new Map();
     this.localeOverridesByScope = new Map();
     this.pendingArtifactClarificationsByScope = new Map();
@@ -578,8 +600,12 @@ export class BridgeCoordinator {
         return this.handleReviewCommand(event, command.args, options);
       case 'skills':
         return this.handleSkillsCommand(event, command.args);
+      case 'apps':
+        return this.handleAppsCommand(event, command.args);
       case 'plugins':
         return this.handlePluginsCommand(event, command.args);
+      case 'mcp':
+        return this.handleMcpCommand(event, command.args);
       case 'use':
         return this.handleUseCommand(event, command.args, options);
       case 'automation':
@@ -2865,6 +2891,215 @@ export class BridgeCoordinator {
     ], this.buildScopedSessionMeta(event));
   }
 
+  async handleAppsCommand(event, args = []) {
+    const scopeRef = toScopeRef(event);
+    const normalizedArgs = Array.isArray(args) ? args.map((value) => String(value ?? '').trim()).filter(Boolean) : [];
+    const session = this.resolveSessionForEvent(scopeRef, event);
+    const providerProfile = session
+      ? this.requireProviderProfile(session.providerProfileId)
+      : this.resolveScopeProviderProfile(scopeRef);
+    try {
+      const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+      if (typeof providerPlugin.listApps !== 'function') {
+        return messageResponse([
+          this.t('coordinator.apps.unsupported'),
+        ], session ? buildSessionMeta(session) : this.buildScopedSessionMeta(event));
+      }
+
+      const subcommand = String(normalizedArgs[0] ?? '').trim().toLowerCase();
+      if (!subcommand || subcommand === 'default') {
+        return await this.handleAppsListCommand(event, providerProfile, {
+          mode: 'default',
+        });
+      }
+      if (subcommand === 'list') {
+        return await this.handleAppsListCommand(event, providerProfile, {
+          pageToken: normalizedArgs[1],
+        });
+      }
+      if (parsePositiveIntegerToken(subcommand) !== null) {
+        return await this.handleAppsListCommand(event, providerProfile, {
+          pageToken: subcommand,
+        });
+      }
+      if (subcommand === 'all') {
+        return await this.handleAppsListCommand(event, providerProfile, {
+          mode: 'all',
+          pageToken: normalizedArgs[1],
+        });
+      }
+      if (subcommand === 'search') {
+        return await this.handleAppsSearchCommand(event, providerProfile, normalizedArgs.slice(1).join(' '));
+      }
+      if (subcommand === 'show') {
+        return await this.handleAppsShowCommand(event, providerProfile, normalizedArgs.slice(1).join(' '));
+      }
+      if (subcommand === 'on' || subcommand === 'enable') {
+        return await this.handleAppsToggleCommand(event, providerProfile, normalizedArgs.slice(1).join(' '), true);
+      }
+      if (subcommand === 'off' || subcommand === 'disable') {
+        return await this.handleAppsToggleCommand(event, providerProfile, normalizedArgs.slice(1).join(' '), false);
+      }
+      if (subcommand === 'auth') {
+        return await this.handleAppsAuthCommand(event, providerProfile, normalizedArgs.slice(1).join(' '));
+      }
+      return await this.handleHelpsCommand(event, ['apps']);
+    } catch (error) {
+      return messageResponse([
+        this.t('coordinator.apps.failed', { error: formatUserError(error) }),
+      ], session ? buildSessionMeta(session) : this.buildScopedSessionMeta(event));
+    }
+  }
+
+  async handleAppsListCommand(event, providerProfile, {
+    mode = null,
+    pageToken = '',
+    searchTerm = null,
+  }: {
+    mode?: 'default' | 'all' | 'search' | null;
+    pageToken?: string | null;
+    searchTerm?: string | null;
+  } = {}) {
+    const allItems = await this.fetchAppsForEvent(event, providerProfile);
+    const currentState = this.getAppBrowserState(event, providerProfile);
+    const requestedPage = parsePositiveIntegerToken(pageToken) ?? 1;
+    const resolvedMode = mode ?? currentState?.mode ?? 'default';
+    const resolvedSearchTerm = resolvedMode === 'search'
+      ? normalizeNullableString(searchTerm ?? currentState?.searchTerm ?? null)
+      : null;
+    const installedPluginLookups = resolvedMode === 'default'
+      ? await this.listInstalledPluginLookupsForApps(event, providerProfile)
+      : null;
+    const page = this.storeAppBrowserPage(event, providerProfile, allItems, {
+      mode: resolvedMode,
+      searchTerm: resolvedSearchTerm,
+      requestedPage,
+      installedPluginLookups,
+    });
+    return messageResponse(
+      renderAppsListLines({
+        i18n: this.currentI18n,
+        items: page.items,
+        totalCount: page.totalCount,
+        pageNumber: page.pageNumber,
+        pageCount: page.pageCount,
+        mode: page.mode,
+        searchTerm: page.searchTerm,
+      }),
+      this.buildScopedSessionMeta(event),
+    );
+  }
+
+  async handleAppsSearchCommand(event, providerProfile, searchTerm) {
+    const query = String(searchTerm ?? '').trim();
+    if (!query) {
+      return this.handleHelpsCommand(event, ['apps']);
+    }
+    return this.handleAppsListCommand(event, providerProfile, {
+      mode: 'search',
+      searchTerm: query,
+    });
+  }
+
+  async handleAppsShowCommand(event, providerProfile, token) {
+    const resolved = await this.resolveAppSelection(event, providerProfile, token);
+    if (!resolved) {
+      return messageResponse([
+        this.t('coordinator.apps.notFound', { value: String(token ?? '').trim() || '?' }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    return messageResponse(
+      renderAppDetailLines({
+        i18n: this.currentI18n,
+        index: resolved.index,
+        app: resolved.app,
+      }),
+      this.buildScopedSessionMeta(event),
+    );
+  }
+
+  async handleAppsToggleCommand(event, providerProfile, token, enabled) {
+    const resolved = await this.resolveAppSelection(event, providerProfile, token);
+    if (!resolved) {
+      return messageResponse([
+        this.t('coordinator.apps.notFound', { value: String(token ?? '').trim() || '?' }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+    if (typeof providerPlugin.setAppEnabled !== 'function') {
+      return messageResponse([
+        this.t('coordinator.apps.unsupported'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    await providerPlugin.setAppEnabled({
+      providerProfile,
+      appId: resolved.app.id,
+      enabled,
+    });
+    const items = await this.fetchAppsForEvent(event, providerProfile);
+    const currentState = this.getAppBrowserState(event, providerProfile);
+    const mode = currentState?.mode ?? 'default';
+    const searchTerm = currentState?.searchTerm ?? null;
+    const installedPluginLookups = mode === 'default'
+      ? await this.listInstalledPluginLookupsForApps(event, providerProfile)
+      : null;
+    const visibleItems = filterAppsForBrowserView(items, {
+      mode,
+      searchTerm,
+      installedPluginLookups,
+    });
+    const updatedIndex = visibleItems.findIndex((entry) => entry.id === resolved.app.id);
+    const pageNumber = updatedIndex >= 0
+      ? pageNumberForItemIndex(updatedIndex, APP_PAGE_SIZE)
+      : currentState?.pageNumber ?? 1;
+    const page = this.storeAppBrowserPage(event, providerProfile, items, {
+      mode,
+      searchTerm,
+      requestedPage: pageNumber,
+      installedPluginLookups,
+    });
+    return messageResponse([
+      enabled
+        ? this.t('coordinator.apps.enableSuccess', { name: resolved.app.name })
+        : this.t('coordinator.apps.disableSuccess', { name: resolved.app.name }),
+      ...renderAppsListLines({
+        i18n: this.currentI18n,
+        items: page.items,
+        totalCount: page.totalCount,
+        pageNumber: page.pageNumber,
+        pageCount: page.pageCount,
+        mode: page.mode,
+        searchTerm: page.searchTerm,
+      }),
+    ], this.buildScopedSessionMeta(event));
+  }
+
+  async handleAppsAuthCommand(event, providerProfile, token) {
+    const resolved = await this.resolveAppSelection(event, providerProfile, token);
+    if (!resolved) {
+      return messageResponse([
+        this.t('coordinator.apps.notFound', { value: String(token ?? '').trim() || '?' }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    if (resolved.app.isAccessible && !resolved.app.installUrl) {
+      return messageResponse([
+        this.t('coordinator.apps.authNonePending', { name: resolved.app.name }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const installUrl = normalizeNullableString(resolved.app.installUrl ?? null);
+    if (!installUrl) {
+      return messageResponse([
+        this.t('coordinator.apps.authNoUrl', { name: resolved.app.name }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    return messageResponse([
+      this.t('coordinator.apps.authUrl', {
+        name: resolved.app.name,
+        url: installUrl,
+      }),
+    ], this.buildScopedSessionMeta(event));
+  }
+
   async handleUseCommand(event, args = [], options = {}) {
     const scopeRef = toScopeRef(event);
     const normalizedArgs = Array.isArray(args) ? args.map((value) => String(value ?? '').trim()).filter(Boolean) : [];
@@ -2945,15 +3180,6 @@ export class BridgeCoordinator {
       }
       if (subcommand === 'del' || subcommand === 'uninstall' || subcommand === 'remove' || subcommand === 'rm') {
         return await this.handlePluginsUninstallCommand(event, providerProfile, normalizedArgs.slice(1).join(' '));
-      }
-      if (subcommand === 'on') {
-        return await this.handlePluginsSetEnabledCommand(event, providerProfile, normalizedArgs.slice(1).join(' '), true);
-      }
-      if (subcommand === 'off') {
-        return await this.handlePluginsSetEnabledCommand(event, providerProfile, normalizedArgs.slice(1).join(' '), false);
-      }
-      if (subcommand === 'auth') {
-        return await this.handlePluginsAuthCommand(event, providerProfile, normalizedArgs.slice(1).join(' '));
       }
       return await this.handleHelpsCommand(event, ['plugins']);
     } catch (error) {
@@ -3139,15 +3365,6 @@ export class BridgeCoordinator {
   }
 
   async handlePluginsReloadCommand(event, providerProfile) {
-    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
-    let reloadError = null;
-    if (typeof providerPlugin.reloadMcpServers === 'function') {
-      try {
-        await providerPlugin.reloadMcpServers({ providerProfile });
-      } catch (error) {
-        reloadError = formatUserError(error);
-      }
-    }
     const result = await this.fetchPluginsForEvent(event, providerProfile);
     const featured = selectFeaturedPlugins(result.catalog);
     const aliases = this.resolveDisplayPluginAliases(event, providerProfile, result.allPlugins);
@@ -3160,9 +3377,7 @@ export class BridgeCoordinator {
       updatedAt: this.now(),
     });
     const lines = [
-      reloadError
-        ? this.t('coordinator.plugins.reloadPartial', { error: reloadError })
-        : this.t('coordinator.plugins.reloadSuccess'),
+      this.t('coordinator.plugins.reloadSuccess'),
       ...renderPluginFeaturedLines({
         i18n: this.currentI18n,
         cwd: result.cwd,
@@ -3249,14 +3464,6 @@ export class BridgeCoordinator {
         this.t('coordinator.plugins.notFound', { value: String(token ?? '').trim() || '?' }),
       ], this.buildScopedSessionMeta(event));
     }
-    const [apps, mcpServers] = await Promise.all([
-      typeof providerPlugin.listApps === 'function'
-        ? providerPlugin.listApps({ providerProfile }).catch(() => [])
-        : Promise.resolve([]),
-      typeof providerPlugin.listMcpServerStatuses === 'function'
-        ? providerPlugin.listMcpServerStatuses({ providerProfile }).catch(() => [])
-        : Promise.resolve([]),
-    ]);
     const aliases = this.resolveDisplayPluginAliases(
       event,
       providerProfile,
@@ -3269,8 +3476,8 @@ export class BridgeCoordinator {
         cwd: resolved.cwd,
         detail,
         aliases,
-        apps,
-        mcpServers,
+        apps: [],
+        mcpServers: [],
       }),
       this.buildScopedSessionMeta(event),
     );
@@ -3400,188 +3607,146 @@ export class BridgeCoordinator {
     ], this.buildScopedSessionMeta(event));
   }
 
-  async handlePluginsSetEnabledCommand(event, providerProfile, token, enabled) {
-    const resolved = await this.resolvePluginSelection(event, providerProfile, token);
-    if (!resolved) {
+  async handleMcpCommand(event, args = []) {
+    const scopeRef = toScopeRef(event);
+    const normalizedArgs = Array.isArray(args) ? args.map((value) => String(value ?? '').trim()).filter(Boolean) : [];
+    const session = this.resolveSessionForEvent(scopeRef, event);
+    const providerProfile = session
+      ? this.requireProviderProfile(session.providerProfileId)
+      : this.resolveScopeProviderProfile(scopeRef);
+    try {
+      const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+      if (typeof providerPlugin.listMcpServerStatuses !== 'function') {
+        return messageResponse([
+          this.t('coordinator.mcp.unsupported'),
+        ], session ? buildSessionMeta(session) : this.buildScopedSessionMeta(event));
+      }
+
+      const subcommand = String(normalizedArgs[0] ?? '').trim().toLowerCase();
+      if (!subcommand || subcommand === 'default' || subcommand === 'list') {
+        return await this.handleMcpListCommand(event, providerProfile);
+      }
+      if (subcommand === 'on') {
+        return await this.handleMcpSetEnabledCommand(event, providerProfile, normalizedArgs.slice(1).join(' '), true);
+      }
+      if (subcommand === 'off') {
+        return await this.handleMcpSetEnabledCommand(event, providerProfile, normalizedArgs.slice(1).join(' '), false);
+      }
+      if (subcommand === 'auth') {
+        return await this.handleMcpAuthCommand(event, providerProfile, normalizedArgs.slice(1).join(' '));
+      }
+      if (subcommand === 'reload') {
+        return await this.handleMcpReloadCommand(event, providerProfile);
+      }
+      return await this.handleHelpsCommand(event, ['mcp']);
+    } catch (error) {
       return messageResponse([
-        this.t('coordinator.plugins.notFound', { value: String(token ?? '').trim() || '?' }),
-      ], this.buildScopedSessionMeta(event));
+        this.t('coordinator.mcp.failed', { error: formatUserError(error) }),
+      ], session ? buildSessionMeta(session) : this.buildScopedSessionMeta(event));
     }
-    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
-    const targetPlugin = resolved.plugin;
-    if (!targetPlugin.installed) {
-      return messageResponse([
-        this.t('coordinator.plugins.toggleNeedsInstall', { name: getPluginDisplayName(targetPlugin) }),
-      ], this.buildScopedSessionMeta(event));
-    }
-
-    const initialDetailContext = await this.loadPluginDetailContext(providerProfile, targetPlugin);
-    const detail = initialDetailContext.detail;
-    const actionSummary = {
-      apps: 0,
-      skills: 0,
-      mcpServers: 0,
-      errors: [] as string[],
-    };
-
-    for (const app of detail.apps) {
-      if (typeof providerPlugin.setAppEnabled !== 'function') {
-        actionSummary.errors.push(this.t('coordinator.plugins.toggleUnsupportedApps'));
-        break;
-      }
-      try {
-        await providerPlugin.setAppEnabled({
-          providerProfile,
-          appId: app.id,
-          enabled,
-        });
-        actionSummary.apps += 1;
-      } catch (error) {
-        actionSummary.errors.push(formatUserError(error));
-      }
-    }
-    for (const skill of detail.skills) {
-      if (typeof providerPlugin.setSkillEnabled !== 'function') {
-        actionSummary.errors.push(this.t('coordinator.plugins.toggleUnsupportedSkills'));
-        break;
-      }
-      try {
-        await providerPlugin.setSkillEnabled({
-          providerProfile,
-          enabled,
-          name: skill.name,
-          path: skill.path,
-        });
-        actionSummary.skills += 1;
-      } catch (error) {
-        actionSummary.errors.push(formatUserError(error));
-      }
-    }
-    for (const name of detail.mcpServers) {
-      if (typeof providerPlugin.setMcpServerEnabled !== 'function') {
-        actionSummary.errors.push(this.t('coordinator.plugins.toggleUnsupportedMcp'));
-        break;
-      }
-      try {
-        await providerPlugin.setMcpServerEnabled({
-          providerProfile,
-          name,
-          enabled,
-        });
-        actionSummary.mcpServers += 1;
-      } catch (error) {
-        actionSummary.errors.push(formatUserError(error));
-      }
-    }
-
-    if (actionSummary.apps + actionSummary.skills + actionSummary.mcpServers === 0) {
-      return messageResponse([
-        this.t('coordinator.plugins.toggleUnsupported', { name: getPluginDisplayName(targetPlugin) }),
-      ], this.buildScopedSessionMeta(event));
-    }
-
-    const detailContext = await this.refreshPluginAfterMutation(event, providerProfile, targetPlugin);
-    const aliases = this.resolveDisplayPluginAliases(
-      event,
-      providerProfile,
-      (await this.fetchPluginsForEvent(event, providerProfile)).allPlugins,
-    );
-    const lines = [
-      enabled
-        ? this.t('coordinator.plugins.enableSuccess', { name: getPluginDisplayName(detailContext.detail.summary) })
-        : this.t('coordinator.plugins.disableSuccess', { name: getPluginDisplayName(detailContext.detail.summary) }),
-      ...renderPluginToggleSummaryLines(actionSummary, this.currentI18n),
-      ...renderPluginDetailLines({
-        i18n: this.currentI18n,
-        index: resolved.index,
-        cwd: detailContext.cwd,
-        detail: detailContext.detail,
-        aliases,
-        apps: detailContext.apps,
-        mcpServers: detailContext.mcpServers,
-      }),
-    ];
-    return messageResponse(lines, this.buildScopedSessionMeta(event));
   }
 
-  async handlePluginsAuthCommand(event, providerProfile, token) {
-    const resolved = await this.resolvePluginSelection(event, providerProfile, token);
+  async handleMcpListCommand(event, providerProfile) {
+    const items = await this.fetchMcpServersForEvent(event, providerProfile);
+    return messageResponse(
+      renderMcpServerListLines({
+        i18n: this.currentI18n,
+        items,
+      }),
+      this.buildScopedSessionMeta(event),
+    );
+  }
+
+  async handleMcpSetEnabledCommand(event, providerProfile, token, enabled) {
+    const resolved = await this.resolveMcpSelection(event, providerProfile, token);
     if (!resolved) {
       return messageResponse([
-        this.t('coordinator.plugins.notFound', { value: String(token ?? '').trim() || '?' }),
+        this.t('coordinator.mcp.notFound', { value: String(token ?? '').trim() || '?' }),
       ], this.buildScopedSessionMeta(event));
     }
     const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
-    const targetPlugin = resolved.plugin;
-    if (!targetPlugin.installed) {
+    if (typeof providerPlugin.setMcpServerEnabled !== 'function') {
       return messageResponse([
-        this.t('coordinator.plugins.toggleNeedsInstall', { name: getPluginDisplayName(targetPlugin) }),
+        this.t('coordinator.mcp.unsupported'),
       ], this.buildScopedSessionMeta(event));
     }
+    await providerPlugin.setMcpServerEnabled({
+      providerProfile,
+      name: resolved.server.name,
+      enabled,
+    });
+    const items = await this.fetchMcpServersForEvent(event, providerProfile);
+    return messageResponse([
+      enabled
+        ? this.t('coordinator.mcp.enableSuccess', { name: resolved.server.name })
+        : this.t('coordinator.mcp.disableSuccess', { name: resolved.server.name }),
+      ...renderMcpServerListLines({
+        i18n: this.currentI18n,
+        items,
+      }),
+    ], this.buildScopedSessionMeta(event));
+  }
 
-    const detailContext = await this.loadPluginDetailContext(providerProfile, targetPlugin);
-    const appStatusById = new Map<string, ProviderAppInfo>(detailContext.apps.map((entry) => [entry.id, entry] as const));
-    const mcpStatusByName = new Map<string, ProviderMcpServerStatus>(detailContext.mcpServers.map((entry) => [entry.name, entry] as const));
-    const lines = [
-      this.t('coordinator.plugins.authTitle', { name: getPluginDisplayName(detailContext.detail.summary) }),
-    ];
-
-    let actionCount = 0;
-    for (const app of detailContext.detail.apps) {
-      const appInfo = appStatusById.get(app.id) ?? null;
-      const needsAuth = Boolean(app.needsAuth) || appInfo?.isAccessible === false;
-      if (!needsAuth) {
-        continue;
-      }
-      actionCount += 1;
-      const installUrl = normalizeNullableString(appInfo?.installUrl ?? app.installUrl ?? null);
-      if (installUrl) {
-        lines.push(this.t('coordinator.plugins.authAppUrl', {
-          name: app.name,
-          url: installUrl,
-        }));
-      } else {
-        lines.push(this.t('coordinator.plugins.authAppNoUrl', {
-          name: app.name,
-        }));
-      }
+  async handleMcpAuthCommand(event, providerProfile, token) {
+    const resolved = await this.resolveMcpSelection(event, providerProfile, token);
+    if (!resolved) {
+      return messageResponse([
+        this.t('coordinator.mcp.notFound', { value: String(token ?? '').trim() || '?' }),
+      ], this.buildScopedSessionMeta(event));
     }
-
-    for (const name of detailContext.detail.mcpServers) {
-      const status = mcpStatusByName.get(name) ?? null;
-      if ((status?.authStatus ?? 'notLoggedIn') !== 'notLoggedIn') {
-        continue;
-      }
-      actionCount += 1;
-      if (typeof providerPlugin.startMcpServerOauthLogin !== 'function') {
-        lines.push(this.t('coordinator.plugins.authMcpUnsupported', { name }));
-        continue;
-      }
-      try {
-        const result = await providerPlugin.startMcpServerOauthLogin({
-          providerProfile,
-          name,
-        });
-        lines.push(this.t('coordinator.plugins.authMcpUrl', {
-          name,
+    if ((resolved.server.authStatus ?? 'notLoggedIn') !== 'notLoggedIn') {
+      return messageResponse([
+        this.t('coordinator.mcp.authNonePending', { name: resolved.server.name }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+    if (typeof providerPlugin.startMcpServerOauthLogin !== 'function') {
+      return messageResponse([
+        this.t('coordinator.mcp.authUnsupported', { name: resolved.server.name }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    try {
+      const result = await providerPlugin.startMcpServerOauthLogin({
+        providerProfile,
+        name: resolved.server.name,
+      });
+      return messageResponse([
+        this.t('coordinator.mcp.authUrl', {
+          name: resolved.server.name,
           url: result.authorizationUrl,
-        }));
-      } catch (error) {
-        lines.push(this.t('coordinator.plugins.authMcpFailed', {
-          name,
+        }),
+        this.t('coordinator.mcp.authFollowupHint'),
+      ], this.buildScopedSessionMeta(event));
+    } catch (error) {
+      return messageResponse([
+        this.t('coordinator.mcp.authFailed', {
+          name: resolved.server.name,
           error: formatUserError(error),
-        }));
+        }),
+      ], this.buildScopedSessionMeta(event));
+    }
+  }
+
+  async handleMcpReloadCommand(event, providerProfile) {
+    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+    let reloadError = null;
+    if (typeof providerPlugin.reloadMcpServers === 'function') {
+      try {
+        await providerPlugin.reloadMcpServers({ providerProfile });
+      } catch (error) {
+        reloadError = formatUserError(error);
       }
     }
-
-    if (actionCount === 0) {
-      lines.push(this.t('coordinator.plugins.authNonePending', {
-        name: getPluginDisplayName(detailContext.detail.summary),
-      }));
-    } else {
-      lines.push(this.t('coordinator.plugins.authFollowupHint'));
-    }
-    return messageResponse(lines, this.buildScopedSessionMeta(event));
+    const items = await this.fetchMcpServersForEvent(event, providerProfile);
+    return messageResponse([
+      reloadError
+        ? this.t('coordinator.mcp.reloadPartial', { error: reloadError })
+        : this.t('coordinator.mcp.reloadSuccess'),
+      ...renderMcpServerListLines({
+        i18n: this.currentI18n,
+        items,
+      }),
+    ], this.buildScopedSessionMeta(event));
   }
 
   async renderThreadsPage(event, {
@@ -3700,6 +3865,79 @@ export class BridgeCoordinator {
     };
   }
 
+  async fetchAppsForEvent(event, providerProfile) {
+    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+    return (await providerPlugin.listApps({ providerProfile }))
+      .slice()
+      .sort(compareAppsForDisplay);
+  }
+
+  async listInstalledPluginLookupsForApps(event, providerProfile): Promise<Set<string> | null> {
+    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+    if (typeof providerPlugin.listPlugins !== 'function') {
+      return null;
+    }
+    try {
+      const result = await this.fetchPluginsForEvent(event, providerProfile);
+      return buildInstalledPluginLookupSet(result.allPlugins);
+    } catch {
+      return null;
+    }
+  }
+
+  getAppBrowserState(event, providerProfile) {
+    const scopeKey = formatPlatformScopeKey(event.platform, event.externalScopeId);
+    const state = this.appBrowserStates.get(scopeKey) ?? null;
+    if (state && state.providerProfileId !== providerProfile.id) {
+      this.appBrowserStates.delete(scopeKey);
+      return null;
+    }
+    return state;
+  }
+
+  storeAppBrowserPage(event, providerProfile, allItems, {
+    mode = 'default',
+    searchTerm = null,
+    requestedPage = 1,
+    installedPluginLookups = null,
+  }: {
+    mode?: 'default' | 'all' | 'search';
+    searchTerm?: string | null;
+    requestedPage?: number;
+    installedPluginLookups?: Set<string> | null;
+  } = {}) {
+    const scopeKey = formatPlatformScopeKey(event.platform, event.externalScopeId);
+    const filteredItems = filterAppsForBrowserView(allItems, {
+      mode,
+      searchTerm,
+      installedPluginLookups,
+    });
+    const pageCount = Math.max(1, Math.ceil(filteredItems.length / APP_PAGE_SIZE));
+    const pageNumber = Number.isInteger(requestedPage) && requestedPage >= 1
+      ? Math.min(requestedPage, pageCount)
+      : 1;
+    const offset = (pageNumber - 1) * APP_PAGE_SIZE;
+    const items = filteredItems.slice(offset, offset + APP_PAGE_SIZE);
+    this.appBrowserStates.set(scopeKey, {
+      providerProfileId: providerProfile.id,
+      mode,
+      searchTerm: normalizeNullableString(searchTerm),
+      items,
+      pageNumber,
+      pageCount,
+      totalCount: filteredItems.length,
+      updatedAt: this.now(),
+    });
+    return {
+      items,
+      mode,
+      searchTerm: normalizeNullableString(searchTerm),
+      pageNumber,
+      pageCount,
+      totalCount: filteredItems.length,
+    };
+  }
+
   async resolveSkillSelection(event, providerProfile, token) {
     const rawToken = String(token ?? '').trim();
     const scopeKey = formatPlatformScopeKey(event.platform, event.externalScopeId);
@@ -3767,6 +4005,58 @@ export class BridgeCoordinator {
     };
   }
 
+  async resolveAppSelection(event, providerProfile, token) {
+    const rawToken = String(token ?? '').trim();
+    let state = this.getAppBrowserState(event, providerProfile);
+    if (!state) {
+      const items = await this.fetchAppsForEvent(event, providerProfile);
+      this.storeAppBrowserPage(event, providerProfile, items, {
+        mode: 'default',
+        requestedPage: 1,
+      });
+      state = this.getAppBrowserState(event, providerProfile);
+      if (!state) {
+        return null;
+      }
+    }
+    const numeric = parsePositiveIntegerToken(rawToken);
+    if (numeric !== null && numeric <= state.items.length) {
+      return {
+        index: numeric,
+        app: state.items[numeric - 1],
+      };
+    }
+    if (numeric !== null) {
+      return null;
+    }
+    const normalized = normalizeAppLookupToken(rawToken);
+    if (!normalized) {
+      if (state.items.length === 1) {
+        return {
+          index: 1,
+          app: state.items[0],
+        };
+      }
+      return null;
+    }
+    const pageMatch = findAppLookupMatch(state.items, normalized);
+    if (pageMatch) {
+      return {
+        index: state.items.indexOf(pageMatch) + 1,
+        app: pageMatch,
+      };
+    }
+    const allItems = await this.fetchAppsForEvent(event, providerProfile);
+    const allMatch = findAppLookupMatch(allItems, normalized);
+    if (!allMatch) {
+      return null;
+    }
+    return {
+      index: null,
+      app: allMatch,
+    };
+  }
+
   listPluginAliases(event, providerProfile): PluginAlias[] {
     if (!this.pluginAliases) {
       return [];
@@ -3796,6 +4086,19 @@ export class BridgeCoordinator {
       catalog,
       allPlugins: flattenPluginMarketplaces(catalog.marketplaces),
     };
+  }
+
+  async fetchMcpServersForEvent(event, providerProfile) {
+    const scopeKey = formatPlatformScopeKey(event.platform, event.externalScopeId);
+    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+    const statuses = await providerPlugin.listMcpServerStatuses({ providerProfile });
+    const items = [...statuses].sort(compareMcpServersForDisplay);
+    this.mcpBrowserStates.set(scopeKey, {
+      providerProfileId: providerProfile.id,
+      items,
+      updatedAt: this.now(),
+    });
+    return items;
   }
 
   async readPluginDetailsForSummaries(providerProfile, items: ProviderPluginSummary[]) {
@@ -3905,6 +4208,57 @@ export class BridgeCoordinator {
       index: state.items.findIndex((entry) => entry.id === byPartial.id) + 1 || 0,
       cwd: state.cwd,
       plugin: byPartial,
+    };
+  }
+
+  async resolveMcpSelection(event, providerProfile, token) {
+    const rawToken = String(token ?? '').trim();
+    const scopeKey = formatPlatformScopeKey(event.platform, event.externalScopeId);
+    let state = this.mcpBrowserStates.get(scopeKey) ?? null;
+    if (state && state.providerProfileId !== providerProfile.id) {
+      this.mcpBrowserStates.delete(scopeKey);
+      state = null;
+    }
+    if (!state) {
+      const items = await this.fetchMcpServersForEvent(event, providerProfile);
+      state = {
+        providerProfileId: providerProfile.id,
+        items,
+        updatedAt: this.now(),
+      };
+      this.mcpBrowserStates.set(scopeKey, state);
+    }
+    const numeric = Number.parseInt(rawToken, 10);
+    if (rawToken && Number.isInteger(numeric) && numeric >= 1 && numeric <= state.items.length) {
+      return {
+        index: numeric,
+        server: state.items[numeric - 1],
+      };
+    }
+    const normalized = normalizeMcpLookupToken(rawToken);
+    if (!normalized) {
+      if (state.items.length === 1) {
+        return {
+          index: 1,
+          server: state.items[0],
+        };
+      }
+      return null;
+    }
+    const byExact = state.items.find((entry) => normalizeMcpLookupToken(entry.name) === normalized) ?? null;
+    if (byExact) {
+      return {
+        index: state.items.indexOf(byExact) + 1,
+        server: byExact,
+      };
+    }
+    const byPartial = state.items.find((entry) => normalizeMcpLookupToken(entry.name).includes(normalized)) ?? null;
+    if (!byPartial) {
+      return null;
+    }
+    return {
+      index: state.items.indexOf(byPartial) + 1,
+      server: byPartial,
     };
   }
 
@@ -6841,9 +7195,6 @@ function getCommandHelpSpecs(i18n: Translator) {
       '/pg alias confirm',
       '/pg add <序号|名称>',
       '/pg del <序号|名称>',
-      '/pg on <序号|名称>',
-      '/pg off <序号|名称>',
-      '/pg auth <序号|名称>',
       '/pg -h',
     ],
     examples: [
@@ -6856,11 +7207,61 @@ function getCommandHelpSpecs(i18n: Translator) {
       '/pg alias 1 gd',
       '/pg alias confirm',
       '/pg add 2',
-      '/pg on 1',
-      '/pg auth 1',
     ],
     notes: [
       i18n.t('coordinator.help.note.plugins'),
+    ],
+  }),
+  apps: freezeCommandHelp({
+    name: 'apps',
+    aliases: ['ap'],
+    summary: i18n.t('coordinator.help.summary.apps'),
+    usage: [
+      '/apps',
+      '/apps all [页码]',
+      '/apps search <关键词>',
+      '/apps list [页码]',
+      '/apps show <序号|名称>',
+      '/apps on <序号|名称>',
+      '/apps off <序号|名称>',
+      '/apps auth <序号|名称>',
+      '/apps -h',
+    ],
+    examples: [
+      '/apps',
+      '/apps all',
+      '/apps search 邮件',
+      '/apps list 2',
+      '/apps show 1',
+      '/apps on 1',
+      '/apps off github',
+      '/apps auth google-drive',
+    ],
+    notes: [
+      i18n.t('coordinator.help.note.apps'),
+    ],
+  }),
+  mcp: freezeCommandHelp({
+    name: 'mcp',
+    aliases: [],
+    summary: i18n.t('coordinator.help.summary.mcp'),
+    usage: [
+      '/mcp',
+      '/mcp on <序号|名称>',
+      '/mcp off <序号|名称>',
+      '/mcp auth <序号|名称>',
+      '/mcp reload',
+      '/mcp -h',
+    ],
+    examples: [
+      '/mcp',
+      '/mcp on 1',
+      '/mcp off google_workspace',
+      '/mcp auth google_workspace',
+      '/mcp reload',
+    ],
+    notes: [
+      i18n.t('coordinator.help.note.mcp'),
     ],
   }),
   use: freezeCommandHelp({
@@ -7342,6 +7743,8 @@ const COMMAND_HELP_ORDER = Object.freeze([
   'review',
   'skills',
   'plugins',
+  'apps',
+  'mcp',
   'use',
   'automation',
   'weibo',
@@ -7382,6 +7785,8 @@ const COMMAND_ALIAS_DEFINITIONS = Object.freeze({
   review: ['rv'],
   skills: ['sk'],
   plugins: ['pg'],
+  apps: ['ap'],
+  mcp: [],
   use: [],
   automation: ['auto'],
   weibo: ['wb'],
@@ -7934,6 +8339,190 @@ function comparePluginsForDisplay(left: ProviderPluginSummary, right: ProviderPl
   return getPluginDisplayName(left).localeCompare(getPluginDisplayName(right));
 }
 
+function compareAppsForDisplay(left: ProviderAppInfo, right: ProviderAppInfo): number {
+  if (left.isEnabled !== right.isEnabled) {
+    return left.isEnabled ? -1 : 1;
+  }
+  if (left.isAccessible !== right.isAccessible) {
+    return left.isAccessible ? -1 : 1;
+  }
+  return left.name.localeCompare(right.name);
+}
+
+function scoreAppMatch(app: ProviderAppInfo, searchTerm: string): number {
+  const normalizedQuery = normalizeAppLookupToken(searchTerm);
+  if (!normalizedQuery) {
+    return 0;
+  }
+  const tokens = normalizedQuery.split(' ').filter(Boolean);
+  const primaryFields = [
+    normalizeAppLookupToken(app.name),
+    normalizeAppLookupToken(app.id),
+    ...app.pluginDisplayNames.map((entry) => normalizeAppLookupToken(entry)),
+  ].filter(Boolean);
+  const secondaryFields = [
+    normalizeAppLookupToken(app.description ?? ''),
+    normalizeAppLookupToken(app.developer ?? ''),
+    ...(Array.isArray(app.categories) ? app.categories.map((entry) => normalizeAppLookupToken(entry)) : []),
+  ].filter(Boolean);
+  let score = 0;
+  for (const field of primaryFields) {
+    if (field === normalizedQuery) {
+      score += 120;
+    } else if (field.startsWith(normalizedQuery)) {
+      score += 80;
+    } else if (field.includes(normalizedQuery)) {
+      score += 48;
+    }
+  }
+  for (const field of secondaryFields) {
+    if (field === normalizedQuery) {
+      score += 72;
+    } else if (field.startsWith(normalizedQuery)) {
+      score += 40;
+    } else if (field.includes(normalizedQuery)) {
+      score += 24;
+    }
+  }
+  for (const token of tokens) {
+    if (!token) {
+      continue;
+    }
+    for (const field of [...primaryFields, ...secondaryFields]) {
+      if (field.includes(token)) {
+        score += token.length >= 3 ? 12 : 6;
+      }
+    }
+  }
+  return score;
+}
+
+function filterAppsBySearchTerm(apps: ProviderAppInfo[], searchTerm: string | null): ProviderAppInfo[] {
+  const normalizedQuery = normalizeNullableString(searchTerm);
+  if (!normalizedQuery) {
+    return [...apps].sort(compareAppsForDisplay);
+  }
+  return apps
+    .map((app) => ({
+      app,
+      score: scoreAppMatch(app, normalizedQuery),
+    }))
+    .filter((entry) => entry.score > 0)
+    .sort((left, right) => {
+      if (right.score !== left.score) {
+        return right.score - left.score;
+      }
+      return compareAppsForDisplay(left.app, right.app);
+    })
+    .map((entry) => entry.app);
+}
+
+function buildInstalledPluginLookupSet(plugins: ProviderPluginSummary[]): Set<string> {
+  const lookups = new Set<string>();
+  for (const plugin of plugins) {
+    if (!plugin.installed) {
+      continue;
+    }
+    const candidates = [
+      plugin.name,
+      plugin.displayName ?? '',
+      plugin.id.split('@')[0] ?? '',
+    ];
+    for (const candidate of candidates) {
+      const normalized = normalizeAppLookupToken(candidate);
+      if (normalized) {
+        lookups.add(normalized);
+      }
+    }
+  }
+  return lookups;
+}
+
+function isAppRelatedToInstalledPlugin(app: ProviderAppInfo, installedPluginLookups: Set<string> | null): boolean {
+  if (!installedPluginLookups || installedPluginLookups.size === 0) {
+    return false;
+  }
+  const candidates = [
+    app.id,
+    app.name,
+    ...(Array.isArray(app.pluginDisplayNames) ? app.pluginDisplayNames : []),
+  ];
+  return candidates.some((candidate) => {
+    const normalized = normalizeAppLookupToken(candidate);
+    return normalized ? installedPluginLookups.has(normalized) : false;
+  });
+}
+
+function filterAppsForBrowserView(
+  apps: ProviderAppInfo[],
+  {
+    mode,
+    searchTerm = null,
+    installedPluginLookups = null,
+  }: {
+    mode: 'default' | 'all' | 'search';
+    searchTerm?: string | null;
+    installedPluginLookups?: Set<string> | null;
+  },
+): ProviderAppInfo[] {
+  if (mode === 'all') {
+    return [...apps].sort(compareAppsForDisplay);
+  }
+  if (mode === 'search') {
+    return filterAppsBySearchTerm(apps, searchTerm);
+  }
+  return apps
+    .filter((app) => app.isAccessible || app.isEnabled || isAppRelatedToInstalledPlugin(app, installedPluginLookups))
+    .sort(compareAppsForDisplay);
+}
+
+function parsePositiveIntegerToken(value: unknown): number | null {
+  const normalized = String(value ?? '').trim();
+  if (!/^\d+$/u.test(normalized)) {
+    return null;
+  }
+  const parsed = Number.parseInt(normalized, 10);
+  return Number.isInteger(parsed) && parsed >= 1 ? parsed : null;
+}
+
+function pageNumberForItemIndex(index: number, pageSize: number): number {
+  return Number.isInteger(index) && index >= 0
+    ? Math.floor(index / pageSize) + 1
+    : 1;
+}
+
+function findAppLookupMatch(items: ProviderAppInfo[], normalized: string): ProviderAppInfo | null {
+  const byExact = items.find((entry) => {
+    const candidates = [
+      entry.id,
+      entry.name,
+      ...(Array.isArray(entry.pluginDisplayNames) ? entry.pluginDisplayNames : []),
+    ];
+    return candidates.some((candidate) => normalizeAppLookupToken(candidate) === normalized);
+  }) ?? null;
+  if (byExact) {
+    return byExact;
+  }
+  return items.find((entry) => {
+    const haystack = [
+      entry.id,
+      entry.name,
+      entry.description ?? '',
+      entry.developer ?? '',
+      ...(Array.isArray(entry.pluginDisplayNames) ? entry.pluginDisplayNames : []),
+      ...(Array.isArray(entry.categories) ? entry.categories : []),
+    ].map((candidate) => normalizeAppLookupToken(candidate)).join(' ');
+    return haystack.includes(normalized);
+  }) ?? null;
+}
+
+function compareMcpServersForDisplay(left: ProviderMcpServerStatus, right: ProviderMcpServerStatus): number {
+  if (left.isEnabled !== right.isEnabled) {
+    return left.isEnabled ? -1 : 1;
+  }
+  return left.name.localeCompare(right.name);
+}
+
 function getPluginDisplayName(plugin: ProviderPluginSummary): string {
   return plugin.displayName || plugin.name;
 }
@@ -8144,8 +8733,8 @@ function renderPluginDetailLines({
   mcpServers: ProviderMcpServerStatus[];
 }) {
   const plugin = detail.summary;
-  const appStatusById = new Map(apps.map((entry) => [entry.id, entry]));
-  const mcpStatusByName = new Map(mcpServers.map((entry) => [entry.name, entry]));
+  void apps;
+  void mcpServers;
   const lines = [
     i18n.t('coordinator.plugins.detailTitle', { index: index > 0 ? index : '?', name: getPluginDisplayName(plugin) }),
     i18n.t('coordinator.plugins.cwdLabel', { value: cwd ?? i18n.t('common.notSet') }),
@@ -8167,36 +8756,152 @@ function renderPluginDetailLines({
   if (detail.apps.length > 0) {
     lines.push(i18n.t('coordinator.plugins.appsLabel', { count: detail.apps.length }));
     for (const app of detail.apps) {
-      const appInfo = appStatusById.get(app.id) ?? null;
       const segments = [app.name];
       if (app.needsAuth) {
         segments.push(i18n.t('coordinator.plugins.appNeedsAuth'));
       }
-      if (appInfo) {
-        segments.push(appInfo.isEnabled ? i18n.t('common.enabled') : i18n.t('common.disabled'));
-        segments.push(appInfo.isAccessible ? i18n.t('coordinator.plugins.appAccessible') : i18n.t('coordinator.plugins.appInaccessible'));
-      }
       lines.push(`- ${segments.join(' | ')}`);
     }
+    lines.push(i18n.t('coordinator.plugins.appManageHint'));
   }
   if (detail.mcpServers.length > 0) {
     lines.push(i18n.t('coordinator.plugins.mcpLabel', { count: detail.mcpServers.length }));
     for (const name of detail.mcpServers) {
-      const status = mcpStatusByName.get(name) ?? null;
-      if (!status) {
-        lines.push(`- ${name}`);
-        continue;
-      }
-      lines.push(`- ${name} | ${formatPluginMcpAuthStatusLabel(status.authStatus, i18n)} | tools ${status.toolCount} | resources ${status.resourceCount}`);
+      lines.push(`- ${name}`);
     }
+    lines.push(i18n.t('coordinator.plugins.mcpManageHint'));
   }
   if (detail.skills.length > 0) {
     lines.push(i18n.t('coordinator.plugins.skillsLabel', { count: detail.skills.length }));
     for (const skill of detail.skills) {
       lines.push(`- ${skill.displayName || skill.name} | ${skill.enabled ? i18n.t('common.enabled') : i18n.t('common.disabled')}`);
     }
+    lines.push(i18n.t('coordinator.plugins.skillManageHint'));
   }
   lines.push(i18n.t('coordinator.plugins.detailActionsHint'));
+  return lines;
+}
+
+function renderAppsListLines({
+  i18n,
+  items,
+  totalCount,
+  pageNumber,
+  pageCount,
+  mode,
+  searchTerm,
+}: {
+  i18n: Translator;
+  items: ProviderAppInfo[];
+  totalCount: number;
+  pageNumber: number;
+  pageCount: number;
+  mode: 'default' | 'all' | 'search';
+  searchTerm: string | null;
+}) {
+  const lines = [
+    i18n.t('coordinator.apps.title', {
+      count: totalCount,
+      page: pageNumber,
+      pages: pageCount,
+    }),
+  ];
+  lines.push(i18n.t('coordinator.apps.viewLabel', {
+    value: mode === 'all'
+      ? i18n.t('coordinator.apps.view.all')
+      : mode === 'search'
+        ? i18n.t('coordinator.apps.view.search')
+        : i18n.t('coordinator.apps.view.default'),
+  }));
+  if (mode === 'search' && searchTerm) {
+    lines.push(i18n.t('coordinator.apps.searchLabel', { term: searchTerm }));
+  }
+  if (totalCount === 0) {
+    lines.push(mode === 'search'
+      ? i18n.t('coordinator.apps.noMatch')
+      : mode === 'default'
+        ? i18n.t('coordinator.apps.emptyDefault')
+        : i18n.t('coordinator.apps.empty'));
+    return lines;
+  }
+  for (const [index, app] of items.entries()) {
+    lines.push(`${index + 1}. ${app.name} [${app.isEnabled ? i18n.t('common.enabled') : i18n.t('common.disabled')}] [${app.isAccessible ? i18n.t('coordinator.plugins.appAccessible') : i18n.t('coordinator.plugins.appInaccessible')}]`);
+    const pluginNames = Array.isArray(app.pluginDisplayNames) && app.pluginDisplayNames.length > 0
+      ? app.pluginDisplayNames.join(', ')
+      : i18n.t('common.unknown');
+    lines.push(`   ${truncateInlineText(app.description || pluginNames, 88)}`);
+  }
+  if (pageCount > 1) {
+    const actions = [] as string[];
+    if (pageNumber > 1) {
+      actions.push(`/apps list ${pageNumber - 1}`);
+    }
+    if (pageNumber < pageCount) {
+      actions.push(`/apps list ${pageNumber + 1}`);
+    }
+    lines.push(i18n.t('coordinator.apps.pageHint', {
+      actions: actions.join('  '),
+    }));
+  }
+  lines.push(i18n.t('coordinator.apps.actionsHint'));
+  return lines;
+}
+
+function renderAppDetailLines({
+  i18n,
+  index,
+  app,
+}: {
+  i18n: Translator;
+  index: number | null;
+  app: ProviderAppInfo;
+}) {
+  const lines = [
+    index !== null
+      ? i18n.t('coordinator.apps.detailTitle', { index, name: app.name })
+      : i18n.t('coordinator.apps.detailTitleNamed', { name: app.name }),
+    i18n.t('coordinator.apps.statusLabel', { value: app.isEnabled ? i18n.t('common.enabled') : i18n.t('common.disabled') }),
+    i18n.t('coordinator.apps.accessLabel', { value: app.isAccessible ? i18n.t('coordinator.plugins.appAccessible') : i18n.t('coordinator.plugins.appInaccessible') }),
+    i18n.t('coordinator.apps.idLabel', { value: app.id }),
+    i18n.t('coordinator.apps.descriptionLabel', { value: app.description || i18n.t('common.notSet') }),
+  ];
+  if (Array.isArray(app.pluginDisplayNames) && app.pluginDisplayNames.length > 0) {
+    lines.push(i18n.t('coordinator.apps.pluginsLabel', { value: app.pluginDisplayNames.join(', ') }));
+  }
+  if (Array.isArray(app.categories) && app.categories.length > 0) {
+    lines.push(i18n.t('coordinator.apps.categoriesLabel', { value: app.categories.join(', ') }));
+  }
+  if (normalizeNullableString(app.developer ?? null)) {
+    lines.push(i18n.t('coordinator.apps.developerLabel', { value: app.developer }));
+  }
+  if (normalizeNullableString(app.installUrl ?? null)) {
+    lines.push(i18n.t('coordinator.apps.authLinkLabel', { value: app.installUrl }));
+  }
+  lines.push(i18n.t('coordinator.apps.detailActionsHint'));
+  return lines;
+}
+
+function renderMcpServerListLines({
+  i18n,
+  items,
+}: {
+  i18n: Translator;
+  items: ProviderMcpServerStatus[];
+}) {
+  const lines = [
+    i18n.t('coordinator.mcp.title', { count: items.length }),
+  ];
+  if (items.length === 0) {
+    lines.push(i18n.t('coordinator.mcp.empty'));
+    return lines;
+  }
+  for (const [index, server] of items.entries()) {
+    const status = server.isEnabled ? i18n.t('coordinator.mcp.statusEnabled') : i18n.t('coordinator.mcp.statusDisabled');
+    const auth = formatPluginMcpAuthStatusLabel(server.authStatus, i18n);
+    lines.push(`${index + 1}. ${server.name} [${status}] [${auth}]`);
+    lines.push(`   tools ${server.toolCount} | resources ${server.resourceCount} | templates ${server.resourceTemplateCount}`);
+  }
+  lines.push(i18n.t('coordinator.mcp.actionsHint'));
   return lines;
 }
 
@@ -8209,40 +8914,11 @@ function renderPluginInstallFollowupLines(
   }
   const lines = [
     i18n.t('coordinator.plugins.installAuthNeeded', {
-      policy: formatPluginAuthPolicyLabel(installResult.authPolicy, i18n),
       count: installResult.appsNeedingAuth.length,
     }),
   ];
   for (const app of installResult.appsNeedingAuth) {
-    lines.push(`- ${app.name}`);
-  }
-  return lines;
-}
-
-function renderPluginToggleSummaryLines(
-  summary: {
-    apps: number;
-    skills: number;
-    mcpServers: number;
-    errors: string[];
-  },
-  i18n: Translator,
-): string[] {
-  const lines = [] as string[];
-  if (summary.apps > 0) {
-    lines.push(i18n.t('coordinator.plugins.toggleAppsChanged', { count: summary.apps }));
-  }
-  if (summary.skills > 0) {
-    lines.push(i18n.t('coordinator.plugins.toggleSkillsChanged', { count: summary.skills }));
-  }
-  if (summary.mcpServers > 0) {
-    lines.push(i18n.t('coordinator.plugins.toggleMcpChanged', { count: summary.mcpServers }));
-  }
-  if (summary.errors.length > 0) {
-    lines.push(i18n.t('coordinator.plugins.togglePartial', {
-      count: summary.errors.length,
-      error: summary.errors[0],
-    }));
+    lines.push(`- ${app.name} | /apps auth ${app.id || app.name}`);
   }
   return lines;
 }
@@ -8262,17 +8938,6 @@ function formatPluginMcpAuthStatusLabel(
       return i18n.t('coordinator.plugins.mcpAuth.unsupported');
     default:
       return String(authStatus ?? i18n.t('common.unknown'));
-  }
-}
-
-function formatPluginAuthPolicyLabel(value: string | null, i18n: Translator): string {
-  switch (String(value ?? '').trim().toUpperCase()) {
-    case 'ON_INSTALL':
-      return i18n.t('coordinator.plugins.authPolicy.onInstall');
-    case 'ON_USE':
-      return i18n.t('coordinator.plugins.authPolicy.onUse');
-    default:
-      return value || i18n.t('common.unknown');
   }
 }
 
@@ -8455,6 +9120,20 @@ function normalizePluginAliasValue(value: unknown): string {
     .trim()
     .replace(/^\/+/u, '')
     .toLowerCase();
+}
+
+function normalizeAppLookupToken(value: unknown): string {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s/_\\-]+/gu, ' ');
+}
+
+function normalizeMcpLookupToken(value: unknown): string {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s/_\\-]+/gu, ' ');
 }
 
 function pushUniqueExplicitPluginTarget(targets: ExplicitPluginTargetHint[], target: ExplicitPluginTargetHint): void {

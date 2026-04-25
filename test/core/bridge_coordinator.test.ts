@@ -389,6 +389,7 @@ class FakeProviderPlugin {
   async setMcpServerEnabled({ providerProfile, name, enabled }: any = {}) {
     this.setMcpServerEnabledCalls.push({ providerProfile, name, enabled });
     this.mcpEnabledByName.set(name, enabled);
+    this.mcpServerStatuses = this.mcpServerStatuses.map((entry) => entry.name === name ? { ...entry, isEnabled: enabled } : entry);
     this.recomputePluginEnabledStates();
   }
 
@@ -4323,6 +4324,7 @@ test('/plugins shows featured plugins, category summaries, category items, and p
   openai.mcpServerStatuses = [
     {
       name: 'openai-docs',
+      isEnabled: true,
       authStatus: 'bearerToken',
       toolCount: 2,
       resourceCount: 1,
@@ -4330,6 +4332,7 @@ test('/plugins shows featured plugins, category summaries, category items, and p
     },
     {
       name: 'github',
+      isEnabled: true,
       authStatus: 'notLoggedIn',
       toolCount: 4,
       resourceCount: 0,
@@ -4379,7 +4382,7 @@ test('/plugins shows featured plugins, category summaries, category items, and p
   assert.match(detailText, /需要认证/u);
 });
 
-test('/plugins install, on-off, and uninstall mutate plugin state through provider actions', async () => {
+test('/plugins only manage package install/uninstall and redirect runtime toggles to dedicated surfaces', async () => {
   const { runtime, openai } = makeRuntime({
     defaultCwd: '/tmp/openai-default',
   });
@@ -4452,7 +4455,12 @@ test('/plugins install, on-off, and uninstall mutate plugin state through provid
     marketplaceName: 'openai-curated',
     marketplacePath: null,
     description: 'Search docs',
-    apps: [],
+    apps: [{
+      id: 'openai-docs-app',
+      name: 'OpenAI Docs',
+      needsAuth: true,
+      description: 'Docs connector',
+    }],
     mcpServers: ['openai-docs'],
     skills: [],
   });
@@ -4495,6 +4503,7 @@ test('/plugins install, on-off, and uninstall mutate plugin state through provid
   openai.mcpServerStatuses = [
     {
       name: 'openai-docs',
+      isEnabled: true,
       authStatus: 'bearerToken',
       toolCount: 2,
       resourceCount: 1,
@@ -4502,6 +4511,7 @@ test('/plugins install, on-off, and uninstall mutate plugin state through provid
     },
     {
       name: 'github',
+      isEnabled: true,
       authStatus: 'notLoggedIn',
       toolCount: 4,
       resourceCount: 0,
@@ -4524,26 +4534,21 @@ test('/plugins install, on-off, and uninstall mutate plugin state through provid
   assert.equal(openai.installPluginCalls.length, 1);
   assert.equal(openai.installPluginCalls[0]?.pluginName, 'openai-docs');
   assert.match(installText, /已安装插件：OpenAI Docs/u);
+  assert.match(installText, /安装后有 1 个 App 需要认证/u);
+  assert.match(installText, /\/apps auth openai-docs-app/u);
 
-  const disableResult = await runtime.services.bridgeCoordinator.handleInboundEvent({
+  const removedSubcommand = await runtime.services.bridgeCoordinator.handleInboundEvent({
     platform: 'weixin',
     externalScopeId: 'wx-user-plugins-2',
     text: '/pg off github',
   });
-  const disableText = disableResult.messages.map((message) => message.text ?? '').join('\n');
-  assert.equal(openai.setAppEnabledCalls.length, 1);
-  assert.equal(openai.setAppEnabledCalls[0]?.appId, 'github');
-  assert.equal(openai.setAppEnabledCalls[0]?.enabled, false);
-  assert.equal(openai.setSkillEnabledCalls.length, 1);
-  assert.equal(openai.setSkillEnabledCalls[0]?.name, 'github-helper');
-  assert.equal(openai.setSkillEnabledCalls[0]?.enabled, false);
-  assert.equal(openai.setMcpServerEnabledCalls.length, 1);
-  assert.equal(openai.setMcpServerEnabledCalls[0]?.name, 'github');
-  assert.equal(openai.setMcpServerEnabledCalls[0]?.enabled, false);
-  assert.match(disableText, /已禁用插件：GitHub/u);
-  assert.match(disableText, /已更新 Apps：1/u);
-  assert.match(disableText, /已更新 Skills：1/u);
-  assert.match(disableText, /已更新 MCP Servers：1/u);
+  const removedSubcommandText = removedSubcommand.messages.map((message) => message.text ?? '').join('\n');
+  assert.equal(openai.setAppEnabledCalls.length, 0);
+  assert.equal(openai.setSkillEnabledCalls.length, 0);
+  assert.equal(openai.setMcpServerEnabledCalls.length, 0);
+  assert.match(removedSubcommandText, /命令：\/plugins/u);
+  assert.match(removedSubcommandText, /\/pg add/u);
+  assert.doesNotMatch(removedSubcommandText, /\/pg off/u);
 
   const uninstallResult = await runtime.services.bridgeCoordinator.handleInboundEvent({
     platform: 'weixin',
@@ -5176,7 +5181,7 @@ test('inline plugin alias rewriting ignores email addresses', async () => {
   assert.equal(openai.startTurnCalls[0]?.event?.metadata?.codexbridge?.explicitPluginTarget ?? null, null);
 });
 
-test('/plugins auth and reload expose app auth URLs and native MCP OAuth launch', async () => {
+test('/plugins runtime auth subcommand is removed and MCP reload stays under /mcp', async () => {
   const { runtime, openai } = makeRuntime({
     defaultCwd: '/tmp/openai-default',
   });
@@ -5251,6 +5256,7 @@ test('/plugins auth and reload expose app auth URLs and native MCP OAuth launch'
   }];
   openai.mcpServerStatuses = [{
     name: 'openai-docs',
+    isEnabled: true,
     authStatus: 'notLoggedIn',
     toolCount: 2,
     resourceCount: 1,
@@ -5269,8 +5275,9 @@ test('/plugins auth and reload expose app auth URLs and native MCP OAuth launch'
     text: '/pg auth google-drive',
   });
   const appAuthText = appAuth.messages.map((message) => message.text ?? '').join('\n');
-  assert.match(appAuthText, /插件认证 \| Google Drive/u);
-  assert.match(appAuthText, /https:\/\/example\.com\/apps\/google-drive/u);
+  assert.match(appAuthText, /命令：\/plugins/u);
+  assert.match(appAuthText, /\/apps/u);
+  assert.doesNotMatch(appAuthText, /https:\/\/example\.com\/apps\/google-drive/u);
 
   const mcpAuth = await runtime.services.bridgeCoordinator.handleInboundEvent({
     platform: 'weixin',
@@ -5278,9 +5285,9 @@ test('/plugins auth and reload expose app auth URLs and native MCP OAuth launch'
     text: '/pg auth openai-docs',
   });
   const mcpAuthText = mcpAuth.messages.map((message) => message.text ?? '').join('\n');
-  assert.equal(openai.startMcpServerOauthLoginCalls.length, 1);
-  assert.equal(openai.startMcpServerOauthLoginCalls[0]?.name, 'openai-docs');
-  assert.match(mcpAuthText, /https:\/\/example\.com\/oauth\/openai-docs/u);
+  assert.equal(openai.startMcpServerOauthLoginCalls.length, 0);
+  assert.match(mcpAuthText, /命令：\/plugins/u);
+  assert.doesNotMatch(mcpAuthText, /https:\/\/example\.com\/oauth\/openai-docs/u);
 
   const reloaded = await runtime.services.bridgeCoordinator.handleInboundEvent({
     platform: 'weixin',
@@ -5288,9 +5295,491 @@ test('/plugins auth and reload expose app auth URLs and native MCP OAuth launch'
     text: '/pg reload',
   });
   const reloadText = reloaded.messages.map((message) => message.text ?? '').join('\n');
-  assert.equal(openai.reloadMcpServersCalls.length, 1);
-  assert.match(reloadText, /已刷新插件目录和状态/u);
+  assert.equal(openai.reloadMcpServersCalls.length, 0);
+  assert.match(reloadText, /已刷新插件目录/u);
   assert.match(reloadText, /推荐插件/u);
+});
+
+test('/apps lists visible apps and manages show, enablement, and auth separately from /pg', async () => {
+  const { runtime, openai } = makeRuntime({
+    defaultCwd: '/tmp/openai-default',
+  });
+  openai.pluginCatalog = {
+    featuredPluginIds: ['google-drive@openai-curated'],
+    marketplaceLoadErrors: [],
+    marketplaces: [{
+      name: 'openai-curated',
+      path: null,
+      interface: { displayName: 'OpenAI Curated' },
+      plugins: [{
+        id: 'google-drive@openai-curated',
+        name: 'google-drive',
+        installed: true,
+        enabled: true,
+        installPolicy: 'AVAILABLE',
+        authPolicy: 'ON_USE',
+        interface: {
+          displayName: 'Google Drive',
+          shortDescription: 'Drive workflows',
+          capabilities: ['app'],
+        },
+        source: {
+          type: 'marketplace',
+          marketplaceName: 'openai-curated',
+        },
+      }],
+    }],
+  };
+  openai.appEntries = [
+    {
+      id: 'google-drive',
+      name: 'Google Drive',
+      description: 'Drive connector',
+      installUrl: 'https://example.com/apps/google-drive',
+      isAccessible: false,
+      isEnabled: false,
+      pluginDisplayNames: ['Google Drive'],
+      categories: ['productivity'],
+      developer: 'OpenAI',
+    },
+    {
+      id: 'github',
+      name: 'GitHub',
+      description: 'GitHub connector',
+      installUrl: null,
+      isAccessible: true,
+      isEnabled: false,
+      pluginDisplayNames: ['GitHub'],
+      categories: ['developer-tools'],
+      developer: 'OpenAI',
+    },
+    {
+      id: 'slack',
+      name: 'Slack',
+      description: 'Team chat connector',
+      installUrl: null,
+      isAccessible: false,
+      isEnabled: true,
+      pluginDisplayNames: ['Slack'],
+      categories: ['communication'],
+      developer: 'OpenAI',
+    },
+    {
+      id: 'az-links',
+      name: 'A-Z Links',
+      description: 'Easy accessible links in chat',
+      installUrl: 'https://example.com/apps/az-links',
+      isAccessible: false,
+      isEnabled: true,
+      pluginDisplayNames: [],
+      categories: ['productivity'],
+      developer: 'Catalog Vendor',
+    },
+  ];
+
+  const listed = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-apps-1',
+    text: '/apps',
+  });
+  const listText = listed.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(listText, /Apps \/ Connectors \| 4 项/u);
+  assert.match(listText, /视图：已装插件相关/u);
+  assert.match(listText, /A-Z Links/u);
+  assert.match(listText, /Slack/u);
+  assert.match(listText, /GitHub \[关闭\] \[可访问\]/u);
+  assert.match(listText, /Google Drive \[关闭\] \[未接通\]/u);
+
+  const detail = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-apps-1',
+    text: '/apps show google-drive',
+  });
+  const detailText = detail.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(detailText, /App 详情 \| .*Google Drive/u);
+  assert.match(detailText, /认证链接：https:\/\/example\.com\/apps\/google-drive/u);
+
+  const enabled = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-apps-1',
+    text: '/apps on github',
+  });
+  const enabledText = enabled.messages.map((message) => message.text ?? '').join('\n');
+  assert.equal(openai.setAppEnabledCalls.length, 1);
+  assert.equal(openai.setAppEnabledCalls[0]?.appId, 'github');
+  assert.equal(openai.setAppEnabledCalls[0]?.enabled, true);
+  assert.match(enabledText, /已启用 App：GitHub/u);
+  assert.match(enabledText, /GitHub \[开启\] \[可访问\]/u);
+
+  const auth = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-apps-1',
+    text: '/apps auth google-drive',
+  });
+  const authText = auth.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(authText, /https:\/\/example\.com\/apps\/google-drive/u);
+});
+
+test('/apps all and /apps search expose the full app catalog while keeping default view focused', async () => {
+  const { runtime, openai } = makeRuntime({
+    defaultCwd: '/tmp/openai-default',
+  });
+  openai.pluginCatalog = {
+    featuredPluginIds: ['gmail@openai-curated'],
+    marketplaceLoadErrors: [],
+    marketplaces: [{
+      name: 'openai-curated',
+      path: null,
+      interface: { displayName: 'OpenAI Curated' },
+      plugins: [{
+        id: 'gmail@openai-curated',
+        name: 'gmail',
+        installed: true,
+        enabled: true,
+        installPolicy: 'AVAILABLE',
+        authPolicy: 'ON_USE',
+        interface: {
+          displayName: 'Gmail',
+          shortDescription: 'Inbox workflows',
+          capabilities: ['app'],
+        },
+        source: {
+          type: 'marketplace',
+          marketplaceName: 'openai-curated',
+        },
+      }],
+    }],
+  };
+  openai.appEntries = [
+    {
+      id: 'gmail',
+      name: 'Gmail',
+      description: 'Inbox connector',
+      installUrl: null,
+      isAccessible: true,
+      isEnabled: true,
+      pluginDisplayNames: ['Gmail'],
+      categories: ['mail'],
+      developer: 'OpenAI',
+    },
+    {
+      id: 'google-calendar',
+      name: 'Google Calendar',
+      description: 'Calendar connector',
+      installUrl: 'https://example.com/apps/google-calendar',
+      isAccessible: false,
+      isEnabled: false,
+      pluginDisplayNames: ['Google Calendar'],
+      categories: ['calendar'],
+      developer: 'OpenAI',
+    },
+    {
+      id: 'slack',
+      name: 'Slack',
+      description: 'Team chat connector',
+      installUrl: null,
+      isAccessible: false,
+      isEnabled: true,
+      pluginDisplayNames: ['Slack'],
+      categories: ['communication'],
+      developer: 'OpenAI',
+    },
+    {
+      id: 'az-links',
+      name: 'A-Z Links',
+      description: 'Easy accessible links in chat',
+      installUrl: 'https://example.com/apps/az-links',
+      isAccessible: false,
+      isEnabled: true,
+      pluginDisplayNames: [],
+      categories: ['productivity'],
+      developer: 'Catalog Vendor',
+    },
+  ];
+
+  const defaultList = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-apps-all-1',
+    text: '/apps',
+  });
+  const defaultText = defaultList.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(defaultText, /Apps \/ Connectors \| 3 项/u);
+  assert.match(defaultText, /视图：已装插件相关/u);
+  assert.match(defaultText, /Gmail/u);
+  assert.match(defaultText, /Slack/u);
+  assert.match(defaultText, /A-Z Links/u);
+  assert.doesNotMatch(defaultText, /Google Calendar/u);
+
+  const allList = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-apps-all-1',
+    text: '/apps all',
+  });
+  const allText = allList.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(allText, /Apps \/ Connectors \| 4 项/u);
+  assert.match(allText, /视图：全部可见/u);
+  assert.match(allText, /Google Calendar/u);
+  assert.match(allText, /Slack/u);
+  assert.match(allText, /A-Z Links/u);
+
+  const searchResult = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-apps-all-1',
+    text: '/apps search calendar',
+  });
+  const searchText = searchResult.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(searchText, /视图：搜索结果/u);
+  assert.match(searchText, /搜索：calendar/u);
+  assert.match(searchText, /1\. Google Calendar \[关闭\] \[未接通\]/u);
+  assert.doesNotMatch(searchText, /Gmail/u);
+
+  const detail = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-apps-all-1',
+    text: '/apps show 1',
+  });
+  const detailText = detail.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(detailText, /App 详情 \| 1\. Google Calendar/u);
+
+  const enabled = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-apps-all-1',
+    text: '/apps on 1',
+  });
+  const enabledText = enabled.messages.map((message) => message.text ?? '').join('\n');
+  assert.equal(openai.setAppEnabledCalls.length, 1);
+  assert.equal(openai.setAppEnabledCalls[0]?.appId, 'google-calendar');
+  assert.equal(openai.setAppEnabledCalls[0]?.enabled, true);
+  assert.match(enabledText, /已启用 App：Google Calendar/u);
+  assert.match(enabledText, /搜索：calendar/u);
+});
+
+test('/apps default view keeps enabled but currently inaccessible apps visible', async () => {
+  const { runtime, openai } = makeRuntime({
+    defaultCwd: '/tmp/openai-default',
+  });
+  openai.pluginCatalog = {
+    featuredPluginIds: [],
+    marketplaceLoadErrors: [],
+    marketplaces: [],
+  };
+  openai.appEntries = [
+    {
+      id: 'gmail',
+      name: 'Gmail',
+      description: 'Inbox connector',
+      installUrl: null,
+      isAccessible: true,
+      isEnabled: true,
+      pluginDisplayNames: ['Gmail'],
+      categories: ['mail'],
+      developer: 'OpenAI',
+    },
+    {
+      id: 'slack',
+      name: 'Slack',
+      description: 'Team chat connector',
+      installUrl: null,
+      isAccessible: false,
+      isEnabled: true,
+      pluginDisplayNames: [],
+      categories: ['communication'],
+      developer: 'OpenAI',
+    },
+    {
+      id: 'google-calendar',
+      name: 'Google Calendar',
+      description: 'Calendar connector',
+      installUrl: 'https://example.com/apps/google-calendar',
+      isAccessible: false,
+      isEnabled: false,
+      pluginDisplayNames: ['Google Calendar'],
+      categories: ['calendar'],
+      developer: 'OpenAI',
+    },
+  ];
+
+  const listed = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-apps-enabled-1',
+    text: '/apps',
+  });
+  const listText = listed.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(listText, /Apps \/ Connectors \| 2 项/u);
+  assert.match(listText, /1\. Gmail \[开启\] \[可访问\]/u);
+  assert.match(listText, /2\. Slack \[开启\] \[未接通\]/u);
+  assert.doesNotMatch(listText, /Google Calendar/u);
+});
+
+test('/apps paginates long app lists and uses the current page for numeric selection', async () => {
+  const { runtime, openai } = makeRuntime({
+    defaultCwd: '/tmp/openai-default',
+  });
+  openai.appEntries = Array.from({ length: 25 }, (_, index) => {
+    const number = String(index + 1).padStart(2, '0');
+    return {
+      id: `app-${number}`,
+      name: `App ${number}`,
+      description: `Connector ${number}`,
+      installUrl: null,
+      isAccessible: true,
+      isEnabled: true,
+      pluginDisplayNames: [`Plugin ${number}`],
+    };
+  });
+
+  const firstPage = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-apps-pages-1',
+    text: '/apps',
+  });
+  const firstPageText = firstPage.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(firstPageText, /Apps \/ Connectors \| 25 项 \| 第 1\/3 页/u);
+  assert.match(firstPageText, /1\. App 01 \[开启\] \[可访问\]/u);
+  assert.match(firstPageText, /12\. App 12 \[开启\] \[可访问\]/u);
+  assert.doesNotMatch(firstPageText, /App 13/u);
+  assert.match(firstPageText, /\/apps list 2/u);
+
+  const secondPage = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-apps-pages-1',
+    text: '/apps list 2',
+  });
+  const secondPageText = secondPage.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(secondPageText, /Apps \/ Connectors \| 25 项 \| 第 2\/3 页/u);
+  assert.match(secondPageText, /1\. App 13 \[开启\] \[可访问\]/u);
+  assert.match(secondPageText, /12\. App 24 \[开启\] \[可访问\]/u);
+  assert.doesNotMatch(secondPageText, /App 01/u);
+
+  const detail = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-apps-pages-1',
+    text: '/apps show 1',
+  });
+  const detailText = detail.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(detailText, /App 详情 \| 1\. App 13/u);
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-apps-pages-1',
+    text: '/apps off 1',
+  });
+  assert.equal(openai.setAppEnabledCalls.length, 1);
+  assert.equal(openai.setAppEnabledCalls[0]?.appId, 'app-13');
+  assert.equal(openai.setAppEnabledCalls[0]?.enabled, false);
+});
+
+test('/apps list keeps the current search view when paginating', async () => {
+  const { runtime, openai } = makeRuntime({
+    defaultCwd: '/tmp/openai-default',
+  });
+  openai.appEntries = [
+    ...Array.from({ length: 15 }, (_, index) => ({
+      id: `mail-${index + 1}`,
+      name: `Mail App ${String(index + 1).padStart(2, '0')}`,
+      description: 'Mail workflow',
+      installUrl: null,
+      isAccessible: false,
+      isEnabled: false,
+      pluginDisplayNames: ['Mail'],
+    })),
+    ...Array.from({ length: 5 }, (_, index) => ({
+      id: `drive-${index + 1}`,
+      name: `Drive App ${String(index + 1).padStart(2, '0')}`,
+      description: 'Drive workflow',
+      installUrl: null,
+      isAccessible: false,
+      isEnabled: false,
+      pluginDisplayNames: ['Drive'],
+    })),
+  ];
+
+  const firstPage = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-apps-search-pages-1',
+    text: '/apps search mail',
+  });
+  const firstPageText = firstPage.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(firstPageText, /Apps \/ Connectors \| 15 项 \| 第 1\/2 页/u);
+  assert.match(firstPageText, /搜索：mail/u);
+  assert.match(firstPageText, /1\. Mail App 01/u);
+  assert.doesNotMatch(firstPageText, /Drive App/u);
+
+  const secondPage = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-apps-search-pages-1',
+    text: '/apps list 2',
+  });
+  const secondPageText = secondPage.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(secondPageText, /Apps \/ Connectors \| 15 项 \| 第 2\/2 页/u);
+  assert.match(secondPageText, /搜索：mail/u);
+  assert.match(secondPageText, /1\. Mail App 13/u);
+  assert.doesNotMatch(secondPageText, /Drive App/u);
+});
+
+test('/mcp lists visible servers and manages enablement, auth, and reload separately from /pg', async () => {
+  const { runtime, openai } = makeRuntime({
+    defaultCwd: '/tmp/openai-default',
+  });
+  openai.mcpServerStatuses = [
+    {
+      name: 'browsermcp',
+      isEnabled: true,
+      authStatus: 'unsupported',
+      toolCount: 12,
+      resourceCount: 0,
+      resourceTemplateCount: 0,
+    },
+    {
+      name: 'google_workspace',
+      isEnabled: false,
+      authStatus: 'notLoggedIn',
+      toolCount: 8,
+      resourceCount: 1,
+      resourceTemplateCount: 2,
+    },
+  ];
+
+  const listed = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-mcp-1',
+    text: '/mcp',
+  });
+  const listText = listed.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(listText, /MCP 服务器 \| 2 项/u);
+  assert.match(listText, /1\. browsermcp \[已启用\] \[无需认证\]/u);
+  assert.match(listText, /2\. google_workspace \[已禁用\] \[未登录\]/u);
+
+  const enabled = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-mcp-1',
+    text: '/mcp on 2',
+  });
+  const enabledText = enabled.messages.map((message) => message.text ?? '').join('\n');
+  assert.equal(openai.setMcpServerEnabledCalls.length, 1);
+  assert.equal(openai.setMcpServerEnabledCalls[0]?.name, 'google_workspace');
+  assert.equal(openai.setMcpServerEnabledCalls[0]?.enabled, true);
+  assert.match(enabledText, /已启用 MCP server：google_workspace/u);
+  assert.match(enabledText, /google_workspace \[已启用\] \[未登录\]/u);
+
+  const auth = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-mcp-1',
+    text: '/mcp auth google_workspace',
+  });
+  const authText = auth.messages.map((message) => message.text ?? '').join('\n');
+  assert.equal(openai.startMcpServerOauthLoginCalls.length, 1);
+  assert.equal(openai.startMcpServerOauthLoginCalls[0]?.name, 'google_workspace');
+  assert.match(authText, /https:\/\/example\.com\/oauth\/google_workspace/u);
+
+  const reloaded = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-mcp-1',
+    text: '/mcp reload',
+  });
+  const reloadText = reloaded.messages.map((message) => message.text ?? '').join('\n');
+  assert.equal(openai.reloadMcpServersCalls.length, 1);
+  assert.match(reloadText, /已刷新 MCP servers 状态/u);
 });
 
 test('/plugins category listing falls back to summary capabilities and paginates long groups', async () => {

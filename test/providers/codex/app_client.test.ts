@@ -199,6 +199,7 @@ test('CodexAppClient reads plugin detail and lists related app and MCP status en
       return {
         data: [{
           name: 'openai-docs',
+          isEnabled: false,
           authStatus: 'bearerToken',
           tools: {
             search_openai_docs: {},
@@ -228,8 +229,33 @@ test('CodexAppClient reads plugin detail and lists related app and MCP status en
   assert.equal(apps[0]?.isAccessible, true);
   assert.deepEqual(apps[0]?.categories, ['productivity']);
   assert.equal(mcpStatuses[0]?.name, 'openai-docs');
+  assert.equal(mcpStatuses[0]?.isEnabled, false);
   assert.equal(mcpStatuses[0]?.authStatus, 'bearerToken');
   assert.equal(mcpStatuses[0]?.toolCount, 2);
+});
+
+test('CodexAppClient treats missing app isEnabled as enabled unless explicitly disabled', async () => {
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+  });
+
+  client.request = async (method) => {
+    assert.equal(method, 'app/list');
+    return {
+      data: [{
+        id: 'slack',
+        name: 'Slack',
+        isAccessible: false,
+        pluginDisplayNames: ['Slack'],
+      }],
+      nextCursor: null,
+    };
+  };
+
+  const apps = await client.listApps();
+
+  assert.equal(apps[0]?.id, 'slack');
+  assert.equal(apps[0]?.isEnabled, true);
 });
 
 test('CodexAppClient installs and uninstalls plugins through native app-server RPCs', async () => {
