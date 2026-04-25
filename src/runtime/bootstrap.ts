@@ -7,6 +7,7 @@ import { SessionRouter } from '../core/session_router.js';
 import { InMemoryAutomationJobRepository } from '../store/in_memory/in_memory_automation_job_repository.js';
 import { InMemoryBridgeSessionRepository } from '../store/in_memory/in_memory_bridge_session_repository.js';
 import { InMemoryPlatformBindingRepository } from '../store/in_memory/in_memory_platform_binding_repository.js';
+import { InMemoryPluginAliasRepository } from '../store/in_memory/in_memory_plugin_alias_repository.js';
 import { InMemoryProviderProfileRepository } from '../store/in_memory/in_memory_provider_profile_repository.js';
 import { InMemorySessionSettingsRepository } from '../store/in_memory/in_memory_session_settings_repository.js';
 import { InMemoryThreadMetadataRepository } from '../store/in_memory/in_memory_thread_metadata_repository.js';
@@ -17,6 +18,7 @@ interface RuntimeRepositories {
   providerProfiles?: any;
   bridgeSessions?: any;
   platformBindings?: any;
+  pluginAliases?: any;
   sessionSettings?: any;
   threadMetadata?: any;
   automationJobs?: any;
@@ -62,6 +64,7 @@ export function createCodexBridgeRuntime({
   const providerProfilesRepository = repositories.providerProfiles ?? new InMemoryProviderProfileRepository();
   const bridgeSessionsRepository = repositories.bridgeSessions ?? new InMemoryBridgeSessionRepository();
   const platformBindingsRepository = repositories.platformBindings ?? new InMemoryPlatformBindingRepository();
+  const pluginAliasesRepository = repositories.pluginAliases ?? new InMemoryPluginAliasRepository();
   const sessionSettingsRepository = repositories.sessionSettings ?? new InMemorySessionSettingsRepository();
   const threadMetadataRepository = repositories.threadMetadata ?? new InMemoryThreadMetadataRepository();
   const automationJobsRepository = repositories.automationJobs ?? new InMemoryAutomationJobRepository();
@@ -101,6 +104,7 @@ export function createCodexBridgeRuntime({
     activeTurns,
     providerProfiles: providerProfilesRepository,
     providerRegistry: registry,
+    pluginAliases: pluginAliasesRepository,
     defaultProviderProfileId: resolvedDefaultProviderProfileId,
     defaultCwd,
     restartBridge,
@@ -121,6 +125,7 @@ export function createCodexBridgeRuntime({
       providerProfiles: providerProfilesRepository,
       bridgeSessions: bridgeSessionsRepository,
       platformBindings: platformBindingsRepository,
+      pluginAliases: pluginAliasesRepository,
       sessionSettings: sessionSettingsRepository,
       threadMetadata: threadMetadataRepository,
       automationJobs: automationJobsRepository,

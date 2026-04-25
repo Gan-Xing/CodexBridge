@@ -275,3 +275,26 @@ test('file-backed repositories preserve pinned thread metadata across runtime re
   assert.match(pinnedView.messages[0]?.text ?? '', /OpenAI Default thread 1 \[置顶\]/);
   assert.match(pinnedView.messages[0]?.text ?? '', /预览：pin me/);
 });
+
+test('file-backed repositories preserve plugin aliases across repository reloads', () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-json-store-'));
+  const repositoriesA = createFileJsonRepositories(stateDir);
+  repositoriesA.pluginAliases.save({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-plugins',
+    providerProfileId: 'openai-default',
+    alias: 'gd',
+    pluginId: 'google-drive@openai-curated',
+    pluginName: 'google-drive',
+    marketplaceName: 'openai-curated',
+    marketplacePath: null,
+    displayName: 'Google Drive',
+    updatedAt: Date.now(),
+  });
+
+  const repositoriesB = createFileJsonRepositories(stateDir);
+  const aliases = repositoriesB.pluginAliases.listByScope('weixin', 'wx-user-plugins', 'openai-default');
+  assert.equal(aliases.length, 1);
+  assert.equal(aliases[0]?.alias, 'gd');
+  assert.equal(aliases[0]?.pluginId, 'google-drive@openai-curated');
+});

@@ -59,6 +59,19 @@ export interface ThreadMetadata {
   updatedAt: number;
 }
 
+export interface PluginAlias {
+  platform: string;
+  externalScopeId: string;
+  providerProfileId: string;
+  alias: string;
+  pluginId: string;
+  pluginName: string;
+  marketplaceName: string;
+  marketplacePath: string | null;
+  displayName: string | null;
+  updatedAt: number;
+}
+
 export type AutomationMode = 'standalone' | 'thread';
 
 export type AutomationStatus = 'active' | 'paused';

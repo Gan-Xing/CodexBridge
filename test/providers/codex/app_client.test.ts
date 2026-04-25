@@ -85,6 +85,290 @@ test('CodexAppClient normalizes second-based thread timestamps to milliseconds',
   assert.equal(result?.updatedAt, 1776425803000);
 });
 
+test('CodexAppClient lists plugin marketplaces and featured plugin ids', async () => {
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+  });
+
+  client.request = async (method, params) => {
+    assert.equal(method, 'plugin/list');
+    assert.deepEqual(params, { cwds: ['/tmp/work'] });
+    return {
+      featuredPluginIds: ['google-drive@openai-curated'],
+      marketplaceLoadErrors: [],
+      marketplaces: [{
+        name: 'openai-curated',
+        path: null,
+        interface: { displayName: 'OpenAI Curated' },
+        plugins: [{
+          id: 'google-drive@openai-curated',
+          name: 'google-drive',
+          installed: true,
+          enabled: false,
+          installPolicy: 'AVAILABLE',
+          authPolicy: 'ON_USE',
+          interface: {
+            displayName: 'Google Drive',
+            shortDescription: 'Drive workflows',
+            capabilities: ['app'],
+          },
+          source: {
+            type: 'marketplace',
+            marketplaceName: 'openai-curated',
+          },
+        }],
+      }],
+    };
+  };
+
+  const result = await client.listPlugins({ cwd: '/tmp/work' });
+
+  assert.deepEqual(result.featuredPluginIds, ['google-drive@openai-curated']);
+  assert.equal(result.marketplaces[0]?.displayName, 'OpenAI Curated');
+  assert.equal(result.marketplaces[0]?.plugins[0]?.displayName, 'Google Drive');
+  assert.equal(result.marketplaces[0]?.plugins[0]?.marketplaceName, 'openai-curated');
+  assert.equal(result.marketplaces[0]?.plugins[0]?.sourceRemoteMarketplaceName, 'openai-curated');
+});
+
+test('CodexAppClient reads plugin detail and lists related app and MCP status entries', async () => {
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+  });
+
+  client.request = async (method, params) => {
+    if (method === 'plugin/read') {
+      assert.equal(params.pluginName, 'google-drive');
+      assert.equal(params.remoteMarketplaceName, 'openai-curated');
+      return {
+        plugin: {
+          marketplaceName: 'openai-curated',
+          marketplacePath: '/tmp/openai-curated.json',
+          description: 'Google Drive plugin',
+          summary: {
+            id: 'google-drive@openai-curated',
+            name: 'google-drive',
+            installed: true,
+            enabled: true,
+            installPolicy: 'AVAILABLE',
+            authPolicy: 'ON_USE',
+            interface: {
+              displayName: 'Google Drive',
+              shortDescription: 'Drive workflows',
+            },
+            source: {
+              type: 'marketplace',
+              marketplaceName: 'openai-curated',
+            },
+          },
+          apps: [{
+            id: 'google-drive',
+            name: 'Google Drive',
+            needsAuth: true,
+            description: 'Drive connector',
+          }],
+          mcpServers: ['openai-docs'],
+          skills: [{
+            name: 'drive-helper',
+            path: '/tmp/skills/drive-helper/SKILL.md',
+            description: 'Help with Drive',
+            enabled: true,
+            interface: {
+              displayName: 'Drive Helper',
+            },
+          }],
+        },
+      };
+    }
+    if (method === 'app/list') {
+      return {
+        data: [{
+          id: 'google-drive',
+          name: 'Google Drive',
+          isAccessible: true,
+          isEnabled: true,
+          pluginDisplayNames: ['Google Drive'],
+          appMetadata: {
+            categories: ['productivity'],
+            developer: 'Google',
+          },
+        }],
+        nextCursor: null,
+      };
+    }
+    if (method === 'mcpServerStatus/list') {
+      return {
+        data: [{
+          name: 'openai-docs',
+          authStatus: 'bearerToken',
+          tools: {
+            search_openai_docs: {},
+            fetch_openai_doc: {},
+          },
+          resources: [{ uri: 'doc://1', name: 'doc-1' }],
+          resourceTemplates: [],
+        }],
+        nextCursor: null,
+      };
+    }
+    throw new Error(`Unexpected method: ${method}`);
+  };
+
+  const detail = await client.readPlugin({
+    pluginName: 'google-drive',
+    marketplaceName: 'openai-curated',
+  });
+  const apps = await client.listApps();
+  const mcpStatuses = await client.listMcpServerStatuses();
+
+  assert.equal(detail?.summary.displayName, 'Google Drive');
+  assert.equal(detail?.apps[0]?.id, 'google-drive');
+  assert.equal(detail?.mcpServers[0], 'openai-docs');
+  assert.equal(detail?.skills[0]?.displayName, 'Drive Helper');
+  assert.equal(apps[0]?.id, 'google-drive');
+  assert.equal(apps[0]?.isAccessible, true);
+  assert.deepEqual(apps[0]?.categories, ['productivity']);
+  assert.equal(mcpStatuses[0]?.name, 'openai-docs');
+  assert.equal(mcpStatuses[0]?.authStatus, 'bearerToken');
+  assert.equal(mcpStatuses[0]?.toolCount, 2);
+});
+
+test('CodexAppClient installs and uninstalls plugins through native app-server RPCs', async () => {
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+  });
+
+  const calls: Array<{ method: string; params: any }> = [];
+  client.request = async (method, params) => {
+    calls.push({ method, params });
+    if (method === 'plugin/install') {
+      return {
+        authPolicy: 'ON_INSTALL',
+        appsNeedingAuth: [{
+          id: 'github',
+          name: 'GitHub',
+          needsAuth: true,
+          description: 'GitHub connector',
+        }],
+      };
+    }
+    if (method === 'plugin/uninstall') {
+      return {};
+    }
+    throw new Error(`Unexpected method: ${method}`);
+  };
+
+  const installResult = await client.installPlugin({
+    pluginName: 'github',
+    marketplaceName: 'openai-curated',
+  });
+  await client.uninstallPlugin({
+    pluginId: 'github@openai-curated',
+  });
+
+  assert.equal(installResult.authPolicy, 'ON_INSTALL');
+  assert.equal(installResult.appsNeedingAuth[0]?.id, 'github');
+  assert.deepEqual(calls, [
+    {
+      method: 'plugin/install',
+      params: {
+        pluginName: 'github',
+        remoteMarketplaceName: 'openai-curated',
+      },
+    },
+    {
+      method: 'plugin/uninstall',
+      params: {
+        pluginId: 'github@openai-curated',
+      },
+    },
+  ]);
+});
+
+test('CodexAppClient writes app and MCP enabled flags via config/value/write', async () => {
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+  });
+
+  const calls: Array<{ method: string; params: any }> = [];
+  client.request = async (method, params) => {
+    calls.push({ method, params });
+    return {};
+  };
+
+  await client.setAppEnabled({
+    appId: 'google-drive',
+    enabled: false,
+  });
+  await client.setMcpServerEnabled({
+    name: 'openai-docs',
+    enabled: false,
+  });
+
+  assert.deepEqual(calls, [
+    {
+      method: 'config/value/write',
+      params: {
+        keyPath: 'apps.\"google-drive\".enabled',
+        value: false,
+        mergeStrategy: 'upsert',
+        filePath: null,
+        expectedVersion: null,
+      },
+    },
+    {
+      method: 'config/value/write',
+      params: {
+        keyPath: 'mcp_servers.\"openai-docs\".enabled',
+        value: false,
+        mergeStrategy: 'upsert',
+        filePath: null,
+        expectedVersion: null,
+      },
+    },
+  ]);
+});
+
+test('CodexAppClient starts MCP OAuth login and reloads MCP server config through native RPCs', async () => {
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+  });
+
+  const calls: Array<{ method: string; params: any }> = [];
+  client.request = async (method, params) => {
+    calls.push({ method, params });
+    if (method === 'mcpServer/oauth/login') {
+      return {
+        authorizationUrl: 'https://example.com/oauth/openai-docs',
+      };
+    }
+    if (method === 'config/mcpServer/reload') {
+      return {};
+    }
+    throw new Error(`Unexpected method: ${method}`);
+  };
+
+  const authResult = await client.startMcpServerOauthLogin({
+    name: 'openai-docs',
+  });
+  await client.reloadMcpServers();
+
+  assert.equal(authResult.authorizationUrl, 'https://example.com/oauth/openai-docs');
+  assert.deepEqual(calls, [
+    {
+      method: 'mcpServer/oauth/login',
+      params: {
+        name: 'openai-docs',
+        scopes: null,
+        timeoutSecs: null,
+      },
+    },
+    {
+      method: 'config/mcpServer/reload',
+      params: {},
+    },
+  ]);
+});
+
 test('CodexAppClient startTurn sends explicit default collaboration settings payload', async () => {
   const client = new CodexAppClient({
     codexCliBin: 'codex',
@@ -2483,6 +2767,87 @@ test('CodexAppClient returns missing only after session task_complete lands with
   assert.equal(result.outputState, 'missing');
   assert.equal(result.previewText, '');
   assert.equal(result.finalSource, 'session_task_complete_empty');
+});
+
+test('CodexAppClient surfaces exhausted subscription credits from session rate limit events', async () => {
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+  });
+  const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-session-log-credits-empty-'));
+  const sessionPath = path.join(sessionDir, 'rollout.jsonl');
+  fs.writeFileSync(sessionPath, [
+    JSON.stringify({
+      timestamp: new Date().toISOString(),
+      type: 'turn_context',
+      payload: {
+        turn_id: 'turn-1',
+      },
+    }),
+    JSON.stringify({
+      timestamp: new Date().toISOString(),
+      type: 'event_msg',
+      payload: {
+        type: 'token_count',
+        rate_limits: {
+          limit_id: 'premium',
+          credits: {
+            has_credits: false,
+            unlimited: false,
+            balance: '0',
+          },
+          plan_type: 'plus',
+          rate_limit_reached_type: null,
+        },
+      },
+    }),
+    JSON.stringify({
+      timestamp: new Date().toISOString(),
+      type: 'event_msg',
+      payload: {
+        type: 'task_complete',
+        turn_id: 'turn-1',
+        last_agent_message: null,
+      },
+    }),
+  ].join('\n') + '\n', 'utf8');
+
+  client.request = async (method) => {
+    if (method === 'turn/start') {
+      return { turn: { id: 'turn-1' } };
+    }
+    if (method === 'thread/read') {
+      return {
+        thread: {
+          id: 'thread-1',
+          name: 'Thread 1',
+          path: sessionPath,
+          turns: [{
+            id: 'turn-1',
+            status: 'completed',
+            items: [{
+              type: 'userMessage',
+              text: 'hello',
+            }],
+          }],
+        },
+      };
+    }
+    return {};
+  };
+
+  const result = await client.startTurn({
+    threadId: 'thread-1',
+    inputText: 'hello',
+    model: 'gpt-5.4',
+    effort: null,
+    collaborationMode: 'default',
+    timeoutMs: 2500,
+  });
+
+  assert.equal(result.outputText, '');
+  assert.equal(result.outputState, 'provider_error');
+  assert.equal(result.finalSource, 'session_runtime_error');
+  assert.equal(result.errorMessage, 'Codex subscription credits are exhausted (premium balance 0).');
 });
 
 test('CodexAppClient returns partial commentary instead of timing out when assistant activity exists without a final answer', async () => {

@@ -296,6 +296,123 @@ test('CodexProviderPlugin lists visible skills and forwards enable-disable write
   assert.equal(writeCalls[0]?.path, '/tmp/skills/news-digest/SKILL.md');
 });
 
+test('CodexProviderPlugin delegates plugin catalog reads to the app client', async () => {
+  const listCalls: any[] = [];
+  const readCalls: any[] = [];
+  const installCalls: any[] = [];
+  const uninstallCalls: any[] = [];
+  const appToggleCalls: any[] = [];
+  const mcpToggleCalls: any[] = [];
+  const mcpOauthCalls: any[] = [];
+  const mcpReloadCalls: any[] = [];
+  const plugin = makePlugin(() => ({
+    async start() {},
+    async listPlugins(params: any) {
+      listCalls.push(params);
+      return {
+        featuredPluginIds: ['google-drive@openai-curated'],
+        marketplaceLoadErrors: [],
+        marketplaces: [],
+      };
+    },
+    async readPlugin(params: any) {
+      readCalls.push(params);
+      return {
+        summary: {
+          id: 'google-drive@openai-curated',
+          name: 'google-drive',
+          installed: true,
+          enabled: true,
+          installPolicy: 'AVAILABLE',
+          authPolicy: 'ON_USE',
+          marketplaceName: 'openai-curated',
+          marketplacePath: null,
+        },
+        marketplaceName: 'openai-curated',
+        marketplacePath: null,
+        description: 'Drive plugin',
+        apps: [],
+        mcpServers: [],
+        skills: [],
+      };
+    },
+    async installPlugin(params: any) {
+      installCalls.push(params);
+      return {
+        authPolicy: 'ON_USE',
+        appsNeedingAuth: [],
+      };
+    },
+    async uninstallPlugin(params: any) {
+      uninstallCalls.push(params);
+    },
+    async setAppEnabled(params: any) {
+      appToggleCalls.push(params);
+    },
+    async setMcpServerEnabled(params: any) {
+      mcpToggleCalls.push(params);
+    },
+    async startMcpServerOauthLogin(params: any) {
+      mcpOauthCalls.push(params);
+      return {
+        authorizationUrl: `https://example.com/oauth/${params.name}`,
+      };
+    },
+    async reloadMcpServers() {
+      mcpReloadCalls.push(true);
+    },
+  }));
+
+  const listed = await plugin.listPlugins({
+    providerProfile: makeProfile(),
+    cwd: '/tmp/work',
+  });
+  const detail = await plugin.readPlugin({
+    providerProfile: makeProfile(),
+    pluginName: 'google-drive',
+    marketplaceName: 'openai-curated',
+  });
+  const installResult = await plugin.installPlugin({
+    providerProfile: makeProfile(),
+    pluginName: 'google-drive',
+    marketplaceName: 'openai-curated',
+  });
+  await plugin.uninstallPlugin({
+    providerProfile: makeProfile(),
+    pluginId: 'google-drive@openai-curated',
+  });
+  await plugin.setAppEnabled({
+    providerProfile: makeProfile(),
+    appId: 'google-drive',
+    enabled: false,
+  });
+  await plugin.setMcpServerEnabled({
+    providerProfile: makeProfile(),
+    name: 'openai-docs',
+    enabled: false,
+  });
+  const oauth = await plugin.startMcpServerOauthLogin({
+    providerProfile: makeProfile(),
+    name: 'openai-docs',
+  });
+  await plugin.reloadMcpServers({
+    providerProfile: makeProfile(),
+  });
+
+  assert.equal(listCalls[0]?.cwd, '/tmp/work');
+  assert.equal(listed.featuredPluginIds[0], 'google-drive@openai-curated');
+  assert.equal(readCalls[0]?.pluginName, 'google-drive');
+  assert.equal(detail?.summary.id, 'google-drive@openai-curated');
+  assert.equal(installResult.authPolicy, 'ON_USE');
+  assert.equal(installCalls[0]?.pluginName, 'google-drive');
+  assert.equal(uninstallCalls[0]?.pluginId, 'google-drive@openai-curated');
+  assert.equal(appToggleCalls[0]?.appId, 'google-drive');
+  assert.equal(mcpToggleCalls[0]?.name, 'openai-docs');
+  assert.equal(oauth.authorizationUrl, 'https://example.com/oauth/openai-docs');
+  assert.equal(mcpOauthCalls[0]?.name, 'openai-docs');
+  assert.equal(mcpReloadCalls.length, 1);
+});
+
 test('CodexProviderPlugin turns inbound attachments into text prompt plus localImage inputs', async () => {
   let seenInput = null;
   let seenInputText = null;
@@ -504,6 +621,121 @@ test('CodexProviderPlugin auto-injects artifact send-back instructions for file 
   assert.match(String(seenDeveloperInstructions ?? ''), /codexbridge-artifacts/);
   assert.match(String(seenDeveloperInstructions ?? ''), /Choose a clear, semantic final filename yourself/i);
   assert.match(String(seenDeveloperInstructions ?? ''), /your-chosen-file\.docx/);
+});
+
+test('CodexProviderPlugin injects explicit plugin targeting instructions when the bridge marks a preferred plugin', async () => {
+  let seenDeveloperInstructions = null;
+  const plugin = makePlugin(() => ({
+    async start() {},
+    async startThread() {
+      return { threadId: 'thread-1', cwd: null, title: null };
+    },
+    async readThread(threadId: string) {
+      return { threadId, title: null, cwd: null };
+    },
+    async listThreads() {
+      return { items: [], nextCursor: null };
+    },
+    async startTurn(params: any) {
+      seenDeveloperInstructions = params.developerInstructions;
+      return {
+        outputText: 'done',
+        threadId: params.threadId,
+        title: null,
+      };
+    },
+    async interruptTurn() {},
+    async listModels() {
+      return [{
+        id: 'gpt-5.4',
+        model: 'gpt-5.4',
+        displayName: 'GPT-5.4',
+        description: '',
+        isDefault: true,
+        supportedReasoningEfforts: ['medium'],
+        defaultReasoningEffort: 'medium',
+      }];
+    },
+  }));
+
+  await plugin.startTurn({
+    providerProfile: makeProfile(),
+    bridgeSession: makeBridgeSession(),
+    sessionSettings: makeSessionSettings(),
+    event: {
+      platform: 'weixin',
+      externalScopeId: 'wxid_1',
+      text: '查今天未读邮件',
+      metadata: {
+        codexbridge: {
+          explicitPluginTarget: {
+            pluginId: 'gmail@openai-curated',
+            pluginName: 'gmail',
+            pluginDisplayName: 'Gmail',
+            alias: 'gm',
+            source: 'auto',
+            syntax: 'slash_use',
+          },
+        },
+      },
+    },
+    inputText: '查今天未读邮件',
+  });
+
+  assert.match(String(seenDeveloperInstructions ?? ''), /CodexBridge plugin targeting hints/);
+  assert.match(String(seenDeveloperInstructions ?? ''), /prefer the following plugins/i);
+  assert.match(String(seenDeveloperInstructions ?? ''), /1\. Gmail/);
+  assert.match(String(seenDeveloperInstructions ?? ''), /gmail@openai-curated/);
+  assert.match(String(seenDeveloperInstructions ?? ''), /gm/);
+  assert.match(String(seenDeveloperInstructions ?? ''), /slash_use/);
+});
+
+test('CodexProviderPlugin preserves provider_error details from the app client', async () => {
+  const plugin = makePlugin(() => ({
+    async start() {},
+    async startThread() {
+      return { threadId: 'thread-1', cwd: '/tmp/work', title: null };
+    },
+    async startTurn(params: any) {
+      return {
+        outputText: '',
+        outputState: 'provider_error',
+        errorMessage: 'Codex subscription credits are exhausted',
+        status: 'failed',
+        threadId: params.threadId,
+        turnId: 'turn-1',
+        title: null,
+      };
+    },
+    async listModels() {
+      return [{
+        id: 'gpt-5.4',
+        model: 'gpt-5.4',
+        displayName: 'GPT-5.4',
+        description: '',
+        isDefault: true,
+        supportedReasoningEfforts: ['medium'],
+        defaultReasoningEffort: 'medium',
+      }];
+    },
+  }));
+
+  const result = await plugin.startTurn({
+    providerProfile: makeProfile({ defaultModel: 'gpt-5.4' }),
+    bridgeSession: makeBridgeSession({ codexThreadId: 'thread-1' }),
+    sessionSettings: makeSessionSettings(),
+    event: {
+      platform: 'weixin',
+      externalScopeId: 'wxid_1',
+      text: 'hello',
+    },
+    inputText: 'hello',
+  });
+
+  assert.equal(result.outputState, 'provider_error');
+  assert.equal(result.errorMessage, 'Codex subscription credits are exhausted');
+  assert.equal(result.status, 'failed');
+  assert.equal(result.turnId, 'turn-1');
 });
 
 test('CodexProviderPlugin resolves default model metadata from listModels when profile defaults are empty', async () => {

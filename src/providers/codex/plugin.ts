@@ -5,8 +5,14 @@ import { buildTurnArtifactDeveloperInstructions } from '../../core/turn_artifact
 import type { BridgeSession, SessionSettings, TurnArtifactContext } from '../../types/core.js';
 import type { InboundAttachment, InboundTextEvent } from '../../types/platform.js';
 import type {
+  ProviderAppInfo,
   ProviderApprovalRequest,
+  ProviderMcpServerStatus,
+  ProviderMcpOauthLoginResult,
   ProviderProfile,
+  ProviderPluginDetail,
+  ProviderPluginInstallResult,
+  ProviderPluginsListResult,
   ProviderSkillsListResult,
   ProviderThreadListResult,
   ProviderThreadStartResult,
@@ -194,8 +200,10 @@ export class CodexProviderPlugin {
       outputArtifacts: normalizeOutputArtifacts(result),
       outputMedia: normalizeOutputMedia(result),
       outputState: result.outputState ?? 'complete',
+      errorMessage: result.errorMessage ?? null,
       previewText: result.previewText ?? '',
       finalSource: result.finalSource ?? 'thread_items',
+      status: result.status ?? null,
       turnId: result.turnId ?? null,
       threadId: result.threadId,
       title: result.title ?? bridgeSession.title,
@@ -329,6 +337,144 @@ export class CodexProviderPlugin {
       cwd,
       forceReload,
     });
+  }
+
+  async listPlugins({
+    providerProfile,
+    cwd = null,
+  }: {
+    providerProfile: ProviderProfile;
+    cwd?: string | null;
+  }): Promise<ProviderPluginsListResult> {
+    const client = await this.ensureClient(providerProfile);
+    return client.listPlugins({ cwd });
+  }
+
+  async readPlugin({
+    providerProfile,
+    pluginName,
+    marketplaceName = null,
+    marketplacePath = null,
+  }: {
+    providerProfile: ProviderProfile;
+    pluginName: string;
+    marketplaceName?: string | null;
+    marketplacePath?: string | null;
+  }): Promise<ProviderPluginDetail | null> {
+    const client = await this.ensureClient(providerProfile);
+    return client.readPlugin({
+      pluginName,
+      marketplaceName,
+      marketplacePath,
+    });
+  }
+
+  async installPlugin({
+    providerProfile,
+    pluginName,
+    marketplaceName = null,
+    marketplacePath = null,
+  }: {
+    providerProfile: ProviderProfile;
+    pluginName: string;
+    marketplaceName?: string | null;
+    marketplacePath?: string | null;
+  }): Promise<ProviderPluginInstallResult> {
+    const client = await this.ensureClient(providerProfile);
+    return client.installPlugin({
+      pluginName,
+      marketplaceName,
+      marketplacePath,
+    });
+  }
+
+  async uninstallPlugin({
+    providerProfile,
+    pluginId,
+  }: {
+    providerProfile: ProviderProfile;
+    pluginId: string;
+  }): Promise<void> {
+    const client = await this.ensureClient(providerProfile);
+    await client.uninstallPlugin({ pluginId });
+  }
+
+  async listApps({
+    providerProfile,
+  }: {
+    providerProfile: ProviderProfile;
+  }): Promise<ProviderAppInfo[]> {
+    const client = await this.ensureClient(providerProfile);
+    return client.listApps();
+  }
+
+  async listMcpServerStatuses({
+    providerProfile,
+  }: {
+    providerProfile: ProviderProfile;
+  }): Promise<ProviderMcpServerStatus[]> {
+    const client = await this.ensureClient(providerProfile);
+    return client.listMcpServerStatuses();
+  }
+
+  async setAppEnabled({
+    providerProfile,
+    appId,
+    enabled,
+  }: {
+    providerProfile: ProviderProfile;
+    appId: string;
+    enabled: boolean;
+  }): Promise<void> {
+    const client = await this.ensureClient(providerProfile);
+    await client.setAppEnabled({
+      appId,
+      enabled,
+    });
+  }
+
+  async setMcpServerEnabled({
+    providerProfile,
+    name,
+    enabled,
+  }: {
+    providerProfile: ProviderProfile;
+    name: string;
+    enabled: boolean;
+  }): Promise<void> {
+    const client = await this.ensureClient(providerProfile);
+    await client.setMcpServerEnabled({
+      name,
+      enabled,
+    });
+  }
+
+  async startMcpServerOauthLogin({
+    providerProfile,
+    name,
+    scopes = null,
+    timeoutSecs = null,
+  }: {
+    providerProfile: ProviderProfile;
+    name: string;
+    scopes?: string[] | null;
+    timeoutSecs?: number | null;
+  }): Promise<ProviderMcpOauthLoginResult> {
+    const client = await this.ensureClient(providerProfile);
+    return client.startMcpServerOauthLogin({
+      name,
+      scopes,
+      timeoutSecs,
+    });
+  }
+
+  async reloadMcpServers({
+    providerProfile,
+  }: {
+    providerProfile: ProviderProfile;
+  }): Promise<void> {
+    const client = await this.ensureClient(providerProfile);
+    await client.reloadMcpServers();
   }
 
   async setSkillEnabled({
@@ -499,6 +645,10 @@ function buildDeveloperInstructions(event: InboundTextEvent): string {
   if (retryInstructions) {
     parts.push(retryInstructions);
   }
+  const explicitPluginInstructions = buildExplicitPluginDeveloperInstructions(resolveExplicitPluginTargets(event));
+  if (explicitPluginInstructions) {
+    parts.push(explicitPluginInstructions);
+  }
   return parts.filter(Boolean).join('\n\n');
 }
 
@@ -540,6 +690,26 @@ function resolveRetryContext(event: InboundTextEvent): Record<string, unknown> |
     return null;
   }
   return context as Record<string, unknown>;
+}
+
+function resolveExplicitPluginTargets(event: InboundTextEvent): Record<string, unknown>[] {
+  const metadata = event?.metadata;
+  if (!metadata || typeof metadata !== 'object') {
+    return [];
+  }
+  const codexbridge = (metadata as Record<string, unknown>).codexbridge;
+  if (!codexbridge || typeof codexbridge !== 'object') {
+    return [];
+  }
+  const targets = (codexbridge as Record<string, unknown>).explicitPluginTargets;
+  if (Array.isArray(targets)) {
+    return targets.filter((entry) => entry && typeof entry === 'object') as Record<string, unknown>[];
+  }
+  const target = (codexbridge as Record<string, unknown>).explicitPluginTarget;
+  if (!target || typeof target !== 'object') {
+    return [];
+  }
+  return [target as Record<string, unknown>];
 }
 
 function buildRetryDeveloperInstructions(retryContext: Record<string, unknown> | null): string {
@@ -585,6 +755,55 @@ function buildRetryDeveloperInstructions(retryContext: Record<string, unknown> |
     lines.push(`- Interrupt errors observed: ${interruptErrors.join(' | ')}`);
   }
   lines.push('- Continue from the existing thread context when it helps, but answer the user request fully from scratch if needed.');
+  return lines.join('\n');
+}
+
+function buildExplicitPluginDeveloperInstructions(targets: Record<string, unknown>[]): string {
+  if (!Array.isArray(targets) || targets.length === 0) {
+    return '';
+  }
+  const normalizedTargets = targets
+    .map((target) => {
+      const pluginId = typeof target.pluginId === 'string' ? target.pluginId.trim() : '';
+      const pluginName = typeof target.pluginName === 'string' ? target.pluginName.trim() : '';
+      const pluginDisplayName = typeof target.pluginDisplayName === 'string' ? target.pluginDisplayName.trim() : '';
+      const alias = typeof target.alias === 'string' ? target.alias.trim() : '';
+      const syntax = typeof target.syntax === 'string' ? target.syntax.trim() : '';
+      const pluginLabel = pluginDisplayName || pluginName || pluginId;
+      if (!pluginLabel) {
+        return null;
+      }
+      return {
+        pluginId,
+        pluginLabel,
+        alias,
+        syntax,
+      };
+    })
+    .filter(Boolean) as Array<{
+      pluginId: string;
+      pluginLabel: string;
+      alias: string;
+      syntax: string;
+    }>;
+  if (normalizedTargets.length === 0) {
+    return '';
+  }
+  const lines = [
+    'CodexBridge plugin targeting hints:',
+    '- The user explicitly requested this turn to prefer the following plugins, in this order:',
+  ];
+  normalizedTargets.forEach((target, index) => {
+    const details = [
+      target.pluginId ? `id=${target.pluginId}` : '',
+      target.alias ? `alias=${target.alias}` : '',
+      target.syntax ? `syntax=${target.syntax}` : '',
+    ].filter(Boolean).join(', ');
+    lines.push(`${index + 1}. ${target.pluginLabel}${details ? ` (${details})` : ''}`);
+  });
+  lines.push('- Use one or more of these plugins when they are relevant to the requested workflow.');
+  lines.push('- If the request describes multiple steps, map each step to the most relevant plugin instead of forcing everything through one plugin.');
+  lines.push('- If auth, installation, or access is missing, explain that constraint briefly and continue with the best fallback only if appropriate.');
   return lines.join('\n');
 }
 

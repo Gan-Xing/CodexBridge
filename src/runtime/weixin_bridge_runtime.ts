@@ -712,7 +712,7 @@ export class WeixinBridgeRuntime {
         }
       }
       const failureMessage = errorMessage
-        ? this.i18n.t('runtime.error.codex', { error: errorMessage })
+        ? this.formatProviderFailureMessage(errorMessage)
         : outputState === 'interrupted'
           ? this.i18n.t('runtime.error.interrupted')
           : outputState === 'timeout'
@@ -829,6 +829,22 @@ export class WeixinBridgeRuntime {
       finalText,
       sentContent: lastAttemptedContent,
     };
+  }
+
+  formatProviderFailureMessage(errorMessage: string): string {
+    const normalized = String(errorMessage ?? '').trim();
+    const detail = normalized.replace(/[。.!！]+$/u, '');
+    if (/subscription credits are exhausted/i.test(normalized)) {
+      return this.i18n.t('runtime.error.codexCreditsExhausted', {
+        detail,
+      });
+    }
+    if (/usage limit reached/i.test(normalized)) {
+      return this.i18n.t('runtime.error.codexUsageLimitReached', {
+        detail,
+      });
+    }
+    return this.i18n.t('runtime.error.codex', { error: normalized });
   }
 
   async safeSendTyping(externalScopeId: string, status: 'start' | 'stop'): Promise<void> {

@@ -31,6 +31,7 @@ import type {
   AutomationMode,
   AutomationSchedule,
   PlatformScopeRef,
+  PluginAlias,
   SessionSettings,
   TurnArtifactDeliveryState,
   UploadBatchItem,
@@ -38,8 +39,15 @@ import type {
 } from '../types/core.js';
 import type { InboundAttachment, InboundTextEvent } from '../types/platform.js';
 import type {
+  ProviderAppInfo,
   OutputArtifact,
+  ProviderMcpServerStatus,
   ProviderApprovalRequest,
+  ProviderPluginDetail,
+  ProviderPluginInstallResult,
+  ProviderPluginsListResult,
+  ProviderProfile,
+  ProviderPluginSummary,
   ProviderReviewTarget,
   ProviderSkillInfo,
   ProviderSkillsListResult,
@@ -47,6 +55,7 @@ import type {
 } from '../types/provider.js';
 
 const THREAD_PAGE_SIZE = 5;
+const PLUGIN_CATEGORY_PAGE_SIZE = 20;
 const THREAD_PREVIEW_LIMIT = 72;
 const THREAD_HISTORY_TURN_LIMIT = 3;
 const HELP_FLAG_SET = new Set(['-h', '--help', '-help', '-helps']);
@@ -132,6 +141,55 @@ type SkillBrowserState = {
   updatedAt: number;
 };
 
+type PluginCategoryBucket = {
+  key: string;
+  label: string;
+  description: string;
+  items: ProviderPluginDetail[];
+};
+
+type PluginBrowserState = {
+  providerProfileId: string;
+  cwd: string | null;
+  mode: 'featured' | 'category';
+  categoryKey: string | null;
+  items: ProviderPluginSummary[];
+  updatedAt: number;
+};
+
+type PendingPluginAliasDraft = {
+  action: 'set' | 'clear';
+  createdAt: number;
+  platform: string;
+  externalScopeId: string;
+  providerProfileId: string;
+  plugin: ProviderPluginSummary;
+  alias: string | null;
+};
+
+type ResolvedPluginAlias = {
+  pluginId: string;
+  alias: string;
+  source: 'user' | 'auto';
+  pluginName: string;
+  displayName: string | null;
+};
+
+type ExplicitPluginTargetHint = {
+  pluginId: string;
+  pluginName: string;
+  pluginDisplayName: string | null;
+  alias: string | null;
+  source: 'user' | 'auto' | 'resolved';
+  syntax: 'slash_use' | 'at_alias' | 'zh_alias' | 'inline_at_alias';
+};
+
+type ParsedConversationPluginInvocation = {
+  token: string;
+  taskText: string;
+  syntax: 'at_alias' | 'zh_alias';
+};
+
 type CodexLoginAccountSummary = {
   id: string;
   email?: string | null;
@@ -210,6 +268,7 @@ export class BridgeCoordinator {
   activeTurns: any;
   providerProfiles: any;
   providerRegistry: any;
+  pluginAliases: any;
   defaultProviderProfileId: any;
   defaultCwd: any;
   restartBridge: any;
@@ -220,6 +279,8 @@ export class BridgeCoordinator {
   now: any;
   threadBrowserStates: Map<any, any>;
   skillBrowserStates: Map<any, SkillBrowserState>;
+  pluginBrowserStates: Map<any, PluginBrowserState>;
+  pendingPluginAliasDraftsByScope: Map<string, PendingPluginAliasDraft>;
   localeOverridesByScope: Map<string, SupportedLocale>;
   pendingArtifactClarificationsByScope: Map<string, { originalText: string; askedAt: number }>;
   pendingInstructionsEditsByScope: Map<string, { startedAt: number }>;
@@ -233,6 +294,7 @@ export class BridgeCoordinator {
     activeTurns = null,
     providerProfiles,
     providerRegistry,
+    pluginAliases = null,
     defaultProviderProfileId,
     defaultCwd = null,
     restartBridge = null,
@@ -247,6 +309,7 @@ export class BridgeCoordinator {
     this.activeTurns = activeTurns;
     this.providerProfiles = providerProfiles;
     this.providerRegistry = providerRegistry;
+    this.pluginAliases = pluginAliases;
     this.defaultProviderProfileId = defaultProviderProfileId;
     this.defaultCwd = normalizeCwd(defaultCwd);
     this.restartBridge = restartBridge;
@@ -256,6 +319,8 @@ export class BridgeCoordinator {
     this.now = now;
     this.threadBrowserStates = new Map();
     this.skillBrowserStates = new Map();
+    this.pluginBrowserStates = new Map();
+    this.pendingPluginAliasDraftsByScope = new Map();
     this.localeOverridesByScope = new Map();
     this.pendingArtifactClarificationsByScope = new Map();
     this.pendingInstructionsEditsByScope = new Map();
@@ -331,13 +396,15 @@ export class BridgeCoordinator {
 
   async handleConversationTurn(event, options = {}) {
     const scopeRef = toScopeRef(event);
+    const providerProfile = this.resolveScopeProviderProfile(scopeRef);
+    const targetedEvent = await this.rewriteConversationEventForExplicitPluginTarget(event, providerProfile);
     debugCoordinator('conversation_turn_begin', {
       platform: scopeRef.platform,
       scopeId: scopeRef.externalScopeId,
-      textPreview: truncateCoordinatorText(event?.text, 160),
-      attachmentCount: Array.isArray(event?.attachments) ? event.attachments.length : 0,
+      textPreview: truncateCoordinatorText(targetedEvent?.text, 160),
+      attachmentCount: Array.isArray(targetedEvent?.attachments) ? targetedEvent.attachments.length : 0,
     });
-    const clarification = this.resolveArtifactClarification(scopeRef, event);
+    const clarification = this.resolveArtifactClarification(scopeRef, targetedEvent);
     if (clarification.response) {
       debugCoordinator('conversation_turn_clarification_requested', {
         platform: scopeRef.platform,
@@ -345,7 +412,7 @@ export class BridgeCoordinator {
       });
       return clarification.response;
     }
-    const effectiveEvent = clarification.event ?? event;
+    const effectiveEvent = clarification.event ?? targetedEvent;
     const currentSession = this.resolveSessionForEvent(scopeRef, effectiveEvent);
     const uploadState = currentSession ? this.getUploadsStateForSession(currentSession.id) : null;
     if (uploadState?.active) {
@@ -420,6 +487,7 @@ export class BridgeCoordinator {
           outputState: result.outputState ?? 'complete',
           previewText: result.previewText ?? '',
           finalSource: result.finalSource ?? 'thread_items',
+          errorMessage: result.errorMessage ?? '',
         },
       };
       return response;
@@ -510,6 +578,10 @@ export class BridgeCoordinator {
         return this.handleReviewCommand(event, command.args, options);
       case 'skills':
         return this.handleSkillsCommand(event, command.args);
+      case 'plugins':
+        return this.handlePluginsCommand(event, command.args);
+      case 'use':
+        return this.handleUseCommand(event, command.args, options);
       case 'automation':
         return this.handleAutomationCommand(event, command.args);
       case 'weibo':
@@ -1243,6 +1315,7 @@ export class BridgeCoordinator {
           outputState: started.result.outputState ?? 'complete',
           previewText: started.result.previewText ?? '',
           finalSource: started.result.finalSource ?? 'thread_items',
+          errorMessage: started.result.errorMessage ?? '',
         },
       };
       return response;
@@ -2792,6 +2865,725 @@ export class BridgeCoordinator {
     ], this.buildScopedSessionMeta(event));
   }
 
+  async handleUseCommand(event, args = [], options = {}) {
+    const scopeRef = toScopeRef(event);
+    const normalizedArgs = Array.isArray(args) ? args.map((value) => String(value ?? '').trim()).filter(Boolean) : [];
+    if (normalizedArgs.length < 2) {
+      return this.handleHelpsCommand(event, ['use']);
+    }
+    const providerProfile = this.resolveScopeProviderProfile(scopeRef);
+    const catalog = await this.fetchPluginsForEvent(event, providerProfile);
+    const aliases = this.resolveDisplayPluginAliases(event, providerProfile, catalog.allPlugins);
+    const targets: ExplicitPluginTargetHint[] = [];
+    let splitIndex = 0;
+    for (; splitIndex < normalizedArgs.length; splitIndex += 1) {
+      const hint = resolvePluginTargetHintFromCatalog({
+        token: normalizedArgs[splitIndex],
+        allPlugins: catalog.allPlugins,
+        aliases,
+        syntax: 'slash_use',
+        aliasOnly: false,
+      });
+      if (!hint) {
+        break;
+      }
+      pushUniqueExplicitPluginTarget(targets, hint);
+    }
+    const taskText = normalizedArgs.slice(splitIndex).join(' ').trim();
+    if (targets.length === 0) {
+      return messageResponse([
+        this.t('coordinator.plugins.notFound', { value: String(normalizedArgs[0] ?? '').trim() || '?' }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    if (!taskText) {
+      return this.handleHelpsCommand(event, ['use']);
+    }
+    const targetedEvent = withExplicitPluginTargetHints({
+      ...event,
+      text: taskText,
+    }, targets);
+    return this.handleConversationTurn(targetedEvent, options);
+  }
+
+  async handlePluginsCommand(event, args = []) {
+    const scopeRef = toScopeRef(event);
+    const normalizedArgs = Array.isArray(args) ? args.map((value) => String(value ?? '').trim()).filter(Boolean) : [];
+    const session = this.resolveSessionForEvent(scopeRef, event);
+    const providerProfile = session
+      ? this.requireProviderProfile(session.providerProfileId)
+      : this.resolveScopeProviderProfile(scopeRef);
+    try {
+      const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+      if (typeof providerPlugin.listPlugins !== 'function' || typeof providerPlugin.readPlugin !== 'function') {
+        return messageResponse([
+          this.t('coordinator.plugins.unsupported'),
+        ], session ? buildSessionMeta(session) : this.buildScopedSessionMeta(event));
+      }
+
+      const subcommand = String(normalizedArgs[0] ?? '').trim().toLowerCase();
+      if (!subcommand || subcommand === 'default' || subcommand === 'featured') {
+        return await this.handlePluginsFeaturedCommand(event, providerProfile);
+      }
+      if (subcommand === 'reload') {
+        return await this.handlePluginsReloadCommand(event, providerProfile);
+      }
+      if (subcommand === 'alias' || subcommand === 'aliases') {
+        return await this.handlePluginsAliasCommand(event, providerProfile, normalizedArgs.slice(1));
+      }
+      if (subcommand === 'list') {
+        const categoryToken = String(normalizedArgs[1] ?? '').trim();
+        const pageToken = String(normalizedArgs[2] ?? '').trim();
+        return categoryToken
+          ? await this.handlePluginsCategoryItemsCommand(event, providerProfile, categoryToken, pageToken)
+          : await this.handlePluginsCategorySummaryCommand(event, providerProfile);
+      }
+      if (subcommand === 'show') {
+        return await this.handlePluginsShowCommand(event, providerProfile, normalizedArgs.slice(1).join(' '));
+      }
+      if (subcommand === 'add' || subcommand === 'install') {
+        return await this.handlePluginsInstallCommand(event, providerProfile, normalizedArgs.slice(1).join(' '));
+      }
+      if (subcommand === 'del' || subcommand === 'uninstall' || subcommand === 'remove' || subcommand === 'rm') {
+        return await this.handlePluginsUninstallCommand(event, providerProfile, normalizedArgs.slice(1).join(' '));
+      }
+      if (subcommand === 'on') {
+        return await this.handlePluginsSetEnabledCommand(event, providerProfile, normalizedArgs.slice(1).join(' '), true);
+      }
+      if (subcommand === 'off') {
+        return await this.handlePluginsSetEnabledCommand(event, providerProfile, normalizedArgs.slice(1).join(' '), false);
+      }
+      if (subcommand === 'auth') {
+        return await this.handlePluginsAuthCommand(event, providerProfile, normalizedArgs.slice(1).join(' '));
+      }
+      return await this.handleHelpsCommand(event, ['plugins']);
+    } catch (error) {
+      return messageResponse([
+        this.t('coordinator.plugins.failed', { error: formatUserError(error) }),
+      ], session ? buildSessionMeta(session) : this.buildScopedSessionMeta(event));
+    }
+  }
+
+  async handlePluginsAliasCommand(event, providerProfile, args = []) {
+    if (!this.pluginAliases) {
+      return messageResponse([
+        this.t('coordinator.plugins.aliasUnsupported'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const normalizedArgs = Array.isArray(args) ? args.map((value) => String(value ?? '').trim()).filter(Boolean) : [];
+    const subcommand = String(normalizedArgs[0] ?? '').trim().toLowerCase();
+    if (!subcommand) {
+      const aliases = this.listPluginAliases(event, providerProfile);
+      return messageResponse(
+        renderPluginAliasListLines({
+          i18n: this.currentI18n,
+          aliases,
+        }),
+        this.buildScopedSessionMeta(event),
+      );
+    }
+    if (subcommand === 'confirm') {
+      return await this.handlePluginsAliasConfirmCommand(event, providerProfile);
+    }
+    if (subcommand === 'clear' || subcommand === 'del' || subcommand === 'rm') {
+      const token = normalizedArgs.slice(1).join(' ');
+      const resolved = await this.resolvePluginSelection(event, providerProfile, token);
+      if (!resolved) {
+        return messageResponse([
+          this.t('coordinator.plugins.notFound', { value: token || '?' }),
+        ], this.buildScopedSessionMeta(event));
+      }
+      const draft: PendingPluginAliasDraft = {
+        action: 'clear',
+        createdAt: this.now(),
+        platform: event.platform,
+        externalScopeId: event.externalScopeId,
+        providerProfileId: providerProfile.id,
+        plugin: resolved.plugin,
+        alias: null,
+      };
+      this.pendingPluginAliasDraftsByScope.set(formatPlatformScopeKey(event.platform, event.externalScopeId), draft);
+      return messageResponse([
+        this.t('coordinator.plugins.aliasClearPending', {
+          name: getPluginDisplayName(resolved.plugin),
+        }),
+        this.t('coordinator.plugins.aliasConfirmHint'),
+      ], this.buildScopedSessionMeta(event));
+    }
+
+    if (normalizedArgs.length < 2) {
+      return messageResponse([
+        this.t('coordinator.plugins.aliasUsage'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const alias = normalizedArgs.at(-1) ?? '';
+    const token = normalizedArgs.slice(0, -1).join(' ');
+    const resolved = await this.resolvePluginSelection(event, providerProfile, token);
+    if (!resolved) {
+      return messageResponse([
+        this.t('coordinator.plugins.notFound', { value: token || '?' }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const validation = validatePluginAliasChange({
+      alias,
+      pluginId: resolved.plugin.id,
+      existingAliases: this.listPluginAliases(event, providerProfile),
+      i18n: this.currentI18n,
+    });
+    if (validation.ok === false) {
+      return messageResponse([
+        validation.message,
+      ], this.buildScopedSessionMeta(event));
+    }
+    const draft: PendingPluginAliasDraft = {
+      action: 'set',
+      createdAt: this.now(),
+      platform: event.platform,
+      externalScopeId: event.externalScopeId,
+      providerProfileId: providerProfile.id,
+      plugin: resolved.plugin,
+      alias: validation.alias,
+    };
+    this.pendingPluginAliasDraftsByScope.set(formatPlatformScopeKey(event.platform, event.externalScopeId), draft);
+    return messageResponse([
+      this.t('coordinator.plugins.aliasSetPending', {
+        alias: validation.alias,
+        name: getPluginDisplayName(resolved.plugin),
+      }),
+      this.t('coordinator.plugins.aliasConfirmHint'),
+    ], this.buildScopedSessionMeta(event));
+  }
+
+  async handlePluginsAliasConfirmCommand(event, providerProfile) {
+    const scopeKey = formatPlatformScopeKey(event.platform, event.externalScopeId);
+    const draft = this.pendingPluginAliasDraftsByScope.get(scopeKey) ?? null;
+    if (!draft || draft.providerProfileId !== providerProfile.id) {
+      return messageResponse([
+        this.t('coordinator.plugins.aliasNoPending'),
+      ], this.buildScopedSessionMeta(event));
+    }
+
+    const result = await this.fetchPluginsForEvent(event, providerProfile);
+    const plugin = findMatchingPluginSummary(result.allPlugins, draft.plugin);
+    if (!plugin) {
+      return messageResponse([
+        this.t('coordinator.plugins.notFound', { value: draft.plugin.name }),
+      ], this.buildScopedSessionMeta(event));
+    }
+
+    if (draft.action === 'clear') {
+      const existingAliases = this.listPluginAliases(event, providerProfile);
+      for (const existing of existingAliases.filter((entry) => entry.pluginId === plugin.id)) {
+        this.pluginAliases.delete(event.platform, event.externalScopeId, providerProfile.id, existing.alias);
+      }
+      this.pendingPluginAliasDraftsByScope.delete(scopeKey);
+      return messageResponse([
+        this.t('coordinator.plugins.aliasCleared', { name: getPluginDisplayName(plugin) }),
+      ], this.buildScopedSessionMeta(event));
+    }
+
+    const validation = validatePluginAliasChange({
+      alias: draft.alias,
+      pluginId: plugin.id,
+      existingAliases: this.listPluginAliases(event, providerProfile),
+      i18n: this.currentI18n,
+    });
+    if (validation.ok === false) {
+      return messageResponse([
+        validation.message,
+      ], this.buildScopedSessionMeta(event));
+    }
+
+    for (const existing of this.listPluginAliases(event, providerProfile).filter((entry) => entry.pluginId === plugin.id)) {
+      this.pluginAliases.delete(event.platform, event.externalScopeId, providerProfile.id, existing.alias);
+    }
+    this.pluginAliases.save(buildPluginAliasRecord({
+      event,
+      providerProfileId: providerProfile.id,
+      plugin,
+      alias: validation.alias,
+      updatedAt: this.now(),
+    }));
+    this.pendingPluginAliasDraftsByScope.delete(scopeKey);
+    await this.refreshPluginBrowserState(event, providerProfile);
+    return messageResponse([
+      this.t('coordinator.plugins.aliasSet', {
+        alias: validation.alias,
+        name: getPluginDisplayName(plugin),
+      }),
+    ], this.buildScopedSessionMeta(event));
+  }
+
+  async handlePluginsFeaturedCommand(event, providerProfile) {
+    const result = await this.fetchPluginsForEvent(event, providerProfile);
+    const featured = selectFeaturedPlugins(result.catalog);
+    const aliases = this.resolveDisplayPluginAliases(event, providerProfile, result.allPlugins);
+    this.pluginBrowserStates.set(formatPlatformScopeKey(event.platform, event.externalScopeId), {
+      providerProfileId: providerProfile.id,
+      cwd: result.cwd,
+      mode: 'featured',
+      categoryKey: null,
+      items: featured,
+      updatedAt: this.now(),
+    });
+    return messageResponse(
+      renderPluginFeaturedLines({
+        i18n: this.currentI18n,
+        cwd: result.cwd,
+        items: featured,
+        aliases,
+        totalCount: result.allPlugins.length,
+        hasExplicitFeatured: result.catalog.featuredPluginIds.length > 0,
+      }),
+      this.buildScopedSessionMeta(event),
+    );
+  }
+
+  async handlePluginsReloadCommand(event, providerProfile) {
+    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+    let reloadError = null;
+    if (typeof providerPlugin.reloadMcpServers === 'function') {
+      try {
+        await providerPlugin.reloadMcpServers({ providerProfile });
+      } catch (error) {
+        reloadError = formatUserError(error);
+      }
+    }
+    const result = await this.fetchPluginsForEvent(event, providerProfile);
+    const featured = selectFeaturedPlugins(result.catalog);
+    const aliases = this.resolveDisplayPluginAliases(event, providerProfile, result.allPlugins);
+    this.pluginBrowserStates.set(formatPlatformScopeKey(event.platform, event.externalScopeId), {
+      providerProfileId: providerProfile.id,
+      cwd: result.cwd,
+      mode: 'featured',
+      categoryKey: null,
+      items: featured,
+      updatedAt: this.now(),
+    });
+    const lines = [
+      reloadError
+        ? this.t('coordinator.plugins.reloadPartial', { error: reloadError })
+        : this.t('coordinator.plugins.reloadSuccess'),
+      ...renderPluginFeaturedLines({
+        i18n: this.currentI18n,
+        cwd: result.cwd,
+        items: featured,
+        aliases,
+        totalCount: result.allPlugins.length,
+        hasExplicitFeatured: result.catalog.featuredPluginIds.length > 0,
+      }),
+    ];
+    return messageResponse(lines, this.buildScopedSessionMeta(event));
+  }
+
+  async handlePluginsCategorySummaryCommand(event, providerProfile) {
+    const result = await this.fetchPluginsForEvent(event, providerProfile);
+    const details = await this.readPluginDetailsForSummaries(providerProfile, result.allPlugins);
+    const buckets = buildPluginCategoryBuckets(details, this.currentI18n);
+    return messageResponse(
+      renderPluginCategorySummaryLines({
+        i18n: this.currentI18n,
+        cwd: result.cwd,
+        buckets,
+      }),
+      this.buildScopedSessionMeta(event),
+    );
+  }
+
+  async handlePluginsCategoryItemsCommand(event, providerProfile, token, pageToken = '') {
+    const result = await this.fetchPluginsForEvent(event, providerProfile);
+    const details = await this.readPluginDetailsForSummaries(providerProfile, result.allPlugins);
+    const aliases = this.resolveDisplayPluginAliases(event, providerProfile, result.allPlugins);
+    const buckets = buildPluginCategoryBuckets(details, this.currentI18n);
+    const resolved = resolvePluginCategorySelection(token, buckets);
+    if (!resolved) {
+      return messageResponse([
+        this.t('coordinator.plugins.categoryNotFound', { value: String(token ?? '').trim() || '?' }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const requestedPage = Number.parseInt(String(pageToken ?? '').trim(), 10);
+    const pageCount = Math.max(1, Math.ceil(resolved.bucket.items.length / PLUGIN_CATEGORY_PAGE_SIZE));
+    const pageNumber = Number.isInteger(requestedPage) && requestedPage >= 1
+      ? Math.min(requestedPage, pageCount)
+      : 1;
+    const offset = (pageNumber - 1) * PLUGIN_CATEGORY_PAGE_SIZE;
+    const pageItems = resolved.bucket.items.slice(offset, offset + PLUGIN_CATEGORY_PAGE_SIZE);
+    this.pluginBrowserStates.set(formatPlatformScopeKey(event.platform, event.externalScopeId), {
+      providerProfileId: providerProfile.id,
+      cwd: result.cwd,
+      mode: 'category',
+      categoryKey: resolved.bucket.key,
+      items: pageItems.map((detail) => detail.summary),
+      updatedAt: this.now(),
+    });
+    return messageResponse(
+      renderPluginCategoryItemsLines({
+        i18n: this.currentI18n,
+        cwd: result.cwd,
+        categoryIndex: resolved.index,
+        bucket: resolved.bucket,
+        pageItems,
+        aliases,
+        pageNumber,
+        pageCount,
+      }),
+      this.buildScopedSessionMeta(event),
+    );
+  }
+
+  async handlePluginsShowCommand(event, providerProfile, token) {
+    const resolved = await this.resolvePluginSelection(event, providerProfile, token);
+    if (!resolved) {
+      return messageResponse([
+        this.t('coordinator.plugins.notFound', { value: String(token ?? '').trim() || '?' }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+    const detail = await providerPlugin.readPlugin({
+      providerProfile,
+      pluginName: resolved.plugin.name,
+      marketplaceName: resolved.plugin.marketplaceName,
+      marketplacePath: resolved.plugin.marketplacePath,
+    });
+    if (!detail) {
+      return messageResponse([
+        this.t('coordinator.plugins.notFound', { value: String(token ?? '').trim() || '?' }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const [apps, mcpServers] = await Promise.all([
+      typeof providerPlugin.listApps === 'function'
+        ? providerPlugin.listApps({ providerProfile }).catch(() => [])
+        : Promise.resolve([]),
+      typeof providerPlugin.listMcpServerStatuses === 'function'
+        ? providerPlugin.listMcpServerStatuses({ providerProfile }).catch(() => [])
+        : Promise.resolve([]),
+    ]);
+    const aliases = this.resolveDisplayPluginAliases(
+      event,
+      providerProfile,
+      (await this.fetchPluginsForEvent(event, providerProfile)).allPlugins,
+    );
+    return messageResponse(
+      renderPluginDetailLines({
+        i18n: this.currentI18n,
+        index: resolved.index,
+        cwd: resolved.cwd,
+        detail,
+        aliases,
+        apps,
+        mcpServers,
+      }),
+      this.buildScopedSessionMeta(event),
+    );
+  }
+
+  async handlePluginsInstallCommand(event, providerProfile, token) {
+    const resolved = await this.resolvePluginSelection(event, providerProfile, token);
+    if (!resolved) {
+      return messageResponse([
+        this.t('coordinator.plugins.notFound', { value: String(token ?? '').trim() || '?' }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+    if (typeof providerPlugin.installPlugin !== 'function') {
+      return messageResponse([
+        this.t('coordinator.plugins.unsupported'),
+      ], this.buildScopedSessionMeta(event));
+    }
+
+    const targetPlugin = resolved.plugin;
+    if (targetPlugin.installed) {
+      const detailContext = await this.loadPluginDetailContext(providerProfile, targetPlugin);
+      const aliases = this.resolveDisplayPluginAliases(
+        event,
+        providerProfile,
+        (await this.fetchPluginsForEvent(event, providerProfile)).allPlugins,
+      );
+      return messageResponse([
+        this.t('coordinator.plugins.installAlready', { name: getPluginDisplayName(targetPlugin) }),
+        ...renderPluginDetailLines({
+          i18n: this.currentI18n,
+          index: resolved.index,
+          cwd: resolved.cwd,
+          detail: detailContext.detail,
+          aliases,
+          apps: detailContext.apps,
+          mcpServers: detailContext.mcpServers,
+        }),
+      ], this.buildScopedSessionMeta(event));
+    }
+
+    const installResult = await providerPlugin.installPlugin({
+      providerProfile,
+      pluginName: targetPlugin.name,
+      marketplaceName: targetPlugin.marketplaceName,
+      marketplacePath: targetPlugin.marketplacePath,
+    });
+    const detailContext = await this.refreshPluginAfterMutation(event, providerProfile, targetPlugin);
+    const aliases = this.resolveDisplayPluginAliases(
+      event,
+      providerProfile,
+      (await this.fetchPluginsForEvent(event, providerProfile)).allPlugins,
+    );
+    const lines = [
+      this.t('coordinator.plugins.installSuccess', { name: getPluginDisplayName(detailContext.detail.summary) }),
+      ...renderPluginInstallFollowupLines(installResult, this.currentI18n),
+      ...renderPluginDetailLines({
+        i18n: this.currentI18n,
+        index: resolved.index,
+        cwd: detailContext.cwd,
+        detail: detailContext.detail,
+        aliases,
+        apps: detailContext.apps,
+        mcpServers: detailContext.mcpServers,
+      }),
+    ];
+    return messageResponse(lines, this.buildScopedSessionMeta(event));
+  }
+
+  async handlePluginsUninstallCommand(event, providerProfile, token) {
+    const resolved = await this.resolvePluginSelection(event, providerProfile, token);
+    if (!resolved) {
+      return messageResponse([
+        this.t('coordinator.plugins.notFound', { value: String(token ?? '').trim() || '?' }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+    if (typeof providerPlugin.uninstallPlugin !== 'function') {
+      return messageResponse([
+        this.t('coordinator.plugins.unsupported'),
+      ], this.buildScopedSessionMeta(event));
+    }
+
+    const targetPlugin = resolved.plugin;
+    if (!targetPlugin.installed) {
+      const detailContext = await this.loadPluginDetailContext(providerProfile, targetPlugin);
+      const aliases = this.resolveDisplayPluginAliases(
+        event,
+        providerProfile,
+        (await this.fetchPluginsForEvent(event, providerProfile)).allPlugins,
+      );
+      return messageResponse([
+        this.t('coordinator.plugins.uninstallAlready', { name: getPluginDisplayName(targetPlugin) }),
+        ...renderPluginDetailLines({
+          i18n: this.currentI18n,
+          index: resolved.index,
+          cwd: resolved.cwd,
+          detail: detailContext.detail,
+          aliases,
+          apps: detailContext.apps,
+          mcpServers: detailContext.mcpServers,
+        }),
+      ], this.buildScopedSessionMeta(event));
+    }
+
+    await providerPlugin.uninstallPlugin({
+      providerProfile,
+      pluginId: targetPlugin.id,
+    });
+    const detailContext = await this.refreshPluginAfterMutation(event, providerProfile, targetPlugin);
+    const aliases = this.resolveDisplayPluginAliases(
+      event,
+      providerProfile,
+      (await this.fetchPluginsForEvent(event, providerProfile)).allPlugins,
+    );
+    return messageResponse([
+      this.t('coordinator.plugins.uninstallSuccess', { name: getPluginDisplayName(targetPlugin) }),
+      ...renderPluginDetailLines({
+        i18n: this.currentI18n,
+        index: resolved.index,
+        cwd: detailContext.cwd,
+        detail: detailContext.detail,
+        aliases,
+        apps: detailContext.apps,
+        mcpServers: detailContext.mcpServers,
+      }),
+    ], this.buildScopedSessionMeta(event));
+  }
+
+  async handlePluginsSetEnabledCommand(event, providerProfile, token, enabled) {
+    const resolved = await this.resolvePluginSelection(event, providerProfile, token);
+    if (!resolved) {
+      return messageResponse([
+        this.t('coordinator.plugins.notFound', { value: String(token ?? '').trim() || '?' }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+    const targetPlugin = resolved.plugin;
+    if (!targetPlugin.installed) {
+      return messageResponse([
+        this.t('coordinator.plugins.toggleNeedsInstall', { name: getPluginDisplayName(targetPlugin) }),
+      ], this.buildScopedSessionMeta(event));
+    }
+
+    const initialDetailContext = await this.loadPluginDetailContext(providerProfile, targetPlugin);
+    const detail = initialDetailContext.detail;
+    const actionSummary = {
+      apps: 0,
+      skills: 0,
+      mcpServers: 0,
+      errors: [] as string[],
+    };
+
+    for (const app of detail.apps) {
+      if (typeof providerPlugin.setAppEnabled !== 'function') {
+        actionSummary.errors.push(this.t('coordinator.plugins.toggleUnsupportedApps'));
+        break;
+      }
+      try {
+        await providerPlugin.setAppEnabled({
+          providerProfile,
+          appId: app.id,
+          enabled,
+        });
+        actionSummary.apps += 1;
+      } catch (error) {
+        actionSummary.errors.push(formatUserError(error));
+      }
+    }
+    for (const skill of detail.skills) {
+      if (typeof providerPlugin.setSkillEnabled !== 'function') {
+        actionSummary.errors.push(this.t('coordinator.plugins.toggleUnsupportedSkills'));
+        break;
+      }
+      try {
+        await providerPlugin.setSkillEnabled({
+          providerProfile,
+          enabled,
+          name: skill.name,
+          path: skill.path,
+        });
+        actionSummary.skills += 1;
+      } catch (error) {
+        actionSummary.errors.push(formatUserError(error));
+      }
+    }
+    for (const name of detail.mcpServers) {
+      if (typeof providerPlugin.setMcpServerEnabled !== 'function') {
+        actionSummary.errors.push(this.t('coordinator.plugins.toggleUnsupportedMcp'));
+        break;
+      }
+      try {
+        await providerPlugin.setMcpServerEnabled({
+          providerProfile,
+          name,
+          enabled,
+        });
+        actionSummary.mcpServers += 1;
+      } catch (error) {
+        actionSummary.errors.push(formatUserError(error));
+      }
+    }
+
+    if (actionSummary.apps + actionSummary.skills + actionSummary.mcpServers === 0) {
+      return messageResponse([
+        this.t('coordinator.plugins.toggleUnsupported', { name: getPluginDisplayName(targetPlugin) }),
+      ], this.buildScopedSessionMeta(event));
+    }
+
+    const detailContext = await this.refreshPluginAfterMutation(event, providerProfile, targetPlugin);
+    const aliases = this.resolveDisplayPluginAliases(
+      event,
+      providerProfile,
+      (await this.fetchPluginsForEvent(event, providerProfile)).allPlugins,
+    );
+    const lines = [
+      enabled
+        ? this.t('coordinator.plugins.enableSuccess', { name: getPluginDisplayName(detailContext.detail.summary) })
+        : this.t('coordinator.plugins.disableSuccess', { name: getPluginDisplayName(detailContext.detail.summary) }),
+      ...renderPluginToggleSummaryLines(actionSummary, this.currentI18n),
+      ...renderPluginDetailLines({
+        i18n: this.currentI18n,
+        index: resolved.index,
+        cwd: detailContext.cwd,
+        detail: detailContext.detail,
+        aliases,
+        apps: detailContext.apps,
+        mcpServers: detailContext.mcpServers,
+      }),
+    ];
+    return messageResponse(lines, this.buildScopedSessionMeta(event));
+  }
+
+  async handlePluginsAuthCommand(event, providerProfile, token) {
+    const resolved = await this.resolvePluginSelection(event, providerProfile, token);
+    if (!resolved) {
+      return messageResponse([
+        this.t('coordinator.plugins.notFound', { value: String(token ?? '').trim() || '?' }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+    const targetPlugin = resolved.plugin;
+    if (!targetPlugin.installed) {
+      return messageResponse([
+        this.t('coordinator.plugins.toggleNeedsInstall', { name: getPluginDisplayName(targetPlugin) }),
+      ], this.buildScopedSessionMeta(event));
+    }
+
+    const detailContext = await this.loadPluginDetailContext(providerProfile, targetPlugin);
+    const appStatusById = new Map<string, ProviderAppInfo>(detailContext.apps.map((entry) => [entry.id, entry] as const));
+    const mcpStatusByName = new Map<string, ProviderMcpServerStatus>(detailContext.mcpServers.map((entry) => [entry.name, entry] as const));
+    const lines = [
+      this.t('coordinator.plugins.authTitle', { name: getPluginDisplayName(detailContext.detail.summary) }),
+    ];
+
+    let actionCount = 0;
+    for (const app of detailContext.detail.apps) {
+      const appInfo = appStatusById.get(app.id) ?? null;
+      const needsAuth = Boolean(app.needsAuth) || appInfo?.isAccessible === false;
+      if (!needsAuth) {
+        continue;
+      }
+      actionCount += 1;
+      const installUrl = normalizeNullableString(appInfo?.installUrl ?? app.installUrl ?? null);
+      if (installUrl) {
+        lines.push(this.t('coordinator.plugins.authAppUrl', {
+          name: app.name,
+          url: installUrl,
+        }));
+      } else {
+        lines.push(this.t('coordinator.plugins.authAppNoUrl', {
+          name: app.name,
+        }));
+      }
+    }
+
+    for (const name of detailContext.detail.mcpServers) {
+      const status = mcpStatusByName.get(name) ?? null;
+      if ((status?.authStatus ?? 'notLoggedIn') !== 'notLoggedIn') {
+        continue;
+      }
+      actionCount += 1;
+      if (typeof providerPlugin.startMcpServerOauthLogin !== 'function') {
+        lines.push(this.t('coordinator.plugins.authMcpUnsupported', { name }));
+        continue;
+      }
+      try {
+        const result = await providerPlugin.startMcpServerOauthLogin({
+          providerProfile,
+          name,
+        });
+        lines.push(this.t('coordinator.plugins.authMcpUrl', {
+          name,
+          url: result.authorizationUrl,
+        }));
+      } catch (error) {
+        lines.push(this.t('coordinator.plugins.authMcpFailed', {
+          name,
+          error: formatUserError(error),
+        }));
+      }
+    }
+
+    if (actionCount === 0) {
+      lines.push(this.t('coordinator.plugins.authNonePending', {
+        name: getPluginDisplayName(detailContext.detail.summary),
+      }));
+    } else {
+      lines.push(this.t('coordinator.plugins.authFollowupHint'));
+    }
+    return messageResponse(lines, this.buildScopedSessionMeta(event));
+  }
+
   async renderThreadsPage(event, {
     providerProfileId,
     cursor,
@@ -2973,6 +3765,306 @@ export class BridgeCoordinator {
       cwd: state.cwd,
       skill: byPartial,
     };
+  }
+
+  listPluginAliases(event, providerProfile): PluginAlias[] {
+    if (!this.pluginAliases) {
+      return [];
+    }
+    return this.pluginAliases
+      .listByScope(event.platform, event.externalScopeId, providerProfile.id)
+      .sort((left, right) => left.alias.localeCompare(right.alias));
+  }
+
+  resolveDisplayPluginAliases(event, providerProfile, allPlugins: ProviderPluginSummary[]): ResolvedPluginAlias[] {
+    return buildResolvedPluginAliases({
+      plugins: allPlugins,
+      userAliases: this.listPluginAliases(event, providerProfile),
+    });
+  }
+
+  async fetchPluginsForEvent(event, providerProfile) {
+    const session = this.resolveSessionForEvent(toScopeRef(event), event);
+    const cwd = normalizeCwd(session?.cwd) ?? this.resolveEventCwd(event) ?? this.defaultCwd ?? null;
+    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+    const catalog: ProviderPluginsListResult = await providerPlugin.listPlugins({
+      providerProfile,
+      cwd,
+    });
+    return {
+      cwd,
+      catalog,
+      allPlugins: flattenPluginMarketplaces(catalog.marketplaces),
+    };
+  }
+
+  async readPluginDetailsForSummaries(providerProfile, items: ProviderPluginSummary[]) {
+    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+    const results = await Promise.all(items.map(async (summary) => {
+      try {
+        return await providerPlugin.readPlugin({
+          providerProfile,
+          pluginName: summary.name,
+          marketplaceName: summary.marketplaceName,
+          marketplacePath: summary.marketplacePath,
+        });
+      } catch {
+        return null;
+      }
+    }));
+    return results.map((detail, index) => detail ?? createFallbackPluginDetail(items[index])).filter(Boolean);
+  }
+
+  async resolvePluginSelection(event, providerProfile, token) {
+    const rawToken = String(token ?? '').trim();
+    const scopeKey = formatPlatformScopeKey(event.platform, event.externalScopeId);
+    let state = this.pluginBrowserStates.get(scopeKey) ?? null;
+    if (state && state.providerProfileId !== providerProfile.id) {
+      this.pluginBrowserStates.delete(scopeKey);
+      state = null;
+    }
+    if (!state) {
+      const result = await this.fetchPluginsForEvent(event, providerProfile);
+      const featured = selectFeaturedPlugins(result.catalog);
+      state = {
+        providerProfileId: providerProfile.id,
+        cwd: result.cwd,
+        mode: 'featured',
+        categoryKey: null,
+        items: featured,
+        updatedAt: this.now(),
+      };
+      this.pluginBrowserStates.set(scopeKey, state);
+    }
+    const numeric = Number.parseInt(rawToken, 10);
+    if (rawToken && Number.isInteger(numeric) && numeric >= 1 && numeric <= state.items.length) {
+      return {
+        index: numeric,
+        cwd: state.cwd,
+        plugin: state.items[numeric - 1],
+      };
+    }
+    const result = await this.fetchPluginsForEvent(event, providerProfile);
+    const allPlugins = result.allPlugins;
+    const resolvedAliases = this.resolveDisplayPluginAliases(event, providerProfile, allPlugins);
+    const normalized = normalizePluginLookupToken(rawToken);
+    if (!normalized) {
+      if (state.items.length === 1) {
+        return {
+          index: 1,
+          cwd: state.cwd,
+          plugin: state.items[0],
+        };
+      }
+      return null;
+    }
+    const normalizedAlias = normalizePluginAliasValue(rawToken);
+    const aliasMatch = normalizedAlias
+      ? resolvedAliases.find((entry) => entry.alias === normalizedAlias) ?? null
+      : null;
+    if (aliasMatch) {
+      const aliasedPlugin = allPlugins.find((entry) => entry.id === aliasMatch.pluginId) ?? null;
+      if (aliasedPlugin) {
+        return {
+          index: state.items.findIndex((entry) => entry.id === aliasedPlugin.id) + 1 || 0,
+          cwd: state.cwd,
+          plugin: aliasedPlugin,
+        };
+      }
+    }
+    const byExact = allPlugins.find((entry) => {
+      const candidates = [
+        entry.id,
+        entry.name,
+        entry.displayName ?? '',
+      ];
+      return candidates.some((candidate) => normalizePluginLookupToken(candidate) === normalized);
+    });
+    if (byExact) {
+      return {
+        index: state.items.findIndex((entry) => entry.id === byExact.id) + 1 || 0,
+        cwd: state.cwd,
+        plugin: byExact,
+      };
+    }
+    const byPartial = allPlugins.find((entry) => {
+      const haystack = [
+        entry.id,
+        entry.name,
+        entry.displayName ?? '',
+        entry.shortDescription ?? '',
+        entry.longDescription ?? '',
+        entry.marketplaceName,
+      ].map((candidate) => normalizePluginLookupToken(candidate)).join(' ');
+      return haystack.includes(normalized);
+    });
+    if (!byPartial) {
+      return null;
+    }
+    return {
+      index: state.items.findIndex((entry) => entry.id === byPartial.id) + 1 || 0,
+      cwd: state.cwd,
+      plugin: byPartial,
+    };
+  }
+
+  async rewriteConversationEventForExplicitPluginTarget(event, providerProfile) {
+    if (resolveExplicitPluginTargetHints(event).length > 0) {
+      return event;
+    }
+    const parsed = parseConversationPluginInvocation(event?.text ?? '');
+    if (!parsed) {
+      return this.rewriteConversationEventForInlinePluginMentions(event, providerProfile);
+    }
+    return (await this.buildExplicitPluginTargetEvent({
+      event,
+      providerProfile,
+      token: parsed.token,
+      taskText: parsed.taskText,
+      syntax: parsed.syntax,
+      aliasOnly: true,
+    })) ?? this.rewriteConversationEventForInlinePluginMentions(event, providerProfile);
+  }
+
+  async buildExplicitPluginTargetEvent({
+    event,
+    providerProfile,
+    token,
+    taskText,
+    syntax,
+    aliasOnly = false,
+  }: {
+    event: InboundTextEvent;
+    providerProfile: ProviderProfile;
+    token: string;
+    taskText: string;
+    syntax: ExplicitPluginTargetHint['syntax'];
+    aliasOnly?: boolean;
+  }): Promise<InboundTextEvent | null> {
+    const normalizedTaskText = String(taskText ?? '').trim();
+    if (!normalizedTaskText) {
+      return null;
+    }
+    const catalog = await this.fetchPluginsForEvent(event, providerProfile);
+    const aliases = this.resolveDisplayPluginAliases(event, providerProfile, catalog.allPlugins);
+    const hint = resolvePluginTargetHintFromCatalog({
+      token,
+      allPlugins: catalog.allPlugins,
+      aliases,
+      syntax,
+      aliasOnly,
+    });
+    if (!hint) {
+      return null;
+    }
+    return withExplicitPluginTargetHints({
+      ...event,
+      text: normalizedTaskText,
+    }, [hint]);
+  }
+
+  async rewriteConversationEventForInlinePluginMentions(event, providerProfile) {
+    const rawText = String(event?.text ?? '');
+    if (!rawText.includes('@')) {
+      return event;
+    }
+    const catalog = await this.fetchPluginsForEvent(event, providerProfile);
+    const aliases = this.resolveDisplayPluginAliases(event, providerProfile, catalog.allPlugins);
+    const targets: ExplicitPluginTargetHint[] = [];
+    const rewritten = rawText.replace(/(^|[^A-Za-z0-9._%+-])@([a-z0-9][a-z0-9_-]{0,31})(?=$|[^A-Za-z0-9._-])/gu, (fullMatch, prefix, token) => {
+      const hint = resolvePluginTargetHintFromCatalog({
+        token,
+        allPlugins: catalog.allPlugins,
+        aliases,
+        syntax: 'inline_at_alias',
+        aliasOnly: true,
+      });
+      if (!hint) {
+        return fullMatch;
+      }
+      pushUniqueExplicitPluginTarget(targets, hint);
+      return `${prefix}${hint.pluginDisplayName || hint.pluginName || hint.alias || token}`;
+    });
+    if (targets.length === 0) {
+      return event;
+    }
+    return withExplicitPluginTargetHints({
+      ...event,
+      text: rewritten.replace(/\s{2,}/gu, ' ').trim(),
+    }, targets);
+  }
+
+  async loadPluginDetailContext(providerProfile, plugin) {
+    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+    const detail = await providerPlugin.readPlugin({
+      providerProfile,
+      pluginName: plugin.name,
+      marketplaceName: plugin.marketplaceName,
+      marketplacePath: plugin.marketplacePath,
+    }) ?? createFallbackPluginDetail(plugin);
+    const [apps, mcpServers] = await Promise.all([
+      typeof providerPlugin.listApps === 'function'
+        ? providerPlugin.listApps({ providerProfile }).catch(() => [])
+        : Promise.resolve([]),
+      typeof providerPlugin.listMcpServerStatuses === 'function'
+        ? providerPlugin.listMcpServerStatuses({ providerProfile }).catch(() => [])
+        : Promise.resolve([]),
+    ]);
+    return {
+      detail,
+      apps,
+      mcpServers,
+    };
+  }
+
+  async refreshPluginAfterMutation(event, providerProfile, plugin) {
+    await this.refreshPluginBrowserState(event, providerProfile);
+    const refreshed = await this.fetchPluginsForEvent(event, providerProfile);
+    const refreshedPlugin = findMatchingPluginSummary(refreshed.allPlugins, plugin) ?? plugin;
+    const detailContext = await this.loadPluginDetailContext(providerProfile, refreshedPlugin);
+    return {
+      cwd: refreshed.cwd,
+      detail: detailContext.detail,
+      apps: detailContext.apps,
+      mcpServers: detailContext.mcpServers,
+    };
+  }
+
+  async refreshPluginBrowserState(event, providerProfile) {
+    const scopeKey = formatPlatformScopeKey(event.platform, event.externalScopeId);
+    const previous = this.pluginBrowserStates.get(scopeKey) ?? null;
+    if (!previous) {
+      return;
+    }
+    if (previous.providerProfileId !== providerProfile.id) {
+      this.pluginBrowserStates.delete(scopeKey);
+      return;
+    }
+    const result = await this.fetchPluginsForEvent(event, providerProfile);
+    if (previous.mode === 'category' && previous.categoryKey) {
+      const details = await this.readPluginDetailsForSummaries(providerProfile, result.allPlugins);
+      const buckets = buildPluginCategoryBuckets(details, this.currentI18n);
+      const bucket = buckets.find((entry) => entry.key === previous.categoryKey) ?? null;
+      if (bucket) {
+        this.pluginBrowserStates.set(scopeKey, {
+          providerProfileId: providerProfile.id,
+          cwd: result.cwd,
+          mode: 'category',
+          categoryKey: bucket.key,
+          items: bucket.items.map((detail) => detail.summary),
+          updatedAt: this.now(),
+        });
+        return;
+      }
+    }
+    this.pluginBrowserStates.set(scopeKey, {
+      providerProfileId: providerProfile.id,
+      cwd: result.cwd,
+      mode: 'featured',
+      categoryKey: null,
+      items: selectFeaturedPlugins(result.catalog),
+      updatedAt: this.now(),
+    });
   }
 
   resolveScopedSessionMeta(scopeRef) {
@@ -4140,6 +5232,7 @@ export class BridgeCoordinator {
       turnId: finalizedResult?.turnId ?? null,
       outputState: finalizedResult?.outputState ?? null,
       finalSource: finalizedResult?.finalSource ?? null,
+      errorMessage: finalizedResult?.errorMessage ?? null,
       outputTextPreview: truncateCoordinatorText(finalizedResult?.outputText, 160),
       previewTextPreview: truncateCoordinatorText(finalizedResult?.previewText, 160),
       outputArtifactCount: Array.isArray(finalizedResult?.outputArtifacts) ? finalizedResult.outputArtifacts.length : 0,
@@ -5190,6 +6283,44 @@ function withRetryContext(event: InboundTextEvent, retryContext) {
   });
 }
 
+function withExplicitPluginTargetHints(event: InboundTextEvent, explicitPluginTargets: ExplicitPluginTargetHint[]) {
+  const normalizedTargets = Array.isArray(explicitPluginTargets)
+    ? explicitPluginTargets.filter((entry) => entry && typeof entry === 'object')
+    : [];
+  if (normalizedTargets.length === 0) {
+    return event;
+  }
+  return withCodexbridgeMetadata(event, {
+    explicitPluginTarget: normalizedTargets[0],
+    explicitPluginTargets: normalizedTargets,
+  });
+}
+
+function resolveExplicitPluginTargetHint(event: InboundTextEvent | null | undefined): ExplicitPluginTargetHint | null {
+  const hints = resolveExplicitPluginTargetHints(event);
+  return hints[0] ?? null;
+}
+
+function resolveExplicitPluginTargetHints(event: InboundTextEvent | null | undefined): ExplicitPluginTargetHint[] {
+  const metadata = event?.metadata;
+  if (!metadata || typeof metadata !== 'object') {
+    return [];
+  }
+  const codexbridge = (metadata as Record<string, unknown>).codexbridge;
+  if (!codexbridge || typeof codexbridge !== 'object') {
+    return [];
+  }
+  const hints = (codexbridge as Record<string, unknown>).explicitPluginTargets;
+  if (Array.isArray(hints)) {
+    return hints.filter((entry) => entry && typeof entry === 'object') as ExplicitPluginTargetHint[];
+  }
+  const hint = (codexbridge as Record<string, unknown>).explicitPluginTarget;
+  if (!hint || typeof hint !== 'object') {
+    return [];
+  }
+  return [hint as ExplicitPluginTargetHint];
+}
+
 function withCodexbridgeMetadata(event: InboundTextEvent, updates: Record<string, unknown>) {
   const metadata = event?.metadata && typeof event.metadata === 'object'
     ? event.metadata
@@ -5694,6 +6825,64 @@ function getCommandHelpSpecs(i18n: Translator) {
       i18n.t('coordinator.help.note.skills'),
     ],
   }),
+  plugins: freezeCommandHelp({
+    name: 'plugins',
+    aliases: ['pg'],
+    summary: i18n.t('coordinator.help.summary.plugins'),
+    usage: [
+      '/plugins',
+      '/pg reload',
+      '/pg list',
+      '/pg list <序号> [页码]',
+      '/pg show <序号|名称>',
+      '/pg alias',
+      '/pg alias <序号|名称> <短别名>',
+      '/pg alias clear <序号|名称>',
+      '/pg alias confirm',
+      '/pg add <序号|名称>',
+      '/pg del <序号|名称>',
+      '/pg on <序号|名称>',
+      '/pg off <序号|名称>',
+      '/pg auth <序号|名称>',
+      '/pg -h',
+    ],
+    examples: [
+      '/plugins',
+      '/pg reload',
+      '/pg list',
+      '/pg list 1',
+      '/pg list 1 2',
+      '/pg show 1',
+      '/pg alias 1 gd',
+      '/pg alias confirm',
+      '/pg add 2',
+      '/pg on 1',
+      '/pg auth 1',
+    ],
+    notes: [
+      i18n.t('coordinator.help.note.plugins'),
+    ],
+  }),
+  use: freezeCommandHelp({
+    name: 'use',
+    aliases: [],
+    summary: i18n.t('coordinator.help.summary.use'),
+    usage: [
+      i18n.t('coordinator.use.usage'),
+      '/use -h',
+    ],
+    examples: [
+      '/use gm 查今天未读邮件',
+      '/use gm gc 把重要事情都记录到谷歌日历中',
+      '/use github 看这个仓库最近失败的 CI',
+      '@gm 查今天未读邮件',
+      '用@gm 查看最新的邮件，并用@gc把重要事情都记录到谷歌日历中',
+      '用 gm 查今天未读邮件',
+    ],
+    notes: [
+      i18n.t('coordinator.help.note.use'),
+    ],
+  }),
   automation: freezeCommandHelp({
     name: 'automation',
     aliases: ['auto'],
@@ -6152,6 +7341,8 @@ const COMMAND_HELP_ORDER = Object.freeze([
   'stop',
   'review',
   'skills',
+  'plugins',
+  'use',
   'automation',
   'weibo',
   'new',
@@ -6190,6 +7381,8 @@ const COMMAND_ALIAS_DEFINITIONS = Object.freeze({
   stop: ['sp'],
   review: ['rv'],
   skills: ['sk'],
+  plugins: ['pg'],
+  use: [],
   automation: ['auto'],
   weibo: ['wb'],
   new: ['n'],
@@ -6217,6 +7410,27 @@ const COMMAND_ALIAS_DEFINITIONS = Object.freeze({
 });
 
 const COMMAND_CANONICAL_NAME_MAP = buildCommandCanonicalNameMapFromAliases(COMMAND_ALIAS_DEFINITIONS, HIDDEN_COMMAND_ALIASES);
+const PLUGIN_ALIAS_RESERVED_TOKENS = new Set([
+  ...COMMAND_CANONICAL_NAME_MAP.keys(),
+  'add',
+  'alias',
+  'aliases',
+  'auth',
+  'clear',
+  'confirm',
+  'default',
+  'del',
+  'featured',
+  'install',
+  'list',
+  'off',
+  'on',
+  'reload',
+  'remove',
+  'rm',
+  'show',
+  'uninstall',
+]);
 
 function createUploadBatchState(now: number): UploadBatchState {
   return {
@@ -6539,6 +7753,803 @@ function renderSkillDetailLines({
   }
   lines.push(i18n.t('coordinator.skills.detailActionsHint', { index }));
   return lines;
+}
+
+function flattenPluginMarketplaces(marketplaces: ProviderPluginsListResult['marketplaces']): ProviderPluginSummary[] {
+  return Array.isArray(marketplaces)
+    ? marketplaces.flatMap((marketplace) => Array.isArray(marketplace?.plugins) ? marketplace.plugins : [])
+    : [];
+}
+
+function findMatchingPluginSummary(
+  items: ProviderPluginSummary[],
+  target: ProviderPluginSummary,
+): ProviderPluginSummary | null {
+  return items.find((entry) => entry.id === target.id)
+    ?? items.find((entry) => (
+      entry.name === target.name
+      && entry.marketplaceName === target.marketplaceName
+      && (entry.marketplacePath ?? null) === (target.marketplacePath ?? null)
+    ))
+    ?? null;
+}
+
+function selectFeaturedPlugins(catalog: ProviderPluginsListResult): ProviderPluginSummary[] {
+  const allPlugins = flattenPluginMarketplaces(catalog.marketplaces);
+  const byId = new Map(allPlugins.map((plugin) => [plugin.id, plugin]));
+  const featured = Array.isArray(catalog.featuredPluginIds)
+    ? catalog.featuredPluginIds.map((id) => byId.get(id) ?? null).filter(Boolean) as ProviderPluginSummary[]
+    : [];
+  return featured.length > 0 ? featured : allPlugins.slice(0, 12);
+}
+
+function createFallbackPluginDetail(summary: ProviderPluginSummary): ProviderPluginDetail {
+  return {
+    summary,
+    marketplaceName: summary.marketplaceName,
+    marketplacePath: summary.marketplacePath,
+    description: summary.longDescription ?? summary.shortDescription ?? null,
+    apps: [],
+    mcpServers: [],
+    skills: [],
+  };
+}
+
+function classifyPluginDetail(detail: ProviderPluginDetail, i18n: Translator): { key: string; label: string; description: string } {
+  const nativeCategory = String(detail.summary.category ?? '').trim();
+  if (nativeCategory) {
+    return {
+      key: normalizePluginLookupToken(nativeCategory) || nativeCategory.toLowerCase(),
+      label: nativeCategory,
+      description: i18n.t('coordinator.plugins.categoryDescription.native', { name: nativeCategory }),
+    };
+  }
+  const kinds = [
+    detail.apps.length > 0 ? 'app' : null,
+    detail.mcpServers.length > 0 ? 'mcp' : null,
+    detail.skills.length > 0 ? 'skill' : null,
+  ].filter(Boolean);
+  if (kinds.length === 0) {
+    const capabilityKinds = summarizePluginCapabilityKinds(detail.summary);
+    kinds.push(...capabilityKinds);
+  }
+  if (kinds.length > 1) {
+    return {
+      key: 'mixed',
+      label: i18n.t('coordinator.plugins.category.mixed'),
+      description: i18n.t('coordinator.plugins.categoryDescription.mixed'),
+    };
+  }
+  if (kinds[0] === 'app') {
+    return {
+      key: 'app',
+      label: i18n.t('coordinator.plugins.category.app'),
+      description: i18n.t('coordinator.plugins.categoryDescription.app'),
+    };
+  }
+  if (kinds[0] === 'mcp') {
+    return {
+      key: 'mcp',
+      label: i18n.t('coordinator.plugins.category.mcp'),
+      description: i18n.t('coordinator.plugins.categoryDescription.mcp'),
+    };
+  }
+  if (kinds[0] === 'skill') {
+    return {
+      key: 'skill',
+      label: i18n.t('coordinator.plugins.category.skill'),
+      description: i18n.t('coordinator.plugins.categoryDescription.skill'),
+    };
+  }
+  return {
+    key: 'other',
+    label: i18n.t('coordinator.plugins.category.other'),
+    description: i18n.t('coordinator.plugins.categoryDescription.other'),
+  };
+}
+
+function summarizePluginCapabilityKinds(summary: ProviderPluginSummary): Array<'app' | 'mcp' | 'skill'> {
+  const raw = [
+    ...(Array.isArray(summary.capabilities) ? summary.capabilities : []),
+    summary.category ?? '',
+  ]
+    .map((entry) => String(entry ?? '').trim().toLowerCase())
+    .filter(Boolean);
+  const kinds = new Set<'app' | 'mcp' | 'skill'>();
+  for (const value of raw) {
+    if (value.includes('mcp')) {
+      kinds.add('mcp');
+    }
+    if (value.includes('skill')) {
+      kinds.add('skill');
+    }
+    if (value.includes('app') || value.includes('connector')) {
+      kinds.add('app');
+    }
+  }
+  return Array.from(kinds);
+}
+
+function buildPluginCategoryBuckets(details: ProviderPluginDetail[], i18n: Translator): PluginCategoryBucket[] {
+  const seed = new Map<string, PluginCategoryBucket>();
+  for (const detail of details) {
+    const info = classifyPluginDetail(detail, i18n);
+    const bucket = seed.get(info.key) ?? {
+      key: info.key,
+      label: info.label,
+      description: info.description,
+      items: [],
+    };
+    bucket.items.push(detail);
+    seed.set(info.key, bucket);
+  }
+  return Array.from(seed.values())
+    .filter((bucket) => bucket.items.length > 0)
+    .sort((left, right) => {
+      if (right.items.length !== left.items.length) {
+        return right.items.length - left.items.length;
+      }
+      return left.label.localeCompare(right.label);
+    })
+    .map((bucket) => ({
+      ...bucket,
+      items: [...bucket.items].sort((left, right) => comparePluginsForDisplay(left.summary, right.summary)),
+    }));
+}
+
+function resolvePluginCategorySelection(token: string, buckets: PluginCategoryBucket[]): { index: number; bucket: PluginCategoryBucket } | null {
+  const rawToken = String(token ?? '').trim();
+  const numeric = Number.parseInt(rawToken, 10);
+  if (rawToken && Number.isInteger(numeric) && numeric >= 1 && numeric <= buckets.length) {
+    return {
+      index: numeric,
+      bucket: buckets[numeric - 1],
+    };
+  }
+  const normalized = normalizePluginLookupToken(rawToken);
+  if (!normalized) {
+    return null;
+  }
+  const matched = buckets.find((bucket) => {
+    const haystack = [
+      bucket.key,
+      bucket.label,
+      bucket.description,
+    ].map((candidate) => normalizePluginLookupToken(candidate)).join(' ');
+    return haystack.includes(normalized);
+  });
+  if (!matched) {
+    return null;
+  }
+  return {
+    index: buckets.indexOf(matched) + 1,
+    bucket: matched,
+  };
+}
+
+function comparePluginsForDisplay(left: ProviderPluginSummary, right: ProviderPluginSummary): number {
+  if (left.installed !== right.installed) {
+    return left.installed ? -1 : 1;
+  }
+  return getPluginDisplayName(left).localeCompare(getPluginDisplayName(right));
+}
+
+function getPluginDisplayName(plugin: ProviderPluginSummary): string {
+  return plugin.displayName || plugin.name;
+}
+
+function getPluginDescription(plugin: ProviderPluginSummary): string {
+  return plugin.shortDescription || plugin.longDescription || plugin.name;
+}
+
+function findPluginAliasForPlugin(aliases: ResolvedPluginAlias[], pluginId: string): ResolvedPluginAlias | null {
+  return aliases.find((entry) => entry.pluginId === pluginId) ?? null;
+}
+
+function formatPluginAliasSuffix(plugin: ProviderPluginSummary, aliases: ResolvedPluginAlias[], i18n: Translator): string {
+  const alias = findPluginAliasForPlugin(aliases, plugin.id);
+  return alias ? ` [${i18n.t('coordinator.plugins.aliasShortLabel', { value: alias.alias })}]` : '';
+}
+
+function getPluginStatusLabel(plugin: ProviderPluginSummary, i18n: Translator): string {
+  if (plugin.installed && plugin.enabled) {
+    return i18n.t('coordinator.plugins.status.installedEnabled');
+  }
+  if (plugin.installed && !plugin.enabled) {
+    return i18n.t('coordinator.plugins.status.installedDisabled');
+  }
+  return i18n.t('coordinator.plugins.status.notInstalled');
+}
+
+function summarizePluginKinds(detail: ProviderPluginDetail, i18n: Translator): string[] {
+  const tags = [] as string[];
+  if (detail.apps.length > 0) {
+    tags.push(i18n.t('coordinator.plugins.kind.app'));
+  }
+  if (detail.mcpServers.length > 0) {
+    tags.push(i18n.t('coordinator.plugins.kind.mcp'));
+  }
+  if (detail.skills.length > 0) {
+    tags.push(i18n.t('coordinator.plugins.kind.skill'));
+  }
+  if (tags.length === 0) {
+    for (const kind of summarizePluginCapabilityKinds(detail.summary)) {
+      if (kind === 'app') {
+        tags.push(i18n.t('coordinator.plugins.kind.app'));
+      } else if (kind === 'mcp') {
+        tags.push(i18n.t('coordinator.plugins.kind.mcp'));
+      } else if (kind === 'skill') {
+        tags.push(i18n.t('coordinator.plugins.kind.skill'));
+      }
+    }
+  }
+  if (tags.length === 0) {
+    tags.push(i18n.t('coordinator.plugins.kind.other'));
+  }
+  return tags;
+}
+
+function renderPluginFeaturedLines({
+  i18n,
+  cwd,
+  items,
+  aliases = [],
+  totalCount,
+  hasExplicitFeatured,
+}: {
+  i18n: Translator;
+  cwd: string | null;
+  items: ProviderPluginSummary[];
+  aliases?: ResolvedPluginAlias[];
+  totalCount: number;
+  hasExplicitFeatured: boolean;
+}) {
+  const lines = [
+    i18n.t('coordinator.plugins.featuredTitle', {
+      cwd: cwd ?? i18n.t('common.notSet'),
+      count: items.length,
+    }),
+  ];
+  if (!hasExplicitFeatured) {
+    lines.push(i18n.t('coordinator.plugins.featuredFallback'));
+  }
+  if (items.length === 0) {
+    lines.push(i18n.t('coordinator.plugins.empty'));
+    return lines;
+  }
+  for (const [index, plugin] of items.entries()) {
+    lines.push(`${index + 1}. ${getPluginDisplayName(plugin)} [${getPluginStatusLabel(plugin, i18n)}]${formatPluginAliasSuffix(plugin, aliases, i18n)}`);
+    lines.push(`   ${truncateInlineText(getPluginDescription(plugin), 88)}`);
+  }
+  lines.push(i18n.t('coordinator.plugins.featuredFooter', { total: totalCount }));
+  lines.push(i18n.t('coordinator.plugins.actionsHint'));
+  return lines;
+}
+
+function renderPluginCategorySummaryLines({
+  i18n,
+  cwd,
+  buckets,
+}: {
+  i18n: Translator;
+  cwd: string | null;
+  buckets: PluginCategoryBucket[];
+}) {
+  const lines = [
+    i18n.t('coordinator.plugins.categoryTitle', {
+      cwd: cwd ?? i18n.t('common.notSet'),
+      count: buckets.length,
+    }),
+  ];
+  if (buckets.length === 0) {
+    lines.push(i18n.t('coordinator.plugins.empty'));
+    return lines;
+  }
+  for (const [index, bucket] of buckets.entries()) {
+    lines.push(`${index + 1}. ${bucket.label} | ${bucket.items.length}`);
+    lines.push(`   ${bucket.description}`);
+  }
+  lines.push(i18n.t('coordinator.plugins.categoryActionsHint'));
+  return lines;
+}
+
+function renderPluginAliasListLines({
+  i18n,
+  aliases,
+}: {
+  i18n: Translator;
+  aliases: PluginAlias[];
+}) {
+  const lines = [
+    i18n.t('coordinator.plugins.aliasListTitle', { count: aliases.length }),
+  ];
+  if (aliases.length === 0) {
+    lines.push(i18n.t('coordinator.plugins.aliasListEmpty'));
+  }
+  for (const [index, alias] of aliases.entries()) {
+    lines.push(`${index + 1}. ${alias.alias} -> ${alias.displayName || alias.pluginName}`);
+  }
+  lines.push(i18n.t('coordinator.plugins.aliasActionsHint'));
+  return lines;
+}
+
+function renderPluginCategoryItemsLines({
+  i18n,
+  cwd,
+  categoryIndex,
+  bucket,
+  pageItems,
+  aliases = [],
+  pageNumber,
+  pageCount,
+}: {
+  i18n: Translator;
+  cwd: string | null;
+  categoryIndex: number;
+  bucket: PluginCategoryBucket;
+  pageItems: ProviderPluginDetail[];
+  aliases?: ResolvedPluginAlias[];
+  pageNumber: number;
+  pageCount: number;
+}) {
+  const lines = [
+    i18n.t('coordinator.plugins.categoryItemsTitle', {
+      cwd: cwd ?? i18n.t('common.notSet'),
+      category: bucket.label,
+      count: bucket.items.length,
+      page: pageNumber,
+      pages: pageCount,
+    }),
+  ];
+  for (const [index, detail] of pageItems.entries()) {
+    const plugin = detail.summary;
+    const kindTags = summarizePluginKinds(detail, i18n);
+    const suffix = kindTags.length === 1 && kindTags[0] === i18n.t('coordinator.plugins.kind.other')
+      ? ''
+      : ` [${kindTags.join('/')}]`;
+    lines.push(`${index + 1}. ${getPluginDisplayName(plugin)} [${getPluginStatusLabel(plugin, i18n)}]${suffix}${formatPluginAliasSuffix(plugin, aliases, i18n)}`);
+    lines.push(`   ${truncateInlineText(getPluginDescription(plugin), 88)}`);
+  }
+  if (pageCount > 1) {
+    const actions = [] as string[];
+    if (pageNumber > 1) {
+      actions.push(`/pg list ${categoryIndex} ${pageNumber - 1}`);
+    }
+    if (pageNumber < pageCount) {
+      actions.push(`/pg list ${categoryIndex} ${pageNumber + 1}`);
+    }
+    lines.push(i18n.t('coordinator.plugins.categoryPageHint', {
+      actions: actions.join('  '),
+    }));
+  }
+  lines.push(i18n.t('coordinator.plugins.actionsHint'));
+  return lines;
+}
+
+function renderPluginDetailLines({
+  i18n,
+  index,
+  cwd,
+  detail,
+  aliases = [],
+  apps,
+  mcpServers,
+}: {
+  i18n: Translator;
+  index: number;
+  cwd: string | null;
+  detail: ProviderPluginDetail;
+  aliases?: ResolvedPluginAlias[];
+  apps: ProviderAppInfo[];
+  mcpServers: ProviderMcpServerStatus[];
+}) {
+  const plugin = detail.summary;
+  const appStatusById = new Map(apps.map((entry) => [entry.id, entry]));
+  const mcpStatusByName = new Map(mcpServers.map((entry) => [entry.name, entry]));
+  const lines = [
+    i18n.t('coordinator.plugins.detailTitle', { index: index > 0 ? index : '?', name: getPluginDisplayName(plugin) }),
+    i18n.t('coordinator.plugins.cwdLabel', { value: cwd ?? i18n.t('common.notSet') }),
+    i18n.t('coordinator.plugins.marketplaceLabel', { value: plugin.marketplaceDisplayName || plugin.marketplaceName }),
+    i18n.t('coordinator.plugins.statusLabel', { value: getPluginStatusLabel(plugin, i18n) }),
+    i18n.t('coordinator.plugins.idLabel', { value: plugin.id }),
+    i18n.t('coordinator.plugins.bundleKindsLabel', { value: summarizePluginKinds(detail, i18n).join(', ') }),
+  ];
+  const alias = findPluginAliasForPlugin(aliases, plugin.id);
+  if (alias) {
+    lines.push(i18n.t('coordinator.plugins.aliasLabel', { value: alias.alias }));
+  }
+  if (plugin.capabilities && plugin.capabilities.length > 0) {
+    lines.push(i18n.t('coordinator.plugins.capabilitiesLabel', { value: plugin.capabilities.join(', ') }));
+  }
+  lines.push(i18n.t('coordinator.plugins.descriptionLabel', {
+    value: detail.description || getPluginDescription(plugin),
+  }));
+  if (detail.apps.length > 0) {
+    lines.push(i18n.t('coordinator.plugins.appsLabel', { count: detail.apps.length }));
+    for (const app of detail.apps) {
+      const appInfo = appStatusById.get(app.id) ?? null;
+      const segments = [app.name];
+      if (app.needsAuth) {
+        segments.push(i18n.t('coordinator.plugins.appNeedsAuth'));
+      }
+      if (appInfo) {
+        segments.push(appInfo.isEnabled ? i18n.t('common.enabled') : i18n.t('common.disabled'));
+        segments.push(appInfo.isAccessible ? i18n.t('coordinator.plugins.appAccessible') : i18n.t('coordinator.plugins.appInaccessible'));
+      }
+      lines.push(`- ${segments.join(' | ')}`);
+    }
+  }
+  if (detail.mcpServers.length > 0) {
+    lines.push(i18n.t('coordinator.plugins.mcpLabel', { count: detail.mcpServers.length }));
+    for (const name of detail.mcpServers) {
+      const status = mcpStatusByName.get(name) ?? null;
+      if (!status) {
+        lines.push(`- ${name}`);
+        continue;
+      }
+      lines.push(`- ${name} | ${formatPluginMcpAuthStatusLabel(status.authStatus, i18n)} | tools ${status.toolCount} | resources ${status.resourceCount}`);
+    }
+  }
+  if (detail.skills.length > 0) {
+    lines.push(i18n.t('coordinator.plugins.skillsLabel', { count: detail.skills.length }));
+    for (const skill of detail.skills) {
+      lines.push(`- ${skill.displayName || skill.name} | ${skill.enabled ? i18n.t('common.enabled') : i18n.t('common.disabled')}`);
+    }
+  }
+  lines.push(i18n.t('coordinator.plugins.detailActionsHint'));
+  return lines;
+}
+
+function renderPluginInstallFollowupLines(
+  installResult: ProviderPluginInstallResult,
+  i18n: Translator,
+): string[] {
+  if (!installResult.appsNeedingAuth.length) {
+    return [];
+  }
+  const lines = [
+    i18n.t('coordinator.plugins.installAuthNeeded', {
+      policy: formatPluginAuthPolicyLabel(installResult.authPolicy, i18n),
+      count: installResult.appsNeedingAuth.length,
+    }),
+  ];
+  for (const app of installResult.appsNeedingAuth) {
+    lines.push(`- ${app.name}`);
+  }
+  return lines;
+}
+
+function renderPluginToggleSummaryLines(
+  summary: {
+    apps: number;
+    skills: number;
+    mcpServers: number;
+    errors: string[];
+  },
+  i18n: Translator,
+): string[] {
+  const lines = [] as string[];
+  if (summary.apps > 0) {
+    lines.push(i18n.t('coordinator.plugins.toggleAppsChanged', { count: summary.apps }));
+  }
+  if (summary.skills > 0) {
+    lines.push(i18n.t('coordinator.plugins.toggleSkillsChanged', { count: summary.skills }));
+  }
+  if (summary.mcpServers > 0) {
+    lines.push(i18n.t('coordinator.plugins.toggleMcpChanged', { count: summary.mcpServers }));
+  }
+  if (summary.errors.length > 0) {
+    lines.push(i18n.t('coordinator.plugins.togglePartial', {
+      count: summary.errors.length,
+      error: summary.errors[0],
+    }));
+  }
+  return lines;
+}
+
+function formatPluginMcpAuthStatusLabel(
+  authStatus: ProviderMcpServerStatus['authStatus'] | null | undefined,
+  i18n: Translator,
+): string {
+  switch (String(authStatus ?? '').trim()) {
+    case 'notLoggedIn':
+      return i18n.t('coordinator.plugins.mcpAuth.notLoggedIn');
+    case 'bearerToken':
+      return i18n.t('coordinator.plugins.mcpAuth.bearerToken');
+    case 'oAuth':
+      return i18n.t('coordinator.plugins.mcpAuth.oAuth');
+    case 'unsupported':
+      return i18n.t('coordinator.plugins.mcpAuth.unsupported');
+    default:
+      return String(authStatus ?? i18n.t('common.unknown'));
+  }
+}
+
+function formatPluginAuthPolicyLabel(value: string | null, i18n: Translator): string {
+  switch (String(value ?? '').trim().toUpperCase()) {
+    case 'ON_INSTALL':
+      return i18n.t('coordinator.plugins.authPolicy.onInstall');
+    case 'ON_USE':
+      return i18n.t('coordinator.plugins.authPolicy.onUse');
+    default:
+      return value || i18n.t('common.unknown');
+  }
+}
+
+function buildPluginAliasRecord({
+  event,
+  providerProfileId,
+  plugin,
+  alias,
+  updatedAt,
+}: {
+  event: InboundTextEvent;
+  providerProfileId: string;
+  plugin: ProviderPluginSummary;
+  alias: string;
+  updatedAt: number;
+}): PluginAlias {
+  return {
+    platform: event.platform,
+    externalScopeId: event.externalScopeId,
+    providerProfileId,
+    alias,
+    pluginId: plugin.id,
+    pluginName: plugin.name,
+    marketplaceName: plugin.marketplaceName,
+    marketplacePath: plugin.marketplacePath ?? null,
+    displayName: getPluginDisplayName(plugin),
+    updatedAt,
+  };
+}
+
+function buildResolvedPluginAliases({
+  plugins,
+  userAliases,
+}: {
+  plugins: ProviderPluginSummary[];
+  userAliases: PluginAlias[];
+}): ResolvedPluginAlias[] {
+  const resolved = [] as ResolvedPluginAlias[];
+  const reserved = new Set(PLUGIN_ALIAS_RESERVED_TOKENS);
+  const byPluginId = new Map(plugins.map((plugin) => [plugin.id, plugin] as const));
+
+  for (const alias of userAliases) {
+    const plugin = byPluginId.get(alias.pluginId);
+    if (!plugin) {
+      continue;
+    }
+    const normalizedAlias = normalizePluginAliasValue(alias.alias);
+    if (!normalizedAlias || reserved.has(normalizedAlias)) {
+      continue;
+    }
+    resolved.push({
+      pluginId: plugin.id,
+      alias: normalizedAlias,
+      source: 'user',
+      pluginName: plugin.name,
+      displayName: getPluginDisplayName(plugin),
+    });
+    reserved.add(normalizedAlias);
+  }
+
+  for (const plugin of plugins) {
+    if (resolved.some((entry) => entry.pluginId === plugin.id)) {
+      continue;
+    }
+    for (const candidate of generatePluginAliasCandidates(plugin)) {
+      const normalizedCandidate = normalizePluginAliasValue(candidate);
+      if (!normalizedCandidate || reserved.has(normalizedCandidate)) {
+        continue;
+      }
+      resolved.push({
+        pluginId: plugin.id,
+        alias: normalizedCandidate,
+        source: 'auto',
+        pluginName: plugin.name,
+        displayName: getPluginDisplayName(plugin),
+      });
+      reserved.add(normalizedCandidate);
+      break;
+    }
+  }
+
+  return resolved;
+}
+
+function generatePluginAliasCandidates(plugin: ProviderPluginSummary): string[] {
+  const candidates = new Set<string>();
+  const wordSets = [
+    {
+      words: tokenizePluginAliasWords(plugin.name),
+      priority: tokenizePluginAliasWords(plugin.name).length > 1 ? 1 : 5,
+    },
+    {
+      words: tokenizePluginAliasWords(plugin.displayName ?? ''),
+      priority: tokenizePluginAliasWords(plugin.displayName ?? '').length > 1 ? 2 : 4,
+    },
+    {
+      words: tokenizePluginAliasWords(plugin.id.split('@')[0] ?? ''),
+      priority: tokenizePluginAliasWords(plugin.id.split('@')[0] ?? '').length > 1 ? 3 : 6,
+    },
+  ].sort((left, right) => left.priority - right.priority);
+  for (const { words } of wordSets) {
+    if (words.length === 0) {
+      continue;
+    }
+    if (words.length >= 2) {
+      candidates.add(words[0].slice(0, 1) + words[1].slice(0, 1));
+      candidates.add(words[0].slice(0, 1) + words[1].slice(0, 2));
+      candidates.add(words[0].slice(0, 2) + words[1].slice(0, 1));
+      candidates.add(words.slice(0, 3).map((word) => word.slice(0, 1)).join(''));
+    } else {
+      candidates.add(words[0].slice(0, 2));
+      candidates.add(words[0].slice(0, 3));
+      candidates.add(words[0].slice(0, 4));
+    }
+  }
+  return [...candidates].filter((candidate) => /^[a-z0-9][a-z0-9_-]{0,31}$/u.test(candidate));
+}
+
+function tokenizePluginAliasWords(value: string): string[] {
+  return String(value ?? '')
+    .replace(/@.*$/u, '')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/u)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function validatePluginAliasChange({
+  alias,
+  pluginId,
+  existingAliases,
+  i18n,
+}: {
+  alias: unknown;
+  pluginId: string;
+  existingAliases: PluginAlias[];
+  i18n: Translator;
+}): { ok: true; alias: string } | { ok: false; message: string } {
+  const normalizedAlias = normalizePluginAliasValue(alias);
+  if (!normalizedAlias || !/^[a-z0-9][a-z0-9_-]{0,31}$/u.test(normalizedAlias)) {
+    return {
+      ok: false,
+      message: i18n.t('coordinator.plugins.aliasInvalid', { value: String(alias ?? '').trim() || '?' }),
+    };
+  }
+  if (PLUGIN_ALIAS_RESERVED_TOKENS.has(normalizedAlias)) {
+    return {
+      ok: false,
+      message: i18n.t('coordinator.plugins.aliasReserved', { value: normalizedAlias }),
+    };
+  }
+  const conflict = existingAliases.find((entry) => entry.alias === normalizedAlias && entry.pluginId !== pluginId) ?? null;
+  if (conflict) {
+    return {
+      ok: false,
+      message: i18n.t('coordinator.plugins.aliasConflict', {
+        alias: normalizedAlias,
+        name: conflict.displayName || conflict.pluginName,
+      }),
+    };
+  }
+  return {
+    ok: true,
+    alias: normalizedAlias,
+  };
+}
+
+function normalizePluginLookupToken(value: unknown): string {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/gu, ' ')
+    .replace(/[_/\\-]+/gu, ' ')
+    .replace(/\s+/gu, ' ');
+}
+
+function normalizePluginAliasValue(value: unknown): string {
+  return String(value ?? '')
+    .trim()
+    .replace(/^\/+/u, '')
+    .toLowerCase();
+}
+
+function pushUniqueExplicitPluginTarget(targets: ExplicitPluginTargetHint[], target: ExplicitPluginTargetHint): void {
+  if (!target || typeof target !== 'object') {
+    return;
+  }
+  if (targets.some((entry) => entry.pluginId === target.pluginId)) {
+    return;
+  }
+  targets.push(target);
+}
+
+function resolvePluginTargetHintFromCatalog({
+  token,
+  allPlugins,
+  aliases,
+  syntax,
+  aliasOnly = false,
+}: {
+  token: string;
+  allPlugins: ProviderPluginSummary[];
+  aliases: ResolvedPluginAlias[];
+  syntax: ExplicitPluginTargetHint['syntax'];
+  aliasOnly?: boolean;
+}): ExplicitPluginTargetHint | null {
+  const rawToken = String(token ?? '').trim();
+  const normalizedAlias = normalizePluginAliasValue(rawToken);
+  const alias = normalizedAlias
+    ? aliases.find((entry) => entry.alias === normalizedAlias) ?? null
+    : null;
+  if (alias) {
+    const plugin = allPlugins.find((entry) => entry.id === alias.pluginId) ?? null;
+    if (!plugin) {
+      return null;
+    }
+    return {
+      pluginId: plugin.id,
+      pluginName: plugin.name,
+      pluginDisplayName: getPluginDisplayName(plugin),
+      alias: alias.alias,
+      source: alias.source,
+      syntax,
+    };
+  }
+  if (aliasOnly) {
+    return null;
+  }
+  const normalized = normalizePluginLookupToken(rawToken);
+  if (!normalized) {
+    return null;
+  }
+  const byExact = allPlugins.find((entry) => {
+    const candidates = [
+      entry.id,
+      entry.name,
+      entry.displayName ?? '',
+    ];
+    return candidates.some((candidate) => normalizePluginLookupToken(candidate) === normalized);
+  }) ?? null;
+  if (!byExact) {
+    return null;
+  }
+  const displayAlias = aliases.find((entry) => entry.pluginId === byExact.id) ?? null;
+  return {
+    pluginId: byExact.id,
+    pluginName: byExact.name,
+    pluginDisplayName: getPluginDisplayName(byExact),
+    alias: displayAlias?.alias ?? null,
+    source: displayAlias?.source ?? 'resolved',
+    syntax,
+  };
+}
+
+function parseConversationPluginInvocation(text: string): ParsedConversationPluginInvocation | null {
+  const raw = String(text ?? '').trim();
+  if (!raw) {
+    return null;
+  }
+  const mentionMatch = raw.match(/^@([a-z0-9][a-z0-9_-]{0,31})\s+([\s\S]+)$/u);
+  if (mentionMatch) {
+    return {
+      token: mentionMatch[1],
+      taskText: mentionMatch[2].trim(),
+      syntax: 'at_alias',
+    };
+  }
+  const zhMatch = raw.match(/^用\s*([a-z0-9][a-z0-9_-]{0,31})(?:\s+|[,:：，]\s*)([\s\S]+)$/u);
+  if (zhMatch) {
+    return {
+      token: zhMatch[1],
+      taskText: zhMatch[2].trim(),
+      syntax: 'zh_alias',
+    };
+  }
+  return null;
 }
 
 function normalizeNullableString(value: unknown): string | null {

@@ -7,9 +7,20 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { writeSequencedStderrLine } from '../../core/sequenced_stderr.js';
 import { readCodexAccountIdentity } from './auth_state.js';
 import type {
+  ProviderAppInfo,
   ProviderApprovalRequest,
+  ProviderMcpServerStatus,
+  ProviderMcpOauthLoginResult,
+  ProviderPluginDetail,
+  ProviderPluginInstallResult,
+  ProviderPluginLoadError,
+  ProviderPluginMarketplace,
+  ProviderPluginsListResult,
+  ProviderPluginSummary,
   ProviderSkillError,
   ProviderSkillInfo,
+  ProviderPluginAppSummary,
+  ProviderPluginSkillSummary,
   ProviderSkillsListResult,
   ProviderSkillToolDependency,
   ProviderUsageReport,
@@ -109,6 +120,126 @@ interface CodexAppSkillsListEntry {
   cwd?: string | null;
   errors?: CodexAppSkillErrorInfo[] | null;
   skills?: CodexAppSkillMetadata[] | null;
+}
+
+interface CodexAppPluginInterface {
+  brandColor?: string | null;
+  capabilities?: string[] | null;
+  category?: string | null;
+  defaultPrompt?: string[] | null;
+  developerName?: string | null;
+  displayName?: string | null;
+  longDescription?: string | null;
+  shortDescription?: string | null;
+  websiteUrl?: string | null;
+}
+
+interface CodexAppPluginSourceLocal {
+  type?: 'local' | string | null;
+  path?: string | null;
+}
+
+interface CodexAppPluginSourceMarketplace {
+  type?: 'marketplace' | string | null;
+  marketplaceName?: string | null;
+}
+
+type CodexAppPluginSource = CodexAppPluginSourceLocal | CodexAppPluginSourceMarketplace | null;
+
+interface CodexAppPluginSummary {
+  id?: string | null;
+  name?: string | null;
+  installed?: boolean | null;
+  enabled?: boolean | null;
+  installPolicy?: string | null;
+  authPolicy?: string | null;
+  interface?: CodexAppPluginInterface | null;
+  source?: CodexAppPluginSource;
+}
+
+interface CodexAppPluginMarketplace {
+  name?: string | null;
+  path?: string | null;
+  interface?: {
+    displayName?: string | null;
+  } | null;
+  plugins?: CodexAppPluginSummary[] | null;
+}
+
+interface CodexAppMarketplaceLoadError {
+  marketplacePath?: string | null;
+  message?: string | null;
+}
+
+interface CodexAppPluginListResponse {
+  featuredPluginIds?: string[] | null;
+  marketplaceLoadErrors?: CodexAppMarketplaceLoadError[] | null;
+  marketplaces?: CodexAppPluginMarketplace[] | null;
+}
+
+interface CodexAppPluginAppSummary {
+  id?: string | null;
+  name?: string | null;
+  needsAuth?: boolean | null;
+  description?: string | null;
+  installUrl?: string | null;
+}
+
+interface CodexAppPluginSkillInterface {
+  displayName?: string | null;
+}
+
+interface CodexAppPluginSkillSummary {
+  name?: string | null;
+  path?: string | null;
+  description?: string | null;
+  enabled?: boolean | null;
+  shortDescription?: string | null;
+  interface?: CodexAppPluginSkillInterface | null;
+}
+
+interface CodexAppPluginDetail {
+  summary?: CodexAppPluginSummary | null;
+  marketplaceName?: string | null;
+  marketplacePath?: string | null;
+  description?: string | null;
+  apps?: CodexAppPluginAppSummary[] | null;
+  mcpServers?: string[] | null;
+  skills?: CodexAppPluginSkillSummary[] | null;
+}
+
+interface CodexAppPluginInstallResponse {
+  authPolicy?: string | null;
+  appsNeedingAuth?: CodexAppPluginAppSummary[] | null;
+}
+
+interface CodexAppInfo {
+  id?: string | null;
+  name?: string | null;
+  description?: string | null;
+  installUrl?: string | null;
+  isAccessible?: boolean | null;
+  isEnabled?: boolean | null;
+  pluginDisplayNames?: string[] | null;
+  appMetadata?: {
+    categories?: string[] | null;
+    developer?: string | null;
+  } | null;
+  branding?: {
+    developer?: string | null;
+  } | null;
+}
+
+interface CodexAppMcpServerStatus {
+  name?: string | null;
+  authStatus?: string | null;
+  resourceTemplates?: unknown[] | null;
+  resources?: unknown[] | null;
+  tools?: Record<string, unknown> | null;
+}
+
+interface CodexAppMcpOauthLoginResponse {
+  authorizationUrl?: string | null;
 }
 
 interface PendingRequest {
@@ -620,6 +751,190 @@ export class CodexAppClient extends EventEmitter {
       enabled,
       name,
       path,
+    }, { timeoutMs: 30_000 });
+  }
+
+  async listPlugins({
+    cwd = null,
+  }: {
+    cwd?: string | null;
+  } = {}): Promise<ProviderPluginsListResult> {
+    const result: CodexAppPluginListResponse = await this.request('plugin/list', {
+      cwds: cwd ? [cwd] : [],
+    }, { timeoutMs: 30_000 });
+    return {
+      featuredPluginIds: Array.isArray(result?.featuredPluginIds)
+        ? result.featuredPluginIds.map((value) => String(value ?? '').trim()).filter(Boolean)
+        : [],
+      marketplaceLoadErrors: Array.isArray(result?.marketplaceLoadErrors)
+        ? result.marketplaceLoadErrors.map(mapPluginLoadError).filter(Boolean) as ProviderPluginLoadError[]
+        : [],
+      marketplaces: Array.isArray(result?.marketplaces)
+        ? result.marketplaces.map(mapPluginMarketplace).filter(Boolean) as ProviderPluginMarketplace[]
+        : [],
+    };
+  }
+
+  async readPlugin({
+    pluginName,
+    marketplaceName = null,
+    marketplacePath = null,
+  }: {
+    pluginName: string;
+    marketplaceName?: string | null;
+    marketplacePath?: string | null;
+  }): Promise<ProviderPluginDetail | null> {
+    const params: Record<string, unknown> = {
+      pluginName,
+    };
+    if (marketplacePath) {
+      params.marketplacePath = marketplacePath;
+    } else if (marketplaceName) {
+      params.remoteMarketplaceName = marketplaceName;
+    }
+    const result: any = await this.request('plugin/read', params, { timeoutMs: 30_000 });
+    return mapPluginDetail(result?.plugin ?? null, {
+      marketplaceName,
+      marketplacePath,
+    });
+  }
+
+  async installPlugin({
+    pluginName,
+    marketplaceName = null,
+    marketplacePath = null,
+  }: {
+    pluginName: string;
+    marketplaceName?: string | null;
+    marketplacePath?: string | null;
+  }): Promise<ProviderPluginInstallResult> {
+    const params: Record<string, unknown> = {
+      pluginName,
+    };
+    if (marketplacePath) {
+      params.marketplacePath = marketplacePath;
+    } else if (marketplaceName) {
+      params.remoteMarketplaceName = marketplaceName;
+    }
+    const result: CodexAppPluginInstallResponse = await this.request('plugin/install', params, { timeoutMs: 30_000 });
+    return {
+      authPolicy: normalizeNullableString(result?.authPolicy),
+      appsNeedingAuth: Array.isArray(result?.appsNeedingAuth)
+        ? result.appsNeedingAuth.map(mapPluginAppSummary).filter(Boolean) as ProviderPluginAppSummary[]
+        : [],
+    };
+  }
+
+  async uninstallPlugin({
+    pluginId,
+  }: {
+    pluginId: string;
+  }): Promise<void> {
+    await this.request('plugin/uninstall', {
+      pluginId,
+    }, { timeoutMs: 30_000 });
+  }
+
+  async listApps(): Promise<ProviderAppInfo[]> {
+    const apps = [];
+    let cursor = null;
+    do {
+      const result: any = await this.request('app/list', {
+        cursor,
+        limit: 100,
+      }, { timeoutMs: 30_000 });
+      const rows = Array.isArray(result?.data) ? result.data : [];
+      apps.push(...rows.map(mapAppInfo).filter(Boolean));
+      cursor = typeof result?.nextCursor === 'string' ? result.nextCursor : null;
+    } while (cursor);
+    return apps;
+  }
+
+  async listMcpServerStatuses(): Promise<ProviderMcpServerStatus[]> {
+    const servers = [];
+    let cursor = null;
+    do {
+      const result: any = await this.request('mcpServerStatus/list', {
+        cursor,
+        limit: 100,
+      }, { timeoutMs: 30_000 });
+      const rows = Array.isArray(result?.data) ? result.data : [];
+      servers.push(...rows.map(mapMcpServerStatus).filter(Boolean));
+      cursor = typeof result?.nextCursor === 'string' ? result.nextCursor : null;
+    } while (cursor);
+    return servers;
+  }
+
+  async setAppEnabled({
+    appId,
+    enabled,
+  }: {
+    appId: string;
+    enabled: boolean;
+  }): Promise<void> {
+    await this.writeConfigValue({
+      keyPath: formatConfigKeyPath(['apps', appId, 'enabled']),
+      value: enabled,
+    });
+  }
+
+  async setMcpServerEnabled({
+    name,
+    enabled,
+  }: {
+    name: string;
+    enabled: boolean;
+  }): Promise<void> {
+    await this.writeConfigValue({
+      keyPath: formatConfigKeyPath(['mcp_servers', name, 'enabled']),
+      value: enabled,
+    });
+  }
+
+  async startMcpServerOauthLogin({
+    name,
+    scopes = null,
+    timeoutSecs = null,
+  }: {
+    name: string;
+    scopes?: string[] | null;
+    timeoutSecs?: number | null;
+  }): Promise<ProviderMcpOauthLoginResult> {
+    const result: CodexAppMcpOauthLoginResponse = await this.request('mcpServer/oauth/login', {
+      name,
+      scopes,
+      timeoutSecs,
+    }, { timeoutMs: 30_000 });
+    const authorizationUrl = normalizeNullableString(result?.authorizationUrl);
+    if (!authorizationUrl) {
+      throw new Error(`mcpServer/oauth/login returned no authorization URL for ${name}`);
+    }
+    return { authorizationUrl };
+  }
+
+  async reloadMcpServers(): Promise<void> {
+    await this.request('config/mcpServer/reload', {}, { timeoutMs: 30_000 });
+  }
+
+  async writeConfigValue({
+    keyPath,
+    value,
+    mergeStrategy = 'upsert',
+    filePath = null,
+    expectedVersion = null,
+  }: {
+    keyPath: string;
+    value: unknown;
+    mergeStrategy?: 'replace' | 'upsert';
+    filePath?: string | null;
+    expectedVersion?: string | null;
+  }): Promise<void> {
+    await this.request('config/value/write', {
+      keyPath,
+      value,
+      mergeStrategy,
+      filePath,
+      expectedVersion,
     }, { timeoutMs: 30_000 });
   }
 
@@ -1365,6 +1680,21 @@ export class CodexAppClient extends EventEmitter {
               markCompleted: true,
             });
             const previewText = resolveTurnPreviewText(turn, progressState);
+            if (!previewText && sessionState.runtimeError) {
+              const result = {
+                turnId,
+                threadId,
+                title: thread?.title ?? null,
+                outputText: '',
+                outputState: 'provider_error',
+                previewText: '',
+                finalSource: 'session_runtime_error',
+                status: turn.status,
+                errorMessage: sessionState.runtimeError,
+              };
+              this.logDebug('turn_wait_return', summarizeTurnResultForDebug(result));
+              return result;
+            }
             const result = {
               turnId,
               threadId,
@@ -1825,6 +2155,18 @@ function normalizeBoolean(value: unknown): boolean | null {
   return typeof value === 'boolean' ? value : null;
 }
 
+function formatConfigKeyPath(segments: string[]): string {
+  return segments
+    .map((segment) => {
+      const value = String(segment ?? '').trim();
+      if (/^[A-Za-z0-9_]+$/u.test(value)) {
+        return value;
+      }
+      return `"${value.replace(/\\/gu, '\\\\').replace(/"/gu, '\\"')}"`;
+    })
+    .join('.');
+}
+
 function serializeCollaborationMode({ collaborationMode, model, effort, developerInstructions = '' }: any) {
   if (!collaborationMode) {
     return null;
@@ -2025,11 +2367,13 @@ function summarizeSessionState(sessionPath: string | null | undefined, sessionSt
   hasTaskComplete: boolean;
   lastAgentMessage: string | null;
   outputArtifacts: Array<{ kind?: string | null; path?: string | null }>;
+  runtimeError?: string | null;
 }) {
   return {
     sessionPath: sessionPath ?? null,
     hasTaskComplete: sessionState.hasTaskComplete,
     lastAgentMessagePreview: truncateDebugText(sessionState.lastAgentMessage, 160),
+    runtimeError: truncateDebugText(sessionState.runtimeError, 160),
     outputArtifactCount: sessionState.outputArtifacts.length,
     outputArtifacts: sessionState.outputArtifacts.map((artifact) => ({
       kind: artifact.kind ?? null,
@@ -2045,6 +2389,7 @@ function summarizeTurnResultForDebug(result: ProviderTurnResult) {
     status: result.status ?? null,
     outputState: result.outputState ?? null,
     finalSource: result.finalSource ?? null,
+    errorMessage: truncateDebugText(result.errorMessage, 160),
     outputTextPreview: truncateDebugText(result.outputText, 160),
     previewTextPreview: truncateDebugText(result.previewText, 160),
     outputArtifactCount: Array.isArray(result.outputArtifacts) ? result.outputArtifacts.length : 0,
@@ -2281,6 +2626,180 @@ function mapSkillErrorInfo(raw: CodexAppSkillErrorInfo): ProviderSkillError | nu
   return {
     path: skillPath,
     message,
+  };
+}
+
+function mapPluginLoadError(raw: CodexAppMarketplaceLoadError): ProviderPluginLoadError | null {
+  const marketplacePath = normalizeNullableString(raw?.marketplacePath);
+  const message = normalizeNullableString(raw?.message);
+  if (!marketplacePath || !message) {
+    return null;
+  }
+  return {
+    marketplacePath,
+    message,
+  };
+}
+
+function mapPluginMarketplace(raw: CodexAppPluginMarketplace): ProviderPluginMarketplace | null {
+  const name = normalizeNullableString(raw?.name);
+  if (!name) {
+    return null;
+  }
+  return {
+    name,
+    path: normalizeNullableString(raw?.path),
+    displayName: normalizeNullableString(raw?.interface?.displayName),
+    plugins: Array.isArray(raw?.plugins)
+      ? raw.plugins.map((plugin) => mapPluginSummary(plugin, {
+        marketplaceName: name,
+        marketplacePath: normalizeNullableString(raw?.path),
+        marketplaceDisplayName: normalizeNullableString(raw?.interface?.displayName),
+      })).filter(Boolean) as ProviderPluginSummary[]
+      : [],
+  };
+}
+
+function mapPluginSummary(
+  raw: CodexAppPluginSummary | null | undefined,
+  context: {
+    marketplaceName?: string | null;
+    marketplacePath?: string | null;
+    marketplaceDisplayName?: string | null;
+  } = {},
+): ProviderPluginSummary | null {
+  const id = normalizeNullableString(raw?.id);
+  const name = normalizeNullableString(raw?.name);
+  if (!id || !name) {
+    return null;
+  }
+  const sourceType = normalizeNullableString((raw?.source as any)?.type);
+  const defaultPrompts = Array.isArray(raw?.interface?.defaultPrompt)
+    ? raw.interface.defaultPrompt.map((entry) => normalizeNullableString(entry)).filter(Boolean) as string[]
+    : [];
+  return {
+    id,
+    name,
+    installed: raw?.installed !== false,
+    enabled: raw?.enabled !== false,
+    installPolicy: normalizeNullableString(raw?.installPolicy) ?? 'AVAILABLE',
+    authPolicy: normalizeNullableString(raw?.authPolicy) ?? 'ON_USE',
+    marketplaceName: normalizeNullableString(context.marketplaceName) ?? 'unknown',
+    marketplacePath: normalizeNullableString(context.marketplacePath),
+    marketplaceDisplayName: normalizeNullableString(context.marketplaceDisplayName),
+    displayName: normalizeNullableString(raw?.interface?.displayName),
+    shortDescription: normalizeNullableString(raw?.interface?.shortDescription),
+    longDescription: normalizeNullableString(raw?.interface?.longDescription),
+    category: normalizeNullableString(raw?.interface?.category),
+    capabilities: Array.isArray(raw?.interface?.capabilities)
+      ? raw.interface.capabilities.map((entry) => String(entry ?? '').trim()).filter(Boolean)
+      : [],
+    developerName: normalizeNullableString(raw?.interface?.developerName),
+    brandColor: normalizeNullableString(raw?.interface?.brandColor),
+    defaultPrompts,
+    websiteUrl: normalizeNullableString(raw?.interface?.websiteUrl),
+    sourceType,
+    sourcePath: normalizeNullableString((raw?.source as any)?.path),
+    sourceRemoteMarketplaceName: normalizeNullableString((raw?.source as any)?.marketplaceName),
+  };
+}
+
+function mapPluginSkillSummary(raw: CodexAppPluginSkillSummary): ProviderPluginSkillSummary | null {
+  const name = normalizeNullableString(raw?.name);
+  const skillPath = normalizeNullableString(raw?.path);
+  const description = normalizeNullableString(raw?.description);
+  if (!name || !skillPath || !description) {
+    return null;
+  }
+  return {
+    name,
+    path: skillPath,
+    description,
+    enabled: raw?.enabled !== false,
+    shortDescription: normalizeNullableString(raw?.shortDescription),
+    displayName: normalizeNullableString(raw?.interface?.displayName),
+  };
+}
+
+function mapPluginAppSummary(raw: CodexAppPluginAppSummary): ProviderPluginAppSummary | null {
+  const id = normalizeNullableString(raw?.id);
+  const name = normalizeNullableString(raw?.name);
+  if (!id || !name) {
+    return null;
+  }
+  return {
+    id,
+    name,
+    needsAuth: Boolean(raw?.needsAuth),
+    description: normalizeNullableString(raw?.description),
+    installUrl: normalizeNullableString(raw?.installUrl),
+  };
+}
+
+function mapPluginDetail(
+  raw: CodexAppPluginDetail | null | undefined,
+  fallback: {
+    marketplaceName?: string | null;
+    marketplacePath?: string | null;
+  } = {},
+): ProviderPluginDetail | null {
+  if (!raw || typeof raw !== 'object') {
+    return null;
+  }
+  const summary = mapPluginSummary(raw.summary ?? null, {
+    marketplaceName: normalizeNullableString(raw?.marketplaceName) ?? normalizeNullableString(fallback.marketplaceName),
+    marketplacePath: normalizeNullableString(raw?.marketplacePath) ?? normalizeNullableString(fallback.marketplacePath),
+  });
+  if (!summary) {
+    return null;
+  }
+  return {
+    summary,
+    marketplaceName: normalizeNullableString(raw?.marketplaceName) ?? summary.marketplaceName,
+    marketplacePath: normalizeNullableString(raw?.marketplacePath) ?? summary.marketplacePath,
+    description: normalizeNullableString(raw?.description),
+    apps: Array.isArray(raw?.apps) ? raw.apps.map(mapPluginAppSummary).filter(Boolean) as ProviderPluginAppSummary[] : [],
+    mcpServers: Array.isArray(raw?.mcpServers) ? raw.mcpServers.map((entry) => String(entry ?? '').trim()).filter(Boolean) : [],
+    skills: Array.isArray(raw?.skills) ? raw.skills.map(mapPluginSkillSummary).filter(Boolean) as ProviderPluginSkillSummary[] : [],
+  };
+}
+
+function mapAppInfo(raw: CodexAppInfo): ProviderAppInfo | null {
+  const id = normalizeNullableString(raw?.id);
+  const name = normalizeNullableString(raw?.name);
+  if (!id || !name) {
+    return null;
+  }
+  const categories = Array.isArray(raw?.appMetadata?.categories)
+    ? raw.appMetadata.categories.map((entry) => normalizeNullableString(entry)).filter(Boolean) as string[]
+    : [];
+  return {
+    id,
+    name,
+    description: normalizeNullableString(raw?.description),
+    installUrl: normalizeNullableString(raw?.installUrl),
+    isAccessible: Boolean(raw?.isAccessible),
+    isEnabled: raw?.isEnabled !== false,
+    pluginDisplayNames: Array.isArray(raw?.pluginDisplayNames)
+      ? raw.pluginDisplayNames.map((entry) => String(entry ?? '').trim()).filter(Boolean)
+      : [],
+    categories,
+    developer: normalizeNullableString(raw?.appMetadata?.developer)
+      ?? normalizeNullableString(raw?.branding?.developer),
+  };
+}
+
+function mapMcpServerStatus(raw: CodexAppMcpServerStatus): ProviderMcpServerStatus | null {
+  const name = normalizeNullableString(raw?.name);
+  if (!name) {
+    return null;
+  }
+  return {
+    name,
+    authStatus: normalizeNullableString(raw?.authStatus) ?? 'unsupported',
+    toolCount: raw?.tools && typeof raw.tools === 'object' ? Object.keys(raw.tools).length : 0,
+    resourceCount: Array.isArray(raw?.resources) ? raw.resources.length : 0,
+    resourceTemplateCount: Array.isArray(raw?.resourceTemplates) ? raw.resourceTemplates.length : 0,
   };
 }
 
@@ -2683,6 +3202,7 @@ function inspectTurnCompletionFromSessionPath(sessionPath, turnId) {
       hasTaskComplete: false,
       lastAgentMessage: null,
       outputArtifacts: [],
+      runtimeError: null,
     };
   }
   try {
@@ -2706,9 +3226,11 @@ function inspectTurnCompletionFromSessionPath(sessionPath, turnId) {
         continue;
       }
       const lastAgentMessage = extractTextCandidate(payload.last_agent_message)?.trim() || null;
+      const runtimeError = findSessionRuntimeErrorForTurn(lines, index, turnId);
       return inspectSessionTurnArtifacts(lines, index, {
         hasTaskComplete: true,
         lastAgentMessage,
+        runtimeError,
       });
     }
   } catch {
@@ -2716,13 +3238,125 @@ function inspectTurnCompletionFromSessionPath(sessionPath, turnId) {
       hasTaskComplete: false,
       lastAgentMessage: null,
       outputArtifacts: [],
+      runtimeError: null,
     };
   }
   return {
     hasTaskComplete: false,
     lastAgentMessage: null,
     outputArtifacts: [],
+    runtimeError: null,
   };
+}
+
+function findSessionRuntimeErrorForTurn(lines: string[], taskCompleteIndex: number, turnId: string): string | null {
+  for (let index = taskCompleteIndex - 1; index >= 0; index -= 1) {
+    const line = lines[index]?.trim();
+    if (!line) {
+      continue;
+    }
+    let entry: any = null;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const payload = entry?.payload ?? null;
+    if (entry?.type === 'turn_context') {
+      if (String(payload?.turn_id ?? '') === turnId) {
+        break;
+      }
+      continue;
+    }
+    if (entry?.type !== 'event_msg') {
+      continue;
+    }
+    const eventType = String(payload?.type ?? '');
+    if (eventType === 'task_started' && String(payload?.turn_id ?? '') === turnId) {
+      break;
+    }
+    if (eventType === 'token_count') {
+      const rateLimitError = describeSessionRateLimitError(payload?.rate_limits ?? payload?.rateLimits ?? null);
+      if (rateLimitError) {
+        return rateLimitError;
+      }
+    }
+    const message = extractSessionErrorMessage(payload);
+    if (message) {
+      return message;
+    }
+  }
+  return null;
+}
+
+function extractSessionErrorMessage(payload: any): string | null {
+  const eventType = String(payload?.type ?? '').toLowerCase();
+  if (!/error|failed|failure/.test(eventType)) {
+    return null;
+  }
+  return extractTextCandidate(payload?.message)
+    ?? extractTextCandidate(payload?.error)
+    ?? extractTextCandidate(payload);
+}
+
+function describeSessionRateLimitError(rateLimits: any): string | null {
+  if (!rateLimits || typeof rateLimits !== 'object') {
+    return null;
+  }
+  const limitId = normalizeRateLimitString(rateLimits.limit_id ?? rateLimits.limitId) ?? 'codex';
+  const credits = rateLimits.credits && typeof rateLimits.credits === 'object'
+    ? rateLimits.credits
+    : null;
+  if (credits) {
+    const hasCredits = normalizeRateLimitBoolean(credits.has_credits ?? credits.hasCredits);
+    const unlimited = normalizeRateLimitBoolean(credits.unlimited) === true;
+    const balance = normalizeRateLimitString(credits.balance);
+    if (hasCredits === false && !unlimited) {
+      return `Codex subscription credits are exhausted (${limitId} balance ${balance ?? '0'}).`;
+    }
+  }
+  const reachedType = normalizeRateLimitString(rateLimits.rate_limit_reached_type ?? rateLimits.rateLimitReachedType);
+  if (reachedType) {
+    return `Codex usage limit reached (${limitId}: ${reachedType}).`;
+  }
+  const primaryUsed = normalizeRateLimitNumber(rateLimits.primary?.used_percent ?? rateLimits.primary?.usedPercent);
+  if (primaryUsed !== null && primaryUsed >= 100) {
+    return `Codex usage limit reached (${limitId} primary ${Math.round(primaryUsed)}%).`;
+  }
+  const secondaryUsed = normalizeRateLimitNumber(rateLimits.secondary?.used_percent ?? rateLimits.secondary?.usedPercent);
+  if (secondaryUsed !== null && secondaryUsed >= 100) {
+    return `Codex usage limit reached (${limitId} weekly ${Math.round(secondaryUsed)}%).`;
+  }
+  return null;
+}
+
+function normalizeRateLimitString(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const normalized = value.trim();
+  return normalized ? normalized : null;
+}
+
+function normalizeRateLimitBoolean(value: unknown): boolean | null {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'true') {
+      return true;
+    }
+    if (normalized === 'false') {
+      return false;
+    }
+  }
+  return null;
+}
+
+function normalizeRateLimitNumber(value: unknown): number | null {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
 }
 
 function inspectSessionTurnArtifacts(lines, taskCompleteIndex, state) {
@@ -2761,6 +3395,7 @@ function inspectSessionTurnArtifacts(lines, taskCompleteIndex, state) {
   return {
     hasTaskComplete: state.hasTaskComplete,
     lastAgentMessage: state.lastAgentMessage,
+    runtimeError: state.runtimeError ?? null,
     outputArtifacts,
   };
 }

@@ -1,4 +1,4 @@
-import type { AutomationJob, BridgeSession, SessionSettings, ThreadMetadata } from './core.js';
+import type { AutomationJob, BridgeSession, PluginAlias, SessionSettings, ThreadMetadata } from './core.js';
 import type { ProviderProfile } from './provider.js';
 
 export interface PlatformBinding {
@@ -36,6 +36,13 @@ export interface ThreadMetadataRepository {
   getByThread(providerProfileId: string, threadId: string): ThreadMetadata | null;
   save(metadata: ThreadMetadata): ThreadMetadata;
   listByProviderProfileId(providerProfileId: string): ThreadMetadata[];
+}
+
+export interface PluginAliasRepository {
+  getByAlias(platform: string, externalScopeId: string, providerProfileId: string, alias: string): PluginAlias | null;
+  save(alias: PluginAlias): PluginAlias;
+  delete(platform: string, externalScopeId: string, providerProfileId: string, alias: string): void;
+  listByScope(platform: string, externalScopeId: string, providerProfileId: string): PluginAlias[];
 }
 
 export interface AutomationJobRepository {

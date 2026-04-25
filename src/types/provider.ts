@@ -122,6 +122,104 @@ export interface ProviderSkillsListResult {
   errors: ProviderSkillError[];
 }
 
+export interface ProviderPluginLoadError {
+  marketplacePath: string;
+  message: string;
+}
+
+export interface ProviderPluginSummary {
+  id: string;
+  name: string;
+  installed: boolean;
+  enabled: boolean;
+  installPolicy: 'NOT_AVAILABLE' | 'AVAILABLE' | 'INSTALLED_BY_DEFAULT' | string;
+  authPolicy: 'ON_INSTALL' | 'ON_USE' | string;
+  marketplaceName: string;
+  marketplacePath: string | null;
+  marketplaceDisplayName?: string | null;
+  displayName?: string | null;
+  shortDescription?: string | null;
+  longDescription?: string | null;
+  category?: string | null;
+  capabilities?: string[];
+  developerName?: string | null;
+  brandColor?: string | null;
+  defaultPrompts?: string[] | null;
+  websiteUrl?: string | null;
+  sourceType?: string | null;
+  sourcePath?: string | null;
+  sourceRemoteMarketplaceName?: string | null;
+}
+
+export interface ProviderPluginMarketplace {
+  name: string;
+  path: string | null;
+  displayName?: string | null;
+  plugins: ProviderPluginSummary[];
+}
+
+export interface ProviderPluginsListResult {
+  featuredPluginIds: string[];
+  marketplaceLoadErrors: ProviderPluginLoadError[];
+  marketplaces: ProviderPluginMarketplace[];
+}
+
+export interface ProviderPluginAppSummary {
+  id: string;
+  name: string;
+  needsAuth: boolean;
+  description?: string | null;
+  installUrl?: string | null;
+}
+
+export interface ProviderPluginSkillSummary {
+  name: string;
+  path: string;
+  description: string;
+  enabled: boolean;
+  shortDescription?: string | null;
+  displayName?: string | null;
+}
+
+export interface ProviderPluginDetail {
+  summary: ProviderPluginSummary;
+  marketplaceName: string;
+  marketplacePath: string | null;
+  description?: string | null;
+  apps: ProviderPluginAppSummary[];
+  mcpServers: string[];
+  skills: ProviderPluginSkillSummary[];
+}
+
+export interface ProviderPluginInstallResult {
+  authPolicy: 'ON_INSTALL' | 'ON_USE' | string | null;
+  appsNeedingAuth: ProviderPluginAppSummary[];
+}
+
+export interface ProviderMcpOauthLoginResult {
+  authorizationUrl: string;
+}
+
+export interface ProviderAppInfo {
+  id: string;
+  name: string;
+  description?: string | null;
+  installUrl?: string | null;
+  isAccessible: boolean;
+  isEnabled: boolean;
+  pluginDisplayNames: string[];
+  categories?: string[] | null;
+  developer?: string | null;
+}
+
+export interface ProviderMcpServerStatus {
+  name: string;
+  authStatus: 'unsupported' | 'notLoggedIn' | 'bearerToken' | 'oAuth' | string;
+  toolCount: number;
+  resourceCount: number;
+  resourceTemplateCount: number;
+}
+
 export interface ProviderTurnProgress {
   text: string;
   delta: string;
@@ -164,6 +262,7 @@ export interface ProviderTurnResult {
   outputState?: string;
   previewText?: string;
   finalSource?: string;
+  errorMessage?: string | null;
   turnId?: string | null;
   threadId?: string | null;
   title?: string | null;
@@ -260,6 +359,51 @@ export interface ProviderPluginContract {
     cwd?: string | null;
     forceReload?: boolean;
   }): Promise<ProviderSkillsListResult>;
+  listPlugins?(params: {
+    providerProfile: ProviderProfile;
+    cwd?: string | null;
+  }): Promise<ProviderPluginsListResult>;
+  readPlugin?(params: {
+    providerProfile: ProviderProfile;
+    pluginName: string;
+    marketplaceName?: string | null;
+    marketplacePath?: string | null;
+  }): Promise<ProviderPluginDetail | null>;
+  installPlugin?(params: {
+    providerProfile: ProviderProfile;
+    pluginName: string;
+    marketplaceName?: string | null;
+    marketplacePath?: string | null;
+  }): Promise<ProviderPluginInstallResult>;
+  uninstallPlugin?(params: {
+    providerProfile: ProviderProfile;
+    pluginId: string;
+  }): Promise<void>;
+  listApps?(params: {
+    providerProfile: ProviderProfile;
+  }): Promise<ProviderAppInfo[]>;
+  listMcpServerStatuses?(params: {
+    providerProfile: ProviderProfile;
+  }): Promise<ProviderMcpServerStatus[]>;
+  setAppEnabled?(params: {
+    providerProfile: ProviderProfile;
+    appId: string;
+    enabled: boolean;
+  }): Promise<void>;
+  setMcpServerEnabled?(params: {
+    providerProfile: ProviderProfile;
+    name: string;
+    enabled: boolean;
+  }): Promise<void>;
+  startMcpServerOauthLogin?(params: {
+    providerProfile: ProviderProfile;
+    name: string;
+    scopes?: string[] | null;
+    timeoutSecs?: number | null;
+  }): Promise<ProviderMcpOauthLoginResult>;
+  reloadMcpServers?(params: {
+    providerProfile: ProviderProfile;
+  }): Promise<void>;
   setSkillEnabled?(params: {
     providerProfile: ProviderProfile;
     enabled: boolean;

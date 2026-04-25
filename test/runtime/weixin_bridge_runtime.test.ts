@@ -1169,6 +1169,40 @@ test('WeixinBridgeRuntime forwards provider error details to Weixin', async () =
   ]);
 });
 
+test('WeixinBridgeRuntime rewrites exhausted Codex credits into a specific user-facing message', async () => {
+  const sent: Array<{ externalScopeId: string; content: string }> = [];
+  const runtime = makeRuntime({
+    sendText: async ({ externalScopeId, content }) => {
+      sent.push({ externalScopeId, content });
+    },
+    coordinator: {
+      async handleInboundEvent() {
+        return {
+          type: 'message',
+          messages: [{ text: '' }],
+          meta: {
+            codexTurn: {
+              outputState: 'provider_error',
+              previewText: '',
+              finalSource: 'session_runtime_error',
+              errorMessage: 'Codex subscription credits are exhausted (premium balance 0).',
+            },
+          },
+        };
+      },
+    },
+  });
+
+  await runtime.runOnce();
+
+  assert.deepEqual(sent, [
+    {
+      externalScopeId: 'wxid_1',
+      content: 'Codex 订阅额度已用完：Codex subscription credits are exhausted (premium balance 0)。请升级套餐或等待额度恢复后重试。',
+    },
+  ]);
+});
+
 
 
 test('WeixinBridgeRuntime replies immediately when a second plain-text message arrives during an active scope turn', async () => {
