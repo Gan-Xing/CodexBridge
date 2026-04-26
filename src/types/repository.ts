@@ -1,4 +1,4 @@
-import type { AutomationJob, BridgeSession, PluginAlias, SessionSettings, ThreadMetadata } from './core.js';
+import type { AgentJob, AutomationJob, BridgeSession, PluginAlias, SessionSettings, ThreadMetadata } from './core.js';
 import type { ProviderProfile } from './provider.js';
 
 export interface PlatformBinding {
@@ -50,4 +50,11 @@ export interface AutomationJobRepository {
   save(job: AutomationJob): AutomationJob;
   delete(id: string): void;
   list(): AutomationJob[];
+}
+
+export interface AgentJobRepository {
+  getById(id: string): AgentJob | null;
+  save(job: AgentJob): AgentJob;
+  delete(id: string): void;
+  list(): AgentJob[];
 }

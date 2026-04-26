@@ -28,11 +28,16 @@ import {
 } from '../providers/codex/instructions_state.js';
 import type { WeiboHotSearchServiceLike } from '../services/weibo_hot_search.js';
 import type {
+  AgentJob,
+  AgentJobCategory,
+  AgentJobMode,
+  AgentJobRiskLevel,
   AutomationMode,
   AutomationSchedule,
   PlatformScopeRef,
   PluginAlias,
   SessionSettings,
+  TurnArtifactDeliveredItem,
   TurnArtifactDeliveryState,
   UploadBatchItem,
   UploadBatchState,
@@ -132,6 +137,40 @@ type PendingAutomationDraft = {
   cwd: string | null;
   initialSettings: Partial<SessionSettings>;
   threadBridgeSessionId: string | null;
+};
+
+type AgentDraftCandidate = {
+  title: string;
+  goal: string;
+  expectedOutput: string;
+  plan: string[];
+  category: AgentJobCategory;
+  riskLevel: AgentJobRiskLevel;
+  mode: AgentJobMode;
+};
+
+type PendingAgentDraft = AgentDraftCandidate & {
+  createdAt: number;
+  rawInput: string;
+  normalizedBy: 'agents-sdk' | 'codex' | 'local';
+  providerProfileId: string;
+  locale: string | null;
+  cwd: string | null;
+  initialSettings: Partial<SessionSettings>;
+};
+
+type AgentVerificationResult = {
+  pass: boolean;
+  summary: string;
+  issues: string[];
+  nextAction: 'complete' | 'retry' | 'fail';
+};
+
+type OpenAIAgentRuntimeConfig = {
+  apiKey: string | null;
+  baseURL: string | null;
+  model: string;
+  useResponses: boolean | undefined;
 };
 
 type SkillBrowserState = {
@@ -283,6 +322,7 @@ type StopCheckpointSnapshot = {
 export class BridgeCoordinator {
   bridgeSessions: any;
   automationJobs: any;
+  agentJobs: any;
   activeTurns: any;
   providerProfiles: any;
   providerRegistry: any;
@@ -305,12 +345,14 @@ export class BridgeCoordinator {
   pendingArtifactClarificationsByScope: Map<string, { originalText: string; askedAt: number }>;
   pendingInstructionsEditsByScope: Map<string, { startedAt: number }>;
   pendingAutomationDraftsByScope: Map<string, PendingAutomationDraft>;
+  pendingAgentDraftsByScope: Map<string, PendingAgentDraft>;
   localeContext: AsyncLocalStorage<SupportedLocale>;
   i18n: Translator;
 
   constructor({
     bridgeSessions,
     automationJobs = null,
+    agentJobs = null,
     activeTurns = null,
     providerProfiles,
     providerRegistry,
@@ -326,6 +368,7 @@ export class BridgeCoordinator {
   }) {
     this.bridgeSessions = bridgeSessions;
     this.automationJobs = automationJobs;
+    this.agentJobs = agentJobs;
     this.activeTurns = activeTurns;
     this.providerProfiles = providerProfiles;
     this.providerRegistry = providerRegistry;
@@ -347,6 +390,7 @@ export class BridgeCoordinator {
     this.pendingArtifactClarificationsByScope = new Map();
     this.pendingInstructionsEditsByScope = new Map();
     this.pendingAutomationDraftsByScope = new Map();
+    this.pendingAgentDraftsByScope = new Map();
     this.localeContext = new AsyncLocalStorage();
     this.i18n = createI18n(locale);
   }
@@ -598,6 +642,8 @@ export class BridgeCoordinator {
         return this.handleStopCommand(event);
       case 'review':
         return this.handleReviewCommand(event, command.args, options);
+      case 'agent':
+        return this.handleAgentCommand(event, command.args);
       case 'skills':
         return this.handleSkillsCommand(event, command.args);
       case 'apps':
@@ -2802,6 +2848,646 @@ export class BridgeCoordinator {
       stopReviewHeartbeat();
       await this.releaseActiveTurnIfStillRunning(scopeRef);
     }
+  }
+
+  async handleAgentCommand(event, args = []) {
+    if (!this.agentJobs) {
+      return messageResponse([
+        this.t('coordinator.agent.unsupported'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const scopeRef = toScopeRef(event);
+    const normalizedArgs = Array.isArray(args) ? args.map((value) => String(value ?? '').trim()).filter(Boolean) : [];
+    const subcommand = String(normalizedArgs[0] ?? '').trim().toLowerCase();
+    if (!subcommand) {
+      const pendingDraft = this.getPendingAgentDraft(scopeRef);
+      if (pendingDraft) {
+        return this.renderAgentDraftResponse(event, pendingDraft);
+      }
+      return this.handleAgentListCommand(event);
+    }
+    if (['confirm', 'c'].includes(subcommand)) {
+      return this.handleAgentConfirmCommand(event);
+    }
+    if (['edit'].includes(subcommand)) {
+      return this.handleAgentEditCommand(event);
+    }
+    if (['cancel'].includes(subcommand)) {
+      return this.handleAgentCancelCommand(event);
+    }
+    if (['list', 'ls'].includes(subcommand)) {
+      return this.handleAgentListCommand(event);
+    }
+    if (['show', 's'].includes(subcommand)) {
+      return this.handleAgentShowCommand(event, normalizedArgs[1] ?? '');
+    }
+    if (['result', 'res'].includes(subcommand)) {
+      return this.handleAgentResultCommand(event, normalizedArgs[1] ?? '', normalizedArgs[2] ?? '');
+    }
+    if (['send', 'resend'].includes(subcommand)) {
+      return this.handleAgentSendCommand(event, normalizedArgs[1] ?? '');
+    }
+    if (['stop'].includes(subcommand)) {
+      return this.handleAgentStopCommand(event, normalizedArgs[1] ?? '');
+    }
+    if (['retry', 'rt'].includes(subcommand)) {
+      return this.handleAgentRetryCommand(event, normalizedArgs[1] ?? '');
+    }
+    if (['delete', 'del'].includes(subcommand)) {
+      return this.handleAgentDeleteCommand(event, normalizedArgs[1] ?? '');
+    }
+    if (['rename'].includes(subcommand)) {
+      return this.handleAgentRenameCommand(event, normalizedArgs[1] ?? '', extractAgentRenameTitle(event.text));
+    }
+    if (['add'].includes(subcommand)) {
+      return this.handleAgentAddCommand(event, extractAgentAddBody(event.text));
+    }
+    return this.handleAgentAddCommand(event, extractAgentBody(event.text));
+  }
+
+  async handleAgentAddCommand(event, rawInput) {
+    const activeResponse = await this.rejectIfActiveTurnForCommand(event, 'agent');
+    if (activeResponse) {
+      return activeResponse;
+    }
+    const scopeRef = toScopeRef(event);
+    const body = compactWhitespace(rawInput);
+    if (!body) {
+      return this.handleHelpsCommand(event, ['agent']);
+    }
+    const draft = await this.normalizeAgentDraft(event, scopeRef, body);
+    this.setPendingAgentDraft(scopeRef, draft);
+    return this.renderAgentDraftResponse(event, draft);
+  }
+
+  async handleAgentConfirmCommand(event) {
+    const activeResponse = await this.rejectIfActiveTurnForCommand(event, 'agent');
+    if (activeResponse) {
+      return activeResponse;
+    }
+    const scopeRef = toScopeRef(event);
+    const draft = this.getPendingAgentDraft(scopeRef);
+    if (!draft) {
+      return messageResponse([
+        this.t('coordinator.agent.noDraft'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const targetSession = await this.bridgeSessions.createDetachedSession({
+      providerProfileId: draft.providerProfileId,
+      cwd: draft.cwd,
+      title: `Agent | ${draft.title}`,
+      initialSettings: {
+        ...draft.initialSettings,
+        locale: draft.locale,
+        collaborationMode: 'plan',
+        accessPreset: 'full-access',
+        approvalPolicy: 'never',
+        sandboxMode: 'danger-full-access',
+      },
+      providerStartOptions: {
+        sourcePlatform: event.platform,
+        source: 'agent',
+      },
+    });
+    const job: AgentJob = this.agentJobs.createJob({
+      scopeRef,
+      title: draft.title,
+      originalInput: draft.rawInput,
+      goal: draft.goal,
+      expectedOutput: draft.expectedOutput,
+      plan: draft.plan,
+      category: draft.category,
+      riskLevel: draft.riskLevel,
+      mode: draft.mode,
+      providerProfileId: draft.providerProfileId,
+      bridgeSessionId: targetSession.id,
+      cwd: draft.cwd,
+      locale: draft.locale,
+      maxAttempts: 2,
+    });
+    this.clearPendingAgentDraft(scopeRef);
+    const response = messageResponse([
+      this.t('coordinator.agent.created'),
+      this.t('coordinator.agent.title', { value: job.title }),
+      this.t('coordinator.agent.mode', { value: formatAgentMode(job.mode, this.currentI18n) }),
+      this.t('coordinator.agent.status', { value: formatAgentStatusLabel(job.status, job.running, this.currentI18n) }),
+      this.t('coordinator.agent.deliveryTarget'),
+      this.t('coordinator.agent.showHint', { index: this.agentJobs.listForScope(scopeRef).length }),
+    ], this.buildScopedSessionMeta(event));
+    response.meta = {
+      ...(response.meta ?? {}),
+      systemAction: {
+        kind: 'run_agent_sweep',
+      },
+    };
+    return response;
+  }
+
+  async handleAgentEditCommand(event) {
+    const replacement = extractAgentEditBody(event.text);
+    if (!replacement) {
+      return this.handleHelpsCommand(event, ['agent']);
+    }
+    return this.handleAgentAddCommand({
+      ...event,
+      text: `/agent ${replacement}`,
+    }, replacement);
+  }
+
+  handleAgentCancelCommand(event) {
+    const scopeRef = toScopeRef(event);
+    if (!this.getPendingAgentDraft(scopeRef)) {
+      return messageResponse([
+        this.t('coordinator.agent.noDraft'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    this.clearPendingAgentDraft(scopeRef);
+    return messageResponse([
+      this.t('coordinator.agent.draftCancelled'),
+    ], this.buildScopedSessionMeta(event));
+  }
+
+  handleAgentListCommand(event) {
+    const scopeRef = toScopeRef(event);
+    const jobs = this.agentJobs.listForScope(scopeRef);
+    if (jobs.length === 0) {
+      return messageResponse([
+        this.t('coordinator.agent.listTitle', { count: 0 }),
+        this.t('coordinator.agent.empty'),
+        this.t('coordinator.agent.emptyHint'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const lines = [
+      this.t('coordinator.agent.listTitle', { count: jobs.length }),
+    ];
+    for (const [index, job] of jobs.entries()) {
+      lines.push(this.t('coordinator.agent.item', {
+        index: index + 1,
+        title: job.title,
+      }));
+      lines.push(this.t('coordinator.agent.status', {
+        value: formatAgentStatusLabel(job.status, job.running, this.currentI18n),
+      }));
+      lines.push(this.t('coordinator.agent.attempts', {
+        value: `${job.attemptCount}/${job.maxAttempts}`,
+      }));
+      if (job.lastResultPreview) {
+        lines.push(this.t('coordinator.agent.lastResult', { value: job.lastResultPreview }));
+        lines.push(this.t('coordinator.agent.resultHint', { index: index + 1 }));
+      }
+      const artifacts = this.resolveAgentJobArtifacts(job);
+      if (artifacts.length > 0) {
+        lines.push(this.t('coordinator.agent.attachments', { value: formatAgentArtifactSummary(artifacts, this.currentI18n) }));
+      }
+      if (job.lastError) {
+        lines.push(this.t('coordinator.agent.lastError', { value: job.lastError }));
+      }
+    }
+    lines.push(this.t('coordinator.agent.actionsHint'));
+    return messageResponse(lines, this.buildScopedSessionMeta(event));
+  }
+
+  handleAgentShowCommand(event, token) {
+    const resolved = this.resolveAgentJobForScope(event, token);
+    if (!resolved) {
+      return messageResponse([
+        this.t('coordinator.agent.notFound', { value: token || '?' }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const job = resolved.job;
+    const lines = [
+      this.t('coordinator.agent.detailTitle', { title: job.title }),
+      this.t('coordinator.agent.status', { value: formatAgentStatusLabel(job.status, job.running, this.currentI18n) }),
+      this.t('coordinator.agent.mode', { value: formatAgentMode(job.mode, this.currentI18n) }),
+      this.t('coordinator.agent.category', { value: formatAgentCategory(job.category, this.currentI18n) }),
+      this.t('coordinator.agent.risk', { value: formatAgentRisk(job.riskLevel, this.currentI18n) }),
+      this.t('coordinator.agent.providerProfile', { value: job.providerProfileId }),
+      this.t('coordinator.agent.workingDirectory', { value: job.cwd ?? this.t('common.notSet') }),
+      this.t('coordinator.agent.goal', { value: job.goal }),
+      this.t('coordinator.agent.expectedOutput', { value: job.expectedOutput }),
+      this.t('coordinator.agent.planTitle'),
+      ...job.plan.map((line, index) => `${index + 1}. ${line}`),
+      this.t('coordinator.agent.attempts', { value: `${job.attemptCount}/${job.maxAttempts}` }),
+    ];
+    if (job.verificationSummary) {
+      lines.push(this.t('coordinator.agent.verification', { value: job.verificationSummary }));
+    }
+    if (job.lastResultPreview) {
+      lines.push(this.t('coordinator.agent.lastResult', { value: job.lastResultPreview }));
+      lines.push(this.t('coordinator.agent.resultHint', { index: resolved.index ?? job.id }));
+    }
+    const artifacts = this.resolveAgentJobArtifacts(job);
+    if (artifacts.length > 0) {
+      lines.push(this.t('coordinator.agent.attachmentsTitle'));
+      lines.push(...artifacts.map((artifact, index) => formatAgentArtifactLine(artifact, index, this.currentI18n)));
+    }
+    if (job.lastError) {
+      lines.push(this.t('coordinator.agent.lastError', { value: job.lastError }));
+    }
+    lines.push(this.t('coordinator.agent.detailActions', { index: resolved.index }));
+    return messageResponse(lines, this.buildScopedSessionMeta(event));
+  }
+
+  async handleAgentResultCommand(event, token, pageOrAction = '') {
+    const resolved = this.resolveAgentJobForScope(event, token);
+    if (!resolved) {
+      return messageResponse([
+        this.t('coordinator.agent.notFound', { value: token || '?' }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const resultText = await this.resolveAgentJobResultText(resolved.job);
+    if (!resultText) {
+      return messageResponse([
+        this.t('coordinator.agent.noResultText'),
+        this.t('coordinator.agent.title', { value: resolved.job.title }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const isPreviewOnly = isAgentResultPreviewOnly(resolved.job, resultText);
+    if (!resolved.job.resultText || isAgentResultPreviewOnly(resolved.job, resolved.job.resultText)) {
+      this.agentJobs.updateJob(resolved.job.id, {
+        resultText,
+      });
+    }
+    const normalizedAction = String(pageOrAction ?? '').trim().toLowerCase();
+    const commandToken = resolved.index ?? resolved.job.id;
+    if (['file', 'md', 'markdown', 'export'].includes(normalizedAction)) {
+      if (isPreviewOnly) {
+        return messageResponse([
+          this.t('coordinator.agent.resultOnlyPreview'),
+          this.t('coordinator.agent.resultRetryHint', { index: commandToken }),
+        ], this.buildScopedSessionMeta(event));
+      }
+      const artifact = this.createAgentResultTextArtifact(resolved.job, resultText);
+      const existingArtifacts = normalizeAgentArtifacts(resolved.job.resultArtifacts ?? null);
+      if (!existingArtifacts.some((item) => item.path === artifact.path)) {
+        this.agentJobs.updateJob(resolved.job.id, {
+          resultText,
+          resultArtifacts: [
+            ...existingArtifacts,
+            artifact,
+          ],
+        });
+      }
+      const response = messageResponse([
+        this.t('coordinator.agent.resultFileReady'),
+        this.t('coordinator.agent.title', { value: resolved.job.title }),
+      ], this.buildScopedSessionMeta(event));
+      response.messages.push({
+        artifact,
+        mediaPath: artifact.path,
+        caption: artifact.caption ?? artifact.displayName ?? null,
+      });
+      return response;
+    }
+    const pages = paginateTextByUtf8(resultText, 1500);
+    const requestedPage = Number.parseInt(normalizedAction || '1', 10);
+    const page = Number.isInteger(requestedPage)
+      ? Math.min(Math.max(requestedPage, 1), Math.max(pages.length, 1))
+      : 1;
+    const pageText = pages[page - 1] ?? '';
+    const lines = [
+      this.t('coordinator.agent.resultTitle', { title: resolved.job.title }),
+      this.t('coordinator.agent.resultPage', { page, pages: pages.length }),
+      '',
+      pageText,
+    ];
+    if (page < pages.length) {
+      lines.push('', this.t('coordinator.agent.resultNextHint', { index: commandToken, next: page + 1 }));
+    }
+    lines.push(this.t('coordinator.agent.resultFileHint', { index: commandToken }));
+    return messageResponse([lines.join('\n')], this.buildScopedSessionMeta(event));
+  }
+
+  handleAgentSendCommand(event, token) {
+    const resolved = this.resolveAgentJobForScope(event, token);
+    if (!resolved) {
+      return messageResponse([
+        this.t('coordinator.agent.notFound', { value: token || '?' }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const artifacts = this.resolveAgentJobArtifacts(resolved.job);
+    if (artifacts.length === 0) {
+      return messageResponse([
+        this.t('coordinator.agent.noAttachments'),
+        this.t('coordinator.agent.title', { value: resolved.job.title }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const response = messageResponse([
+      this.t('coordinator.agent.resendingAttachments'),
+      this.t('coordinator.agent.title', { value: resolved.job.title }),
+      this.t('coordinator.agent.attachments', { value: formatAgentArtifactSummary(artifacts, this.currentI18n) }),
+    ], this.buildScopedSessionMeta(event));
+    response.messages.push(...artifacts.map((artifact) => ({
+      artifact,
+      mediaPath: artifact.path,
+      caption: artifact.caption ?? artifact.displayName ?? null,
+    })));
+    return response;
+  }
+
+  async handleAgentStopCommand(event, token) {
+    const resolved = this.resolveAgentJobForScope(event, token);
+    if (!resolved) {
+      return messageResponse([
+        this.t('coordinator.agent.notFound', { value: token || '?' }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const job = this.agentJobs.requestStop(resolved.job.id);
+    const session = this.agentJobs.getSession(job);
+    if (session) {
+      await this.stopThreadForSession(toScopeRef(event), session, { waitForSettleMs: 0 }).catch(() => null);
+    }
+    return messageResponse([
+      this.t('coordinator.agent.stopped'),
+      this.t('coordinator.agent.title', { value: job.title }),
+    ], this.buildScopedSessionMeta(event));
+  }
+
+  handleAgentRetryCommand(event, token) {
+    const resolved = this.resolveAgentJobForScope(event, token);
+    if (!resolved) {
+      return messageResponse([
+        this.t('coordinator.agent.notFound', { value: token || '?' }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const job = this.agentJobs.retryJob(resolved.job.id);
+    const response = messageResponse([
+      this.t('coordinator.agent.retryQueued'),
+      this.t('coordinator.agent.title', { value: job.title }),
+    ], this.buildScopedSessionMeta(event));
+    response.meta = {
+      ...(response.meta ?? {}),
+      systemAction: {
+        kind: 'run_agent_sweep',
+      },
+    };
+    return response;
+  }
+
+  handleAgentDeleteCommand(event, token) {
+    const resolved = this.resolveAgentJobForScope(event, token);
+    if (!resolved) {
+      return messageResponse([
+        this.t('coordinator.agent.notFound', { value: token || '?' }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    this.agentJobs.deleteJob(resolved.job.id);
+    return messageResponse([
+      this.t('coordinator.agent.deleted'),
+      this.t('coordinator.agent.title', { value: resolved.job.title }),
+    ], this.buildScopedSessionMeta(event));
+  }
+
+  handleAgentRenameCommand(event, token, title) {
+    const resolved = this.resolveAgentJobForScope(event, token);
+    if (!resolved) {
+      return messageResponse([
+        this.t('coordinator.agent.notFound', { value: token || '?' }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    if (!title) {
+      return this.handleHelpsCommand(event, ['agent']);
+    }
+    const job = this.agentJobs.renameJob(resolved.job.id, title);
+    return messageResponse([
+      this.t('coordinator.agent.renamed'),
+      this.t('coordinator.agent.title', { value: job.title }),
+    ], this.buildScopedSessionMeta(event));
+  }
+
+  async normalizeAgentDraft(event, scopeRef: PlatformScopeRef, rawInput: string): Promise<PendingAgentDraft> {
+    const openAiDraft = await normalizeAgentDraftWithOpenAIAgents(rawInput, this.currentI18n.locale).catch(() => null);
+    if (openAiDraft) {
+      const draft = this.buildPendingAgentDraft(event, scopeRef, openAiDraft, rawInput, 'agents-sdk');
+      if (draft) {
+        return draft;
+      }
+    }
+    const codexDraft = await this.normalizeAgentDraftWithCodex(event, scopeRef, rawInput).catch(() => null);
+    if (codexDraft) {
+      const draft = this.buildPendingAgentDraft(event, scopeRef, codexDraft, rawInput, 'codex');
+      if (draft) {
+        return draft;
+      }
+    }
+    return this.buildPendingAgentDraft(event, scopeRef, buildLocalAgentDraftCandidate(rawInput), rawInput, 'local');
+  }
+
+  buildPendingAgentDraft(
+    event,
+    scopeRef: PlatformScopeRef,
+    candidate: AgentDraftCandidate,
+    rawInput: string,
+    normalizedBy: 'agents-sdk' | 'codex' | 'local',
+  ): PendingAgentDraft {
+    const boundSession = this.bridgeSessions.resolveScopeSession(scopeRef);
+    const providerProfile = boundSession
+      ? this.requireProviderProfile(boundSession.providerProfileId)
+      : this.resolveScopeProviderProfile(scopeRef);
+    const inheritedSettings = boundSession
+      ? this.bridgeSessions.getSessionSettings(boundSession.id)
+      : null;
+    const locale = inheritedSettings?.locale ?? this.resolveScopeLocale(scopeRef, event);
+    const cwd = normalizeCwd(boundSession?.cwd) ?? this.resolveEventCwd(event) ?? null;
+    return {
+      createdAt: this.now(),
+      rawInput,
+      normalizedBy,
+      title: candidate.title,
+      goal: candidate.goal,
+      expectedOutput: candidate.expectedOutput,
+      plan: candidate.plan,
+      category: candidate.category,
+      riskLevel: candidate.riskLevel,
+      mode: candidate.mode,
+      providerProfileId: providerProfile.id,
+      locale,
+      cwd,
+      initialSettings: {
+        locale,
+        model: inheritedSettings?.model ?? null,
+        reasoningEffort: inheritedSettings?.reasoningEffort ?? null,
+        serviceTier: inheritedSettings?.serviceTier ?? null,
+        collaborationMode: 'plan',
+        personality: inheritedSettings?.personality ?? null,
+        accessPreset: 'full-access',
+        approvalPolicy: 'never',
+        sandboxMode: 'danger-full-access',
+      },
+    };
+  }
+
+  async normalizeAgentDraftWithCodex(event, scopeRef: PlatformScopeRef, rawInput: string): Promise<AgentDraftCandidate | null> {
+    const boundSession = this.bridgeSessions.resolveScopeSession(scopeRef);
+    const providerProfile = boundSession
+      ? this.requireProviderProfile(boundSession.providerProfileId)
+      : this.resolveScopeProviderProfile(scopeRef);
+    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+    const inheritedSettings = boundSession
+      ? this.bridgeSessions.getSessionSettings(boundSession.id)
+      : null;
+    const locale = inheritedSettings?.locale ?? this.resolveScopeLocale(scopeRef, event);
+    const cwd = normalizeCwd(boundSession?.cwd) ?? this.resolveEventCwd(event) ?? null;
+    const thread = await providerPlugin.startThread({
+      providerProfile,
+      cwd,
+      title: 'Agent Draft Parser',
+      metadata: {
+        sourcePlatform: event.platform,
+        source: 'agent-draft',
+      },
+    });
+    const parserSession = {
+      id: crypto.randomUUID(),
+      providerProfileId: providerProfile.id,
+      codexThreadId: thread.threadId,
+      cwd: thread.cwd ?? cwd,
+      title: thread.title ?? 'Agent Draft Parser',
+      createdAt: this.now(),
+      updatedAt: this.now(),
+    };
+    const parserPrompt = buildAgentDraftPrompt(rawInput, locale);
+    const result = await providerPlugin.startTurn({
+      providerProfile,
+      bridgeSession: parserSession,
+      sessionSettings: {
+        bridgeSessionId: parserSession.id,
+        model: inheritedSettings?.model ?? null,
+        reasoningEffort: inheritedSettings?.reasoningEffort ?? null,
+        serviceTier: inheritedSettings?.serviceTier ?? null,
+        collaborationMode: null,
+        personality: null,
+        accessPreset: 'read-only',
+        approvalPolicy: 'never',
+        sandboxMode: 'read-only',
+        locale,
+        metadata: {},
+        updatedAt: this.now(),
+      },
+      event: {
+        ...event,
+        text: parserPrompt,
+        cwd: parserSession.cwd ?? null,
+        locale,
+        attachments: [],
+      },
+      inputText: parserPrompt,
+    });
+    return parseAgentDraftCandidate(result.outputText);
+  }
+
+  renderAgentDraftResponse(event, draft: PendingAgentDraft) {
+    return messageResponse([
+      this.t('coordinator.agent.draftTitle', { title: draft.title }),
+      this.t('coordinator.agent.normalizedBy', { value: formatAgentNormalizer(draft.normalizedBy, this.currentI18n) }),
+      this.t('coordinator.agent.mode', { value: formatAgentMode(draft.mode, this.currentI18n) }),
+      this.t('coordinator.agent.category', { value: formatAgentCategory(draft.category, this.currentI18n) }),
+      this.t('coordinator.agent.risk', { value: formatAgentRisk(draft.riskLevel, this.currentI18n) }),
+      this.t('coordinator.agent.goal', { value: draft.goal }),
+      this.t('coordinator.agent.expectedOutput', { value: draft.expectedOutput }),
+      this.t('coordinator.agent.planTitle'),
+      ...draft.plan.map((line, index) => `${index + 1}. ${line}`),
+      this.t('coordinator.agent.deliveryTarget'),
+      this.t('coordinator.agent.draftNotice'),
+      this.t('coordinator.agent.confirmHint'),
+      this.t('coordinator.agent.editHint'),
+      this.t('coordinator.agent.cancelHint'),
+    ], this.buildScopedSessionMeta(event));
+  }
+
+  getPendingAgentDraft(scopeRef: PlatformScopeRef): PendingAgentDraft | null {
+    return this.pendingAgentDraftsByScope.get(formatPlatformScopeKey(scopeRef.platform, scopeRef.externalScopeId)) ?? null;
+  }
+
+  setPendingAgentDraft(scopeRef: PlatformScopeRef, draft: PendingAgentDraft): void {
+    this.pendingAgentDraftsByScope.set(formatPlatformScopeKey(scopeRef.platform, scopeRef.externalScopeId), draft);
+  }
+
+  clearPendingAgentDraft(scopeRef: PlatformScopeRef): void {
+    this.pendingAgentDraftsByScope.delete(formatPlatformScopeKey(scopeRef.platform, scopeRef.externalScopeId));
+  }
+
+  resolveAgentJobForScope(event, token) {
+    const scopeRef = toScopeRef(event);
+    const job = this.agentJobs.resolveForScope(scopeRef, token);
+    if (!job) {
+      return null;
+    }
+    const jobs = this.agentJobs.listForScope(scopeRef);
+    const index = jobs.findIndex((entry) => entry.id === job.id);
+    return {
+      job,
+      index: index >= 0 ? index + 1 : null,
+    };
+  }
+
+  resolveAgentJobArtifacts(job: AgentJob): TurnArtifactDeliveredItem[] {
+    const direct = normalizeAgentArtifacts(job.resultArtifacts ?? null);
+    if (direct.length > 0) {
+      return direct;
+    }
+    const session = this.agentJobs?.getSession?.(job) ?? this.bridgeSessions.getSessionById(job.bridgeSessionId);
+    const settings = session ? this.bridgeSessions.getSessionSettings(session.id) : null;
+    return normalizeAgentArtifacts(resolveStoredArtifactDelivery(settings)?.deliveredArtifacts ?? null);
+  }
+
+  async resolveAgentJobResultText(job: AgentJob): Promise<string> {
+    const stored = stripAgentArtifactProtocol(job.resultText ?? '').trim();
+    if (stored && !isAgentResultPreviewOnly(job, stored)) {
+      return stored;
+    }
+    const session = this.agentJobs?.getSession?.(job) ?? this.bridgeSessions.getSessionById(job.bridgeSessionId);
+    if (!session) {
+      return stored || String(job.lastResultPreview ?? '').trim();
+    }
+    try {
+      const thread = await this.bridgeSessions.readProviderThread(
+        session.providerProfileId,
+        session.codexThreadId,
+        { includeTurns: true },
+      );
+      const recovered = stripAgentArtifactProtocol(extractLastAssistantThreadText(thread));
+      if (recovered && !isAgentResultPreviewOnly(job, recovered)) {
+        return recovered;
+      }
+    } catch {
+      // Keep the command usable even if the provider thread cannot be reopened.
+    }
+    const rolloutRecovered = stripAgentArtifactProtocol(readCodexRolloutLastAgentMessage(session.codexThreadId));
+    if (rolloutRecovered && !isAgentResultPreviewOnly(job, rolloutRecovered)) {
+      return rolloutRecovered;
+    }
+    return stored || String(job.lastResultPreview ?? '').trim();
+  }
+
+  createAgentResultTextArtifact(job: AgentJob, resultText: string): TurnArtifactDeliveredItem {
+    const baseDir = normalizeCwd(job.cwd) ?? this.defaultCwd ?? process.cwd();
+    const outputDir = path.join(baseDir, '.codexbridge', 'agent-results', job.id);
+    fs.mkdirSync(outputDir, { recursive: true });
+    const displayName = `${sanitizeFilename(job.title || 'agent-result')}.txt`;
+    const filePath = path.join(outputDir, displayName);
+    const content = [
+      `标题：${job.title}`,
+      `Agent Job: ${job.id}`,
+      `状态：${job.status}`,
+      `完成时间：${job.completedAt ? new Date(job.completedAt).toISOString() : ''}`,
+      '----------------------------------------',
+      '',
+      resultText.trim(),
+      '',
+    ].join('\n');
+    fs.writeFileSync(filePath, content, 'utf8');
+    const stat = fs.statSync(filePath);
+    return {
+      kind: 'file',
+      path: filePath,
+      displayName,
+      mimeType: 'text/plain',
+      sizeBytes: stat.size,
+      caption: displayName,
+      source: 'bridge_declared',
+      turnId: null,
+    };
   }
 
   async handleSkillsCommand(event, args = []) {
@@ -5786,6 +6472,272 @@ export class BridgeCoordinator {
     return this.startTurnOnSession(nextSession, event, options);
   }
 
+  async runAgentJob(job: AgentJob, options: StartTurnOptions = {}): Promise<CoordinatorResponse> {
+    if (!this.agentJobs) {
+      return messageResponse([
+        this.t('coordinator.agent.unsupported'),
+      ]);
+    }
+    const current = this.agentJobs.getById(job.id) ?? job;
+    const scopeRef = {
+      platform: current.platform,
+      externalScopeId: current.externalScopeId,
+    };
+    const session = this.agentJobs.getSession(current);
+    if (!session) {
+      this.agentJobs.failJob(current.id, {
+        error: this.t('coordinator.agent.sessionMissing'),
+      });
+      return messageResponse([
+        this.t('coordinator.agent.failed'),
+        this.t('coordinator.agent.lastError', { value: this.t('coordinator.agent.sessionMissing') }),
+      ], this.buildScopedSessionMeta({
+        platform: current.platform,
+        externalScopeId: current.externalScopeId,
+      }));
+    }
+
+    let lastResult = null;
+    let lastSession = session;
+    let lastVerification: AgentVerificationResult | null = null;
+    for (let attempt = Math.max(1, current.attemptCount + 1); attempt <= current.maxAttempts; attempt += 1) {
+      const live = this.agentJobs.getById(current.id) ?? current;
+      if (live.stopRequested || live.status === 'stopped') {
+        this.agentJobs.requestStop(current.id);
+        return messageResponse([
+          this.t('coordinator.agent.stopped'),
+          this.t('coordinator.agent.title', { value: live.title }),
+        ], buildSessionMeta(lastSession));
+      }
+      this.agentJobs.markRunning(current.id);
+      await emitProgressUpdate(
+        options.onProgress ?? null,
+        this.t('coordinator.agent.progressRunning', {
+          title: current.title,
+          attempt,
+          max: current.maxAttempts,
+        }),
+        'commentary',
+      );
+      const agentEvent = {
+        platform: current.platform,
+        externalScopeId: current.externalScopeId,
+        text: buildAgentExecutionPrompt(current, {
+          attempt,
+          previousVerification: lastVerification,
+          previousResultPreview: lastResult?.result ? summarizeAgentResult(lastResult.result) : null,
+          locale: current.locale ?? this.currentI18n.locale,
+        }),
+        cwd: current.cwd,
+        locale: current.locale,
+        attachments: [],
+        metadata: {
+          codexbridge: {
+            overrideBridgeSessionId: current.bridgeSessionId,
+            agentJobId: current.id,
+            agentAttempt: attempt,
+          },
+        },
+      };
+      this.activeTurns?.beginScopeTurn(scopeRef, {
+        bridgeSessionId: lastSession.id,
+        providerProfileId: lastSession.providerProfileId,
+        threadId: lastSession.codexThreadId,
+      });
+      try {
+        const turnResult = await this.startTurnWithRecovery(scopeRef, lastSession, agentEvent, options);
+        lastResult = turnResult;
+        lastSession = turnResult.session;
+      } catch (error) {
+        await this.releaseActiveTurnIfStillRunning(scopeRef);
+        const message = formatUserError(error);
+        this.agentJobs.failJob(current.id, {
+          error: message,
+        });
+        return messageResponse([
+          this.t('coordinator.agent.failed'),
+          this.t('coordinator.agent.lastError', { value: message }),
+        ], buildSessionMeta(lastSession));
+      } finally {
+        await this.releaseActiveTurnIfStillRunning(scopeRef);
+      }
+
+      this.agentJobs.markVerifying(current.id, attempt);
+      await emitProgressUpdate(
+        options.onProgress ?? null,
+        this.t('coordinator.agent.progressVerifying', {
+          title: current.title,
+        }),
+        'commentary',
+      );
+      lastVerification = await this.verifyAgentJob(current, lastResult.result, lastSession).catch((error) => ({
+        pass: false,
+        summary: this.t('coordinator.agent.verifyFailed', { error: formatUserError(error) }),
+        issues: [formatUserError(error)],
+        nextAction: 'retry' as const,
+      }));
+      const resultPreview = summarizeAgentResult(lastResult.result);
+      if (lastVerification.pass || lastVerification.nextAction === 'complete') {
+        const resultArtifacts = normalizeAgentArtifactsForStorage(normalizeArtifactsForResponse(lastResult.result));
+        const response = turnResponse(lastResult.result, this.currentI18n, buildSessionMeta(lastSession));
+        const resultText = extractCoordinatorResponseText(response) || resultPreview;
+        this.agentJobs.completeJob(current.id, {
+          resultPreview,
+          resultText,
+          resultArtifacts,
+          verificationSummary: lastVerification.summary,
+        });
+        const artifactMessages = response.messages.filter((message) => message.artifact || message.mediaPath);
+        const completionLines = [
+          this.t('coordinator.agent.completed'),
+          this.t('coordinator.agent.title', { value: current.title }),
+          this.t('coordinator.agent.verification', { value: truncateText(lastVerification.summary, 180) }),
+        ];
+        if (resultArtifacts.length > 0) {
+          completionLines.push(this.t('coordinator.agent.attachmentSending', { count: resultArtifacts.length }));
+        } else {
+          if (resultText) {
+            completionLines.push('');
+            completionLines.push(resultText);
+          }
+        }
+        response.messages = [
+          {
+            text: completionLines.filter((line) => line !== '').join('\n'),
+          },
+          ...artifactMessages,
+        ];
+        response.meta = {
+          ...(response.meta ?? {}),
+          codexTurn: {
+            outputState: lastResult.result.outputState ?? 'complete',
+            previewText: lastResult.result.previewText ?? '',
+            finalSource: lastResult.result.finalSource ?? 'agent_job',
+            errorMessage: lastResult.result.errorMessage ?? '',
+          },
+        };
+        return response;
+      }
+      if (attempt < current.maxAttempts && lastVerification.nextAction === 'retry') {
+        this.agentJobs.markRepairing(current.id, lastVerification.summary);
+        await emitProgressUpdate(
+          options.onProgress ?? null,
+          this.t('coordinator.agent.progressRetrying', {
+            title: current.title,
+          }),
+          'commentary',
+        );
+        continue;
+      }
+      this.agentJobs.failJob(current.id, {
+        error: lastVerification.summary,
+        resultPreview,
+        verificationSummary: lastVerification.summary,
+      });
+      return messageResponse([
+        this.t('coordinator.agent.failed'),
+        this.t('coordinator.agent.title', { value: current.title }),
+        this.t('coordinator.agent.verification', { value: lastVerification.summary }),
+        ...(lastVerification.issues.length > 0
+          ? [
+            this.t('coordinator.agent.issuesTitle'),
+            ...lastVerification.issues.map((issue) => `- ${issue}`),
+          ]
+          : []),
+        this.t('coordinator.agent.retryHint'),
+      ], buildSessionMeta(lastSession));
+    }
+    const fallbackSummary = this.t('coordinator.agent.maxAttemptsReached');
+    this.agentJobs.failJob(current.id, {
+      error: fallbackSummary,
+      resultPreview: lastResult?.result ? summarizeAgentResult(lastResult.result) : null,
+      verificationSummary: lastVerification?.summary ?? fallbackSummary,
+    });
+    return messageResponse([
+      this.t('coordinator.agent.failed'),
+      this.t('coordinator.agent.lastError', { value: fallbackSummary }),
+    ], buildSessionMeta(lastSession));
+  }
+
+  async verifyAgentJob(job: AgentJob, result, session): Promise<AgentVerificationResult> {
+    const hardFailure = resolveAgentHardFailure(result);
+    if (hardFailure) {
+      return {
+        pass: false,
+        summary: hardFailure,
+        issues: [hardFailure],
+        nextAction: 'retry',
+      };
+    }
+    const semantic = await verifyAgentResultWithOpenAIAgents(job, result, this.currentI18n.locale).catch(() => null);
+    if (semantic) {
+      return semantic;
+    }
+    const codexVerification = await this.verifyAgentResultWithCodex(job, result, session).catch(() => null);
+    if (codexVerification) {
+      return codexVerification;
+    }
+    return {
+      pass: true,
+      summary: this.t('coordinator.agent.verifyFallbackPass'),
+      issues: [],
+      nextAction: 'complete',
+    };
+  }
+
+  async verifyAgentResultWithCodex(job: AgentJob, result, session): Promise<AgentVerificationResult | null> {
+    const providerProfile = this.requireProviderProfile(job.providerProfileId);
+    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+    const thread = await providerPlugin.startThread({
+      providerProfile,
+      cwd: job.cwd,
+      title: 'Agent Verifier',
+      metadata: {
+        sourcePlatform: job.platform,
+        source: 'agent-verifier',
+        agentJobId: job.id,
+      },
+    });
+    const verifierSession = {
+      id: crypto.randomUUID(),
+      providerProfileId: providerProfile.id,
+      codexThreadId: thread.threadId,
+      cwd: thread.cwd ?? job.cwd,
+      title: thread.title ?? 'Agent Verifier',
+      createdAt: this.now(),
+      updatedAt: this.now(),
+    };
+    const prompt = buildAgentVerifierPrompt(job, result, this.currentI18n.locale);
+    const verifierResult = await providerPlugin.startTurn({
+      providerProfile,
+      bridgeSession: verifierSession,
+      sessionSettings: {
+        bridgeSessionId: verifierSession.id,
+        model: null,
+        reasoningEffort: null,
+        serviceTier: null,
+        collaborationMode: null,
+        personality: null,
+        accessPreset: 'read-only',
+        approvalPolicy: 'never',
+        sandboxMode: 'read-only',
+        locale: job.locale ?? this.currentI18n.locale,
+        metadata: {},
+        updatedAt: this.now(),
+      },
+      event: {
+        platform: job.platform,
+        externalScopeId: job.externalScopeId,
+        text: prompt,
+        cwd: session?.cwd ?? job.cwd,
+        locale: job.locale ?? this.currentI18n.locale,
+        attachments: [],
+      },
+      inputText: prompt,
+    });
+    return parseAgentVerificationResult(verifierResult.outputText);
+  }
+
   buildReboundSessionSettings(
     currentSettings: SessionSettings | null,
     overrides: Partial<SessionSettings> = {},
@@ -6159,6 +7111,15 @@ function buildReviewResponse({
   ], session);
 }
 
+function extractCoordinatorResponseText(response: CoordinatorResponse): string {
+  const messages = Array.isArray(response?.messages) ? response.messages : [];
+  return messages
+    .map((message) => String(message?.text ?? '').trim())
+    .filter(Boolean)
+    .join('\n\n')
+    .trim();
+}
+
 async function emitProgressUpdate(
   handler: ProgressHandler,
   text: string,
@@ -6261,6 +7222,767 @@ function parseReviewTargetArgs(args: readonly string[]): ProviderReviewTarget | 
       : null;
   }
   return null;
+}
+
+async function normalizeAgentDraftWithOpenAIAgents(rawInput: string, locale: string | null): Promise<AgentDraftCandidate | null> {
+  if (!resolveOpenAIAgentRuntimeConfig().apiKey) {
+    return null;
+  }
+  const output = await runOpenAIAgentJson({
+    name: 'CodexBridge Intent Planner',
+    instructions: buildOpenAIAgentPlannerInstructions(locale),
+    input: rawInput,
+  });
+  return parseAgentDraftCandidate(output);
+}
+
+async function verifyAgentResultWithOpenAIAgents(job: AgentJob, result, locale: string | null): Promise<AgentVerificationResult | null> {
+  if (!resolveOpenAIAgentRuntimeConfig().apiKey) {
+    return null;
+  }
+  const output = await runOpenAIAgentJson({
+    name: 'CodexBridge Agent Verifier',
+    instructions: buildOpenAIAgentVerifierInstructions(locale),
+    input: JSON.stringify({
+      goal: job.goal,
+      expectedOutput: job.expectedOutput,
+      plan: job.plan,
+      outputState: result?.outputState ?? null,
+      outputText: truncateText(String(result?.outputText ?? result?.previewText ?? ''), 6000),
+      artifactCount: Array.isArray(result?.outputArtifacts) ? result.outputArtifacts.length : 0,
+      mediaCount: Array.isArray(result?.outputMedia) ? result.outputMedia.length : 0,
+    }),
+  });
+  return parseAgentVerificationResult(output);
+}
+
+async function runOpenAIAgentJson({ name, instructions, input }: {
+  name: string;
+  instructions: string;
+  input: string;
+}): Promise<string | null> {
+  const runtimeConfig = resolveOpenAIAgentRuntimeConfig();
+  if (!runtimeConfig.apiKey) {
+    return null;
+  }
+  const { Agent, OpenAIProvider, Runner } = await import('@openai/agents');
+  const modelProvider = new OpenAIProvider({
+    apiKey: runtimeConfig.apiKey,
+    baseURL: runtimeConfig.baseURL ?? undefined,
+    useResponses: runtimeConfig.useResponses,
+  });
+  const runner = new Runner({
+    modelProvider,
+    tracingDisabled: true,
+  });
+  const agent = new Agent({
+    name,
+    instructions,
+    model: runtimeConfig.model,
+  });
+  const result = await runner.run(agent, input, { maxTurns: 2 });
+  return typeof result.finalOutput === 'string'
+    ? result.finalOutput
+    : JSON.stringify(result.finalOutput ?? null);
+}
+
+export function resolveOpenAIAgentRuntimeConfig(env: NodeJS.ProcessEnv = process.env): OpenAIAgentRuntimeConfig {
+  const apiKey = firstNonEmptyString(
+    env.CODEXBRIDGE_AGENT_API_KEY,
+    env.OPENAI_API_KEY,
+    env.MINIMAX_API_KEY,
+  );
+  const baseURL = firstNonEmptyString(
+    env.CODEXBRIDGE_AGENT_BASE_URL,
+    env.OPENAI_BASE_URL,
+    env.OPENAI_API_BASE_URL,
+  );
+  const apiMode = compactWhitespace(env.CODEXBRIDGE_AGENT_API ?? '').toLowerCase();
+  const useResponses = apiMode === 'responses'
+    ? true
+    : apiMode === 'chat_completions' || baseURL
+      ? false
+      : undefined;
+  return {
+    apiKey,
+    baseURL,
+    model: firstNonEmptyString(env.CODEXBRIDGE_AGENT_MODEL, env.OPENAI_MODEL) ?? 'gpt-5.5',
+    useResponses,
+  };
+}
+
+function firstNonEmptyString(...values: unknown[]): string | null {
+  for (const value of values) {
+    const normalized = compactWhitespace(value);
+    if (normalized) {
+      return normalized;
+    }
+  }
+  return null;
+}
+
+function buildOpenAIAgentPlannerInstructions(locale: string | null): string {
+  const language = normalizeLocale(locale) === 'zh-CN' ? 'Chinese' : 'English';
+  return [
+    `You are the intent and planning agent for CodexBridge. Respond in ${language}.`,
+    'Normalize the user request into strict JSON only, without markdown.',
+    'Schema:',
+    '{"title":"short title","goal":"clear goal","expectedOutput":"final deliverable","plan":["step 1","step 2"],"category":"code|research|ops|doc|media|mixed","riskLevel":"low|medium|high","mode":"codex|agents|hybrid"}',
+    'Prefer mode=hybrid for multi-step tasks, mode=codex for code/repo tasks, and mode=agents for pure research/planning.',
+    'Keep plan to 3-6 concrete steps.',
+  ].join('\n');
+}
+
+function buildOpenAIAgentVerifierInstructions(locale: string | null): string {
+  const language = normalizeLocale(locale) === 'zh-CN' ? 'Chinese' : 'English';
+  return [
+    `You are the verifier for a CodexBridge background agent job. Respond in ${language}.`,
+    'Judge whether the output satisfies the goal and expected deliverable.',
+    'Return strict JSON only, without markdown.',
+    'Schema:',
+    '{"pass":true,"summary":"short verdict","issues":[],"nextAction":"complete|retry|fail"}',
+    'Use nextAction=retry when one more automated fix attempt is likely useful. Use fail when the task needs user input or cannot be judged.',
+  ].join('\n');
+}
+
+function buildAgentDraftPrompt(rawInput: string, locale: string | null): string {
+  const language = normalizeLocale(locale) === 'zh-CN' ? '中文' : 'English';
+  return [
+    `请把下面的微信 /agent 请求整理成严格 JSON，只返回 JSON，不要 Markdown。输出语言：${language}。`,
+    'Schema:',
+    '{"title":"短标题","goal":"明确目标","expectedOutput":"最终交付物","plan":["步骤1","步骤2"],"category":"code|research|ops|doc|media|mixed","riskLevel":"low|medium|high","mode":"codex|agents|hybrid"}',
+    '要求：多步骤任务优先 hybrid；代码仓库任务用 codex；纯研究/计划可用 agents；plan 保持 3-6 步。',
+    '',
+    '用户请求：',
+    rawInput,
+  ].join('\n');
+}
+
+function buildAgentExecutionPrompt(job: AgentJob, params: {
+  attempt: number;
+  previousVerification: AgentVerificationResult | null;
+  previousResultPreview: string | null;
+  locale: string | null;
+}): string {
+  const language = normalizeLocale(params.locale) === 'zh-CN' ? '中文' : 'English';
+  const lines = [
+    `你正在执行 CodexBridge 后台 Agent 任务。请用${language}回复最终结果。`,
+    '',
+    `任务标题：${job.title}`,
+    `目标：${job.goal}`,
+    `最终交付物：${job.expectedOutput}`,
+    `执行模式：${job.mode}`,
+    `当前尝试：${params.attempt}/${job.maxAttempts}`,
+    '',
+    '计划：',
+    ...job.plan.map((line, index) => `${index + 1}. ${line}`),
+    '',
+    '执行要求：',
+    '- 你有 full-access 配置；除非确实必须，不要向用户请求审批。',
+    '- 如果需要修改代码，请直接修改、测试并说明结果。',
+    '- 如果是研究或文档任务，请给出可直接使用的结构化结果。',
+    '- 最终回复必须包含：完成内容、验证结果、未完成风险。',
+  ];
+  if (params.previousVerification) {
+    lines.push(
+      '',
+      '上一轮 verifier 未通过：',
+      params.previousVerification.summary,
+      ...params.previousVerification.issues.map((issue) => `- ${issue}`),
+    );
+  }
+  if (params.previousResultPreview) {
+    lines.push('', `上一轮输出摘要：${params.previousResultPreview}`);
+  }
+  return lines.join('\n');
+}
+
+function buildAgentVerifierPrompt(job: AgentJob, result, locale: string | null): string {
+  const language = normalizeLocale(locale) === 'zh-CN' ? '中文' : 'English';
+  return [
+    `你是 CodexBridge 后台 Agent 的 verifier。请用${language}判断任务是否通过。`,
+    '只返回严格 JSON，不要 Markdown。',
+    'Schema:',
+    '{"pass":true,"summary":"简短结论","issues":[],"nextAction":"complete|retry|fail"}',
+    '',
+    `目标：${job.goal}`,
+    `最终交付物：${job.expectedOutput}`,
+    `计划：${job.plan.join(' / ')}`,
+    `输出状态：${result?.outputState ?? 'complete'}`,
+    `附件数量：${Array.isArray(result?.outputArtifacts) ? result.outputArtifacts.length : 0}`,
+    '',
+    '输出内容：',
+    truncateText(String(result?.outputText ?? result?.previewText ?? ''), 6000),
+  ].join('\n');
+}
+
+function parseAgentDraftCandidate(value: unknown): AgentDraftCandidate | null {
+  const parsed = parseJsonObject(value);
+  if (!parsed) {
+    return null;
+  }
+  const title = compactWhitespace(parsed.title ?? '');
+  const goal = compactWhitespace(parsed.goal ?? '');
+  const expectedOutput = compactWhitespace(parsed.expectedOutput ?? parsed.expected_output ?? '');
+  if (!title || !goal || !expectedOutput) {
+    return null;
+  }
+  if (isAgentDraftSchemaPlaceholder(title, goal, expectedOutput)) {
+    return null;
+  }
+  const plan = Array.isArray(parsed.plan)
+    ? parsed.plan.map((line) => compactWhitespace(line)).filter(Boolean).slice(0, 8)
+    : [];
+  return {
+    title: truncateText(title, 40),
+    goal,
+    expectedOutput,
+    plan: plan.length > 0 ? plan : buildLocalAgentPlan(goal),
+    category: normalizeAgentCategory(parsed.category),
+    riskLevel: normalizeAgentRisk(parsed.riskLevel ?? parsed.risk_level),
+    mode: normalizeAgentMode(parsed.mode),
+  };
+}
+
+function parseAgentVerificationResult(value: unknown): AgentVerificationResult | null {
+  const parsed = parseJsonObject(value);
+  if (!parsed) {
+    return null;
+  }
+  const summary = compactWhitespace(parsed.summary ?? parsed.reason ?? '');
+  const nextAction = normalizeAgentNextAction(parsed.nextAction ?? parsed.next_action);
+  if (isAgentVerificationSchemaPlaceholder(summary)) {
+    return null;
+  }
+  const issues = Array.isArray(parsed.issues)
+    ? parsed.issues.map((issue) => compactWhitespace(issue)).filter(Boolean).slice(0, 8)
+    : [];
+  return {
+    pass: Boolean(parsed.pass),
+    summary: summary || (Boolean(parsed.pass) ? 'Verifier passed.' : 'Verifier did not pass.'),
+    issues,
+    nextAction: Boolean(parsed.pass) ? 'complete' : nextAction,
+  };
+}
+
+function isAgentDraftSchemaPlaceholder(title: string, goal: string, expectedOutput: string): boolean {
+  const normalized = [title, goal, expectedOutput].join('|').toLowerCase();
+  return normalized.includes('短标题|明确目标|最终交付物')
+    || normalized.includes('short title|clear goal|final deliverable');
+}
+
+function isAgentVerificationSchemaPlaceholder(summary: string): boolean {
+  const normalized = summary.toLowerCase();
+  return normalized === '简短结论' || normalized === 'short verdict';
+}
+
+function parseJsonObject(value: unknown): Record<string, any> | null {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return value as Record<string, any>;
+  }
+  const text = String(value ?? '').trim();
+  if (!text) {
+    return null;
+  }
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/iu)?.[1]?.trim();
+  const candidate = fenced || text.match(/\{[\s\S]*\}/u)?.[0] || text;
+  try {
+    const parsed = JSON.parse(candidate);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function buildLocalAgentDraftCandidate(rawInput: string): AgentDraftCandidate {
+  const normalized = compactWhitespace(rawInput);
+  const title = truncateText(normalized || 'Agent', 40);
+  return {
+    title,
+    goal: normalized,
+    expectedOutput: '完成任务并把最终结果、验证结果和风险说明返回到当前微信会话。',
+    plan: buildLocalAgentPlan(normalized),
+    category: inferAgentCategory(normalized),
+    riskLevel: inferAgentRisk(normalized),
+    mode: inferAgentMode(normalized),
+  };
+}
+
+function buildLocalAgentPlan(goal: string): string[] {
+  const base = compactWhitespace(goal);
+  return [
+    '澄清目标并确认执行范围',
+    base.includes('代码') || /code|test|build|repo|仓库|修复|实现/u.test(base)
+      ? '读取相关代码并制定最小改动方案'
+      : '收集相关上下文并拆解执行步骤',
+    '执行任务并保留关键过程记录',
+    '运行可用验证并根据结果修复一次',
+    '把最终结果和风险说明发回微信',
+  ];
+}
+
+function inferAgentCategory(text: string): AgentJobCategory {
+  const normalized = text.toLowerCase();
+  if (/代码|修复|实现|测试|构建|repo|code|test|build|typescript|ts/u.test(normalized)) {
+    return 'code';
+  }
+  if (/部署|重启|服务|日志|系统|deploy|restart|service|log/u.test(normalized)) {
+    return 'ops';
+  }
+  if (/文档|总结|方案|readme|doc|markdown|md/u.test(normalized)) {
+    return 'doc';
+  }
+  if (/图片|视频|音频|media|image|video|audio/u.test(normalized)) {
+    return 'media';
+  }
+  if (/研究|搜索|分析|research|search|compare/u.test(normalized)) {
+    return 'research';
+  }
+  return 'mixed';
+}
+
+function inferAgentRisk(text: string): AgentJobRiskLevel {
+  if (/删除|上线|生产|数据库|支付|权限|delete|prod|database|payment|credential/u.test(text.toLowerCase())) {
+    return 'high';
+  }
+  if (/修改|部署|重启|commit|push|deploy|restart|write/u.test(text.toLowerCase())) {
+    return 'medium';
+  }
+  return 'low';
+}
+
+function inferAgentMode(text: string): AgentJobMode {
+  const category = inferAgentCategory(text);
+  if (category === 'code' || category === 'ops') {
+    return 'codex';
+  }
+  if (category === 'research') {
+    return 'agents';
+  }
+  return 'hybrid';
+}
+
+function normalizeAgentCategory(value: unknown): AgentJobCategory {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (['code', 'research', 'ops', 'doc', 'media', 'mixed'].includes(normalized)) {
+    return normalized as AgentJobCategory;
+  }
+  return 'mixed';
+}
+
+function normalizeAgentRisk(value: unknown): AgentJobRiskLevel {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (normalized === 'low' || normalized === 'medium' || normalized === 'high') {
+    return normalized;
+  }
+  return 'medium';
+}
+
+function normalizeAgentMode(value: unknown): AgentJobMode {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (normalized === 'codex' || normalized === 'agents' || normalized === 'hybrid') {
+    return normalized;
+  }
+  return 'hybrid';
+}
+
+function normalizeAgentNextAction(value: unknown): 'complete' | 'retry' | 'fail' {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (normalized === 'complete' || normalized === 'retry' || normalized === 'fail') {
+    return normalized;
+  }
+  return 'retry';
+}
+
+function resolveAgentHardFailure(result): string | null {
+  const state = String(result?.outputState ?? 'complete').toLowerCase();
+  if (['failed', 'error', 'timed_out', 'timeout', 'interrupted', 'cancelled', 'canceled', 'aborted'].includes(state)) {
+    return `Provider turn did not complete: ${state}`;
+  }
+  const text = compactWhitespace(result?.outputText ?? result?.previewText ?? '');
+  const artifacts = Array.isArray(result?.outputArtifacts) ? result.outputArtifacts : [];
+  const media = Array.isArray(result?.outputMedia) ? result.outputMedia : [];
+  if (!text && artifacts.length === 0 && media.length === 0) {
+    return 'Provider returned no text or attachments.';
+  }
+  return null;
+}
+
+function summarizeAgentResult(result): string {
+  const text = compactWhitespace(result?.outputText ?? result?.previewText ?? '');
+  if (text) {
+    return truncateText(text, 180);
+  }
+  const artifacts = Array.isArray(result?.outputArtifacts) ? result.outputArtifacts.length : 0;
+  const media = Array.isArray(result?.outputMedia) ? result.outputMedia.length : 0;
+  if (artifacts || media) {
+    return `attachments: ${artifacts + media}`;
+  }
+  return '';
+}
+
+function extractLastAssistantThreadText(thread): string {
+  const turns = Array.isArray(thread?.turns) ? thread.turns : [];
+  for (let index = turns.length - 1; index >= 0; index -= 1) {
+    const text = joinTurnRoleRawText(turns[index]?.items, 'assistant');
+    if (text) {
+      return text;
+    }
+  }
+  return '';
+}
+
+function isAgentResultPreviewOnly(job: AgentJob, text: unknown): boolean {
+  const normalized = stripAgentArtifactProtocol(text).trim();
+  if (!normalized) {
+    return false;
+  }
+  const preview = stripAgentArtifactProtocol(job.lastResultPreview ?? '').trim();
+  if (preview) {
+    if (normalized === preview && looksLikeTruncatedPreview(preview)) {
+      return true;
+    }
+    const normalizedPrefix = normalized.replace(/…$/u, '');
+    if (
+      normalized.endsWith('…')
+      && normalized.length <= preview.length
+      && preview.startsWith(normalizedPrefix)
+      && looksLikeTruncatedPreview(preview)
+    ) {
+      return true;
+    }
+    return false;
+  }
+  return looksLikeTruncatedPreview(normalized);
+}
+
+function looksLikeTruncatedPreview(text: string): boolean {
+  const normalized = String(text ?? '').trim();
+  return normalized.length >= 100 && normalized.endsWith('…');
+}
+
+function readCodexRolloutLastAgentMessage(threadId: string): string {
+  const normalizedThreadId = compactWhitespace(threadId);
+  if (!normalizedThreadId) {
+    return '';
+  }
+  const codexHome = compactWhitespace(process.env.CODEX_HOME) || path.join(os.homedir(), '.codex');
+  const sessionsDir = path.join(codexHome, 'sessions');
+  const files = findCodexRolloutFilesByThreadId(sessionsDir, normalizedThreadId);
+  let recovered = '';
+  for (const filePath of files) {
+    const message = extractCodexRolloutLastAgentMessage(filePath);
+    if (message) {
+      recovered = message;
+    }
+  }
+  return recovered;
+}
+
+function findCodexRolloutFilesByThreadId(rootDir: string, threadId: string): string[] {
+  const results: string[] = [];
+  const stack = [rootDir];
+  let visited = 0;
+  while (stack.length > 0 && visited < 5000) {
+    const dir = stack.pop();
+    if (!dir) {
+      continue;
+    }
+    visited += 1;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const filePath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(filePath);
+        continue;
+      }
+      if (entry.isFile() && entry.name.includes(threadId) && entry.name.endsWith('.jsonl')) {
+        results.push(filePath);
+      }
+    }
+  }
+  return results.sort((left, right) => {
+    try {
+      return fs.statSync(left).mtimeMs - fs.statSync(right).mtimeMs;
+    } catch {
+      return left.localeCompare(right);
+    }
+  });
+}
+
+function extractCodexRolloutLastAgentMessage(filePath: string): string {
+  let content = '';
+  try {
+    content = fs.readFileSync(filePath, 'utf8');
+  } catch {
+    return '';
+  }
+  let recovered = '';
+  for (const line of content.split(/\r?\n/u)) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      continue;
+    }
+    let record: any;
+    try {
+      record = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    if (record?.type === 'event_msg' && record?.payload?.type === 'task_complete') {
+      const message = stripAgentArtifactProtocol(record.payload.last_agent_message ?? '');
+      if (message) {
+        recovered = message;
+      }
+      continue;
+    }
+    if (record?.type === 'response_item') {
+      const message = extractAssistantResponseItemText(record.payload);
+      if (message) {
+        recovered = stripAgentArtifactProtocol(message);
+      }
+    }
+  }
+  return recovered.trim();
+}
+
+function extractAssistantResponseItemText(payload: unknown): string {
+  const item = payload as any;
+  if (item?.type !== 'message' || item?.role !== 'assistant' || !Array.isArray(item?.content)) {
+    return '';
+  }
+  return item.content
+    .map((contentItem) => {
+      if (contentItem?.type === 'output_text' || contentItem?.type === 'text') {
+        return String(contentItem?.text ?? '').trim();
+      }
+      return '';
+    })
+    .filter(Boolean)
+    .join('\n\n')
+    .trim();
+}
+
+function stripAgentArtifactProtocol(text: unknown): string {
+  return String(text ?? '')
+    .replace(/\n?```codexbridge-artifacts\s*[\s\S]*?```\n?/giu, '\n')
+    .trim();
+}
+
+function joinTurnRoleRawText(items, role): string {
+  if (!Array.isArray(items)) {
+    return '';
+  }
+  return items
+    .filter((item) => item?.role === role)
+    .map((item) => String(item?.text ?? '').trim())
+    .filter(Boolean)
+    .join('\n\n')
+    .trim();
+}
+
+function paginateTextByUtf8(text: string, maxBytes: number): string[] {
+  const normalized = String(text ?? '').trim();
+  if (!normalized) {
+    return [];
+  }
+  const pages: string[] = [];
+  let remaining = normalized;
+  while (remaining) {
+    const chunk = sliceTextByUtf8Boundary(remaining, maxBytes).trim();
+    if (!chunk) {
+      break;
+    }
+    pages.push(chunk);
+    remaining = remaining.slice(chunk.length).replace(/^[\s\n]+/u, '');
+  }
+  return pages.length > 0 ? pages : [normalized];
+}
+
+function sliceTextByUtf8Boundary(text: string, maxBytes: number): string {
+  const normalized = String(text ?? '');
+  if (Buffer.byteLength(normalized, 'utf8') <= maxBytes) {
+    return normalized;
+  }
+  let bytes = 0;
+  let lastWhitespaceIndex = -1;
+  let lastPunctuationIndex = -1;
+  for (let index = 0; index < normalized.length; index += 1) {
+    const character = normalized[index];
+    bytes += Buffer.byteLength(character, 'utf8');
+    if (/\s/u.test(character)) {
+      lastWhitespaceIndex = index;
+    }
+    if (/[。！？；，、.!?;,]/u.test(character)) {
+      lastPunctuationIndex = index + 1;
+    }
+    if (bytes > maxBytes) {
+      const splitAt = lastPunctuationIndex > 0
+        ? lastPunctuationIndex
+        : lastWhitespaceIndex > 0
+          ? lastWhitespaceIndex
+          : index;
+      return normalized.slice(0, Math.max(1, splitAt));
+    }
+  }
+  return normalized;
+}
+
+function sanitizeFilename(value: string): string {
+  const normalized = String(value ?? '').trim()
+    .replace(/[\\/:*?"<>|\u0000-\u001f]/gu, '_')
+    .replace(/\s+/gu, ' ')
+    .slice(0, 80)
+    .trim();
+  return normalized || 'agent-result';
+}
+
+function normalizeAgentArtifactsForStorage(artifacts: OutputArtifact[]): TurnArtifactDeliveredItem[] {
+  return normalizeAgentArtifacts(artifacts);
+}
+
+function normalizeAgentArtifacts(value: unknown): TurnArtifactDeliveredItem[] {
+  const items = Array.isArray(value) ? value : [];
+  return items
+    .map((item) => {
+      const pathValue = String(item?.path ?? '').trim();
+      if (!pathValue) {
+        return null;
+      }
+      const kind = normalizeAgentArtifactKind(item?.kind);
+      if (!kind) {
+        return null;
+      }
+      return {
+        kind,
+        path: pathValue,
+        displayName: normalizeNullableDisplayString(item?.displayName),
+        mimeType: normalizeNullableDisplayString(item?.mimeType),
+        sizeBytes: normalizeNullableArtifactSize(item?.sizeBytes),
+        caption: normalizeNullableDisplayString(item?.caption),
+        source: normalizeAgentArtifactSource(item?.source),
+        turnId: normalizeNullableDisplayString(item?.turnId),
+      };
+    })
+    .filter(Boolean) as TurnArtifactDeliveredItem[];
+}
+
+function normalizeAgentArtifactKind(value: unknown): TurnArtifactDeliveredItem['kind'] | null {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (normalized === 'image' || normalized === 'file' || normalized === 'video' || normalized === 'audio') {
+    return normalized;
+  }
+  return null;
+}
+
+function normalizeAgentArtifactSource(value: unknown): TurnArtifactDeliveredItem['source'] {
+  const normalized = String(value ?? '').trim();
+  if (normalized === 'provider_native' || normalized === 'bridge_declared' || normalized === 'bridge_fallback') {
+    return normalized;
+  }
+  return 'provider_native';
+}
+
+function normalizeNullableDisplayString(value: unknown): string | null {
+  const normalized = String(value ?? '').trim();
+  return normalized ? normalized : null;
+}
+
+function normalizeNullableArtifactSize(value: unknown): number | null {
+  const normalized = Number(value ?? NaN);
+  return Number.isFinite(normalized) && normalized >= 0 ? normalized : null;
+}
+
+function formatAgentArtifactSummary(artifacts: TurnArtifactDeliveredItem[], i18n: Translator): string {
+  const count = artifacts.length;
+  const names = artifacts
+    .slice(0, 2)
+    .map((artifact) => artifact.displayName || path.basename(artifact.path))
+    .filter(Boolean);
+  if (names.length === 0) {
+    return i18n.t('coordinator.agent.attachmentCount', { count });
+  }
+  const suffix = count > names.length ? ` +${count - names.length}` : '';
+  return `${i18n.t('coordinator.agent.attachmentCount', { count })}（${names.join('、')}${suffix}）`;
+}
+
+function formatAgentArtifactLine(
+  artifact: TurnArtifactDeliveredItem,
+  index: number,
+  i18n: Translator,
+): string {
+  const name = artifact.displayName || path.basename(artifact.path) || i18n.t('common.unknown');
+  const size = artifact.sizeBytes == null ? '' : `，${formatBinarySize(artifact.sizeBytes)}`;
+  return `${index + 1}. ${name}（${artifact.kind}${size}）\n${artifact.path}`;
+}
+
+function extractAgentBody(text: string): string {
+  const normalized = String(text ?? '').trim();
+  return compactWhitespace(normalized.replace(/^\/\S+\s*/u, ''));
+}
+
+function extractAgentAddBody(text: string): string {
+  const normalized = String(text ?? '').trim();
+  const match = normalized.match(/^\/\S+\s+add\s+([\s\S]+)$/iu);
+  return compactWhitespace(match?.[1] ?? '');
+}
+
+function extractAgentEditBody(text: string): string {
+  const normalized = String(text ?? '').trim();
+  const match = normalized.match(/^\/\S+\s+edit\s+([\s\S]+)$/iu);
+  return compactWhitespace(match?.[1] ?? '');
+}
+
+function extractAgentRenameTitle(text: string): string {
+  const normalized = String(text ?? '').trim();
+  const match = normalized.match(/^\/\S+\s+rename\s+\S+\s+([\s\S]+)$/iu);
+  return compactWhitespace(match?.[1] ?? '');
+}
+
+function formatAgentNormalizer(value: string, i18n: Translator): string {
+  if (value === 'agents-sdk') {
+    return i18n.t('coordinator.agent.normalizer.agents');
+  }
+  if (value === 'codex') {
+    return i18n.t('coordinator.agent.normalizer.codex');
+  }
+  return i18n.t('coordinator.agent.normalizer.local');
+}
+
+function formatAgentMode(value: string, i18n: Translator): string {
+  if (value === 'codex') {
+    return i18n.t('coordinator.agent.mode.codex');
+  }
+  if (value === 'agents') {
+    return i18n.t('coordinator.agent.mode.agents');
+  }
+  return i18n.t('coordinator.agent.mode.hybrid');
+}
+
+function formatAgentCategory(value: string, i18n: Translator): string {
+  return i18n.t(`coordinator.agent.category.${value}`) === `coordinator.agent.category.${value}`
+    ? value
+    : i18n.t(`coordinator.agent.category.${value}`);
+}
+
+function formatAgentRisk(value: string, i18n: Translator): string {
+  return i18n.t(`coordinator.agent.risk.${value}`) === `coordinator.agent.risk.${value}`
+    ? value
+    : i18n.t(`coordinator.agent.risk.${value}`);
+}
+
+function formatAgentStatusLabel(status: string, running: boolean, i18n: Translator): string {
+  if (running) {
+    return i18n.t('coordinator.agent.status.running');
+  }
+  const key = `coordinator.agent.status.${status}`;
+  const localized = i18n.t(key);
+  return localized === key ? status : localized;
 }
 
 function parseAutomationAddSpec(text: string) {
@@ -7233,6 +8955,38 @@ function getCommandHelpSpecs(i18n: Translator) {
       i18n.t('coordinator.help.note.review'),
     ],
   }),
+  agent: freezeCommandHelp({
+    name: 'agent',
+    aliases: ['ag'],
+    summary: i18n.t('coordinator.help.summary.agent'),
+    usage: [
+      '/agent <任务>',
+      '/agent confirm',
+      '/agent edit <新的描述>',
+      '/agent list',
+      '/agent show <序号>',
+      '/agent result <序号> [页码]',
+      '/agent result <序号> file',
+      '/agent send <序号>',
+      '/agent stop <序号>',
+      '/agent retry <序号>',
+      '/agent rename <序号> <新标题>',
+      '/agent del <序号>',
+      '/agent -h',
+    ],
+    examples: [
+      '/agent 检查当前项目测试并修复失败项',
+      '/agent confirm',
+      '/agent show 1',
+      '/agent result 1',
+      '/agent result 1 file',
+      '/agent send 1',
+      '/agent retry 1',
+    ],
+    notes: [
+      i18n.t('coordinator.help.note.agent'),
+    ],
+  }),
   skills: freezeCommandHelp({
     name: 'skills',
     aliases: ['sk'],
@@ -7839,6 +9593,7 @@ const COMMAND_HELP_ORDER = Object.freeze([
   'login',
   'stop',
   'review',
+  'agent',
   'skills',
   'plugins',
   'apps',
@@ -7882,6 +9637,7 @@ const COMMAND_ALIAS_DEFINITIONS = Object.freeze({
   login: ['lg'],
   stop: ['sp'],
   review: ['rv'],
+  agent: ['ag'],
   skills: ['sk'],
   plugins: ['pg'],
   apps: ['ap'],

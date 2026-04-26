@@ -209,15 +209,23 @@ function resolveExplicitCommandPath(
   if (!hasPathSeparator(command)) {
     return null;
   }
-  const basePath = path.isAbsolute(command)
-    ? command
-    : path.resolve(cwd, command);
+  const hostCommand = normalizeCommandPathForHost(command, platform);
+  const basePath = path.isAbsolute(hostCommand)
+    ? hostCommand
+    : path.resolve(cwd, hostCommand);
   for (const candidate of buildExplicitCandidates(basePath, platform, env)) {
     if (isCommandFile(candidate)) {
       return candidate;
     }
   }
   return null;
+}
+
+function normalizeCommandPathForHost(command: string, platform: NodeJS.Platform): string {
+  if (platform !== 'win32' || path.sep !== '/') {
+    return command;
+  }
+  return command.replace(/\\/gu, '/');
 }
 
 function buildExplicitCandidates(

@@ -38,7 +38,7 @@ Project bootstrap is now focused on:
 
 Current implemented bridge pieces:
 
-- Core session routing with WeChat-friendly slash commands, including `/helps`, `/status`, `/usage`, `/login`, `/stop`, `/review`, `/plan`, `/skills`, `/automation`, `/weibo`, `/new`, `/uploads`, `/provider`, `/models`, `/model`, `/personality`, `/instructions`, `/fast`, `/threads`, `/search`, `/next`, `/prev`, `/open`, `/peek`, `/rename`, `/permissions`, `/allow`, `/deny`, `/reconnect`, `/retry`, `/restart`, and `/lang`
+- Core session routing with WeChat-friendly slash commands, including `/helps`, `/status`, `/usage`, `/login`, `/stop`, `/review`, `/agent`, `/plan`, `/skills`, `/automation`, `/weibo`, `/new`, `/uploads`, `/provider`, `/models`, `/model`, `/personality`, `/instructions`, `/fast`, `/threads`, `/search`, `/next`, `/prev`, `/open`, `/peek`, `/rename`, `/permissions`, `/allow`, `/deny`, `/reconnect`, `/retry`, `/restart`, and `/lang`
 - File-backed JSON repositories for persistent bridge state
 - WeChat platform skeleton for Hermes-compatible iLink config loading, QR account state reuse, inbound DM normalization, long-poll client/poller wiring, context-token persistence, text chunking, and outbound text/typing delivery
 - Codex profile loader and initial Codex app-server client/plugin path for shared thread execution
@@ -59,6 +59,13 @@ Recommended entrypoints:
 /review
 /rv
 /review base main
+/agent 帮我检查当前项目测试并修复失败项
+/agent confirm
+/agent show 1
+/agent result 1
+/agent result 1 file
+/agent send 1
+/agent retry 1
 /plan
 /pl
 /plan on
@@ -172,6 +179,44 @@ Examples:
 
 `/plan on` enables native `plan` mode for later turns in the current bridge session. `/plan off` restores the native `default` collaboration mode. This is a mode toggle, not an approval flow.
 
+### `/agent` and `/ag`
+
+Create a confirmed background Agent job for deeper multi-step work.
+
+Examples:
+
+```text
+/agent 帮我研究并实现一个小功能，然后测试
+/agent confirm
+/agent edit 改成只做方案，不修改代码
+/agent list
+/agent show 1
+/agent result 1
+/agent result 1 file
+/agent send 1
+/agent stop 1
+/agent retry 1
+/agent del 1
+```
+
+The experimental workflow is hybrid: OpenAI Agents SDK is used for planning and semantic verification when an Agent API key is available, Codex app-server performs the actual repository execution, and the bridge keeps job state plus WeChat delivery. Long text results can be paged with `/agent result <index>` or exported as a phone-friendly TXT attachment with `/agent result <index> file`. Jobs with generated attachments keep artifact records, so `/agent send <index>` can resend the file if WeChat rate-limits the first delivery. If Agents SDK is unavailable, Codex/local fallback still creates a usable draft and verifier path.
+
+Agent planner/verifier configuration:
+
+```bash
+# OpenAI default
+OPENAI_API_KEY=...
+CODEXBRIDGE_AGENT_MODEL=gpt-5.5
+
+# OpenAI-compatible provider, for example MiniMax
+CODEXBRIDGE_AGENT_API_KEY=...
+CODEXBRIDGE_AGENT_BASE_URL=https://api.minimax.io/v1
+CODEXBRIDGE_AGENT_MODEL=MiniMax-M2.7
+CODEXBRIDGE_AGENT_API=chat_completions
+```
+
+`CODEXBRIDGE_AGENT_API_KEY` takes precedence over `OPENAI_API_KEY`. When `CODEXBRIDGE_AGENT_BASE_URL` or `OPENAI_BASE_URL` is set, the bridge defaults Agents SDK calls to Chat Completions compatibility mode unless `CODEXBRIDGE_AGENT_API=responses` is explicitly set.
+
 ### `/model` and `/m`
 
 Check or switch the model used for future turns.
@@ -200,6 +245,7 @@ Best-practice rule:
 - use `/helps` for command discovery
 - use `/login` and `/login list` to manage the host Codex account pool before switching accounts with `/login <index>`
 - use `/review`, `/review base <branch>`, or `/review commit <sha>` when you want a native Codex code review without changing the current thread binding
+- use `/agent <task>` when the task needs planning, background execution, verifier checks, and one automatic retry before delivery
 - use `/plan on` when you want later turns in the current session to prioritize planning first, and `/plan off` when you want to restore the default collaboration mode
 - use `/skills` to inspect what Codex can currently see in the active project, `/skills search <keyword>` for related matches, and `/skills show <index>` to understand what a skill is for before enabling or disabling it
 - use `/auto add ...` in natural language first; the bridge will draft a schedule, then `/auto confirm` creates the job

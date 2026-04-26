@@ -192,6 +192,7 @@ async function runWeixinServe(args: string[]) {
     platformPlugin,
     bridgeCoordinator: runtime.services.bridgeCoordinator,
     automationJobs: runtime.services.automationJobs,
+    agentJobs: runtime.services.agentJobs,
     onError: (async (error: unknown) => {
       process.stderr.write(`[weixin] ${formatError(error)}\n`);
     }) as any,

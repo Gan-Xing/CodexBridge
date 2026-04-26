@@ -695,7 +695,7 @@ function reserveSpoolPath(spoolDir: string, fileName: string): string {
 }
 
 function resolveArtifactPath(rawPath: string, artifactDir: string): string | null {
-  const normalized = String(rawPath ?? '').trim();
+  const normalized = normalizeDeclaredArtifactPath(String(rawPath ?? '').trim());
   if (!normalized) {
     return null;
   }
@@ -703,6 +703,13 @@ function resolveArtifactPath(rawPath: string, artifactDir: string): string | nul
     return path.resolve(normalized);
   }
   return path.resolve(artifactDir, normalized);
+}
+
+function normalizeDeclaredArtifactPath(rawPath: string): string {
+  if (path.sep !== '/') {
+    return rawPath;
+  }
+  return rawPath.replace(/\\/gu, '/');
 }
 
 function isWithinRoot(rootDir: string, targetPath: string): boolean {

@@ -29,7 +29,7 @@ It borrows the most useful CLI help conventions while staying chat-friendly:
 - `/helps` shows the full command catalog
 - `/helps <command>` shows one command in detail
 - every slash command supports `-h`, `--help`, `-help`, and `-helps`
-- every slash command also supports a short alias such as `/h`, `/st`, `/us`, `/lg`, `/sp`, `/rv`, `/sk`, `/n`, `/up`, `/pd`, `/ms`, `/m`, `/psn`, `/ins`, `/th`, `/se`, `/nx`, `/pv`, `/o`, `/pk`, `/rn`, `/perm`, `/al`, `/dn`, `/rc`, `/rt`, and `/rs`
+- every slash command also supports a short alias such as `/h`, `/st`, `/us`, `/lg`, `/sp`, `/rv`, `/ag`, `/sk`, `/n`, `/up`, `/pd`, `/ms`, `/m`, `/psn`, `/ins`, `/th`, `/se`, `/nx`, `/pv`, `/o`, `/pk`, `/rn`, `/perm`, `/al`, `/dn`, `/rc`, `/rt`, and `/rs`
 - `/lang` and `/lang <zh|en>` to switch reply language for this scope (higher priority than env).
 - thread browsing is index-first on WeChat, so `/open 2` is preferred over copying raw thread ids
 
@@ -46,6 +46,12 @@ It borrows the most useful CLI help conventions while staying chat-friendly:
 /rv
 /review base main
 /review commit HEAD~1
+/agent 帮我检查当前项目测试并修复失败项
+/agent confirm
+/agent show 1
+/agent result 1
+/agent result 1 file
+/agent send 1
 /skills
 /sk
 /skills search 新闻
@@ -172,6 +178,52 @@ Examples:
 /rv
 /review base main
 /review commit HEAD~1
+```
+
+### `/agent` and `/ag`
+
+Create a confirmed background Agent job for deeper multi-step work.
+
+- `/agent <task>` creates a draft instead of executing immediately
+- `/agent confirm` confirms the draft and queues the background job
+- `/agent edit <new description>` replaces the current draft
+- `/agent list` lists jobs for the current WeChat chat
+- `/agent show <index>` shows the plan, status, attempts, and verifier result
+- `/agent result <index>` shows the full text result in pages
+- `/agent result <index> file` exports the full text result as a phone-friendly TXT attachment
+- `/agent send <index>` resends saved attachments for a completed job
+- `/agent stop <index>` requests stop for the job
+- `/agent retry <index>` queues a failed/stopped/completed job again
+- `/agent rename <index> <title>` updates the local job title
+- `/agent del <index>` deletes the job record
+
+Examples:
+
+```text
+/agent 检查当前项目测试并修复失败项
+/ag 写一份 CodexBridge Agent 接入方案
+/agent confirm
+/agent edit 只做方案，不改代码
+/agent list
+/agent show 1
+/agent result 1
+/agent result 1 2
+/agent result 1 file
+/agent send 1
+/agent stop 1
+/agent retry 1
+/agent del 1
+```
+
+Implementation note: the workflow is hybrid. OpenAI Agents SDK is used for planning and semantic verification when `CODEXBRIDGE_AGENT_API_KEY` or `OPENAI_API_KEY` is available. Codex app-server performs actual repository execution. Long text results are kept separately from the preview, so `/agent result <index>` can page through the full answer and `/agent result <index> file` can export it as phone-friendly TXT. Jobs with generated attachments keep artifact records, so `/agent send <index>` can resend the file if WeChat rate-limits the first delivery. If Agents SDK is unavailable, Codex/local fallback keeps the command usable.
+
+MiniMax/OpenAI-compatible example:
+
+```bash
+CODEXBRIDGE_AGENT_API_KEY=...
+CODEXBRIDGE_AGENT_BASE_URL=https://api.minimax.io/v1
+CODEXBRIDGE_AGENT_MODEL=MiniMax-M2.7
+CODEXBRIDGE_AGENT_API=chat_completions
 ```
 
 ### `/plan` and `/pl`

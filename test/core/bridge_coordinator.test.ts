@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { resolveOpenAIAgentRuntimeConfig } from '../../src/core/bridge_coordinator.js';
 import { createCodexBridgeRuntime } from '../../src/runtime/bootstrap.js';
 
 class FakeProviderPlugin {
@@ -4194,6 +4195,252 @@ test('/review clears the active scope turn if the initial progress delivery fail
   assert.match(result.messages[0]?.text ?? '', /代码审查失败：preview send failed/);
   assert.equal(openai.startReviewCalls.length, 0);
   assert.equal(runtime.services.activeTurns.resolveScopeTurn(scopeRef), null);
+});
+
+test('/agent drafts, confirms, runs, verifies, and records a background job', async () => {
+  const originalOpenAiKey = process.env.OPENAI_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+  try {
+    const { runtime, openai } = makeRuntime({ defaultCwd: '/repo' });
+    const draft = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-1',
+      text: '/agent 检查当前项目测试并修复失败项',
+    });
+    const draftText = draft.messages.map((message) => message.text).join('\n');
+    assert.match(draftText, /Agent 草案/);
+    assert.match(draftText, /确认：\/agent confirm/);
+
+    const confirmed = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-1',
+      text: '/agent confirm',
+    });
+    assert.match(confirmed.messages.map((message) => message.text).join('\n'), /Agent 任务已创建并排队/);
+    assert.equal(confirmed.meta?.systemAction?.kind, 'run_agent_sweep');
+
+    const [job] = runtime.services.agentJobs.listForScope({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-1',
+    });
+    assert.equal(job.status, 'queued');
+    assert.equal(job.maxAttempts, 2);
+
+    const response = await runtime.services.bridgeCoordinator.runAgentJob(job);
+    const responseText = response.messages.map((message) => message.text).join('\n');
+    assert.match(responseText, /Agent 任务已完成/);
+    assert.match(responseText, /基础检查通过/);
+
+    const completed = runtime.services.agentJobs.getById(job.id);
+    assert.equal(completed.status, 'completed');
+    assert.equal(completed.attemptCount, 1);
+    assert.match(completed.resultText ?? '', /后台 Agent 任务/);
+    assert.equal(openai.startTurnCalls.some((call) => String(call.inputText).includes('后台 Agent 任务')), true);
+
+    const fullResult = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-1',
+      text: '/agent result 1',
+    });
+    assert.match(fullResult.messages.map((message) => message.text).join('\n'), /Agent 结果/);
+    assert.match(fullResult.messages.map((message) => message.text).join('\n'), /后台 Agent 任务/);
+
+    const previewOnly = runtime.services.agentJobs.getById(job.id).lastResultPreview;
+    runtime.services.agentJobs.updateJob(job.id, { resultText: previewOnly });
+    const recoveredFromPreview = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-1',
+      text: '/agent result 1',
+    });
+    const recoveredText = recoveredFromPreview.messages.map((message) => message.text).join('\n');
+    assert.match(recoveredText, /Agent 结果/);
+    assert.match(recoveredText, /最终回复必须包含/);
+    assert.notEqual(runtime.services.agentJobs.getById(job.id).resultText, previewOnly);
+  } finally {
+    if (originalOpenAiKey === undefined) {
+      delete process.env.OPENAI_API_KEY;
+    } else {
+      process.env.OPENAI_API_KEY = originalOpenAiKey;
+    }
+  }
+});
+
+test('/agent stores generated attachments and can resend them', async () => {
+  const originalOpenAiKey = process.env.OPENAI_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+  try {
+    const { runtime, openai } = makeRuntime({ defaultCwd: fs.mkdtempSync(path.join(os.tmpdir(), 'agent-artifacts-')) });
+    openai.startTurn = async ({ providerProfile, bridgeSession, sessionSettings, event, inputText, onTurnStarted = null }) => {
+      openai.startTurnCalls.push({ providerProfile, bridgeSession, sessionSettings, event, inputText });
+      const turnId = 'agent-artifact-turn-1';
+      await onTurnStarted?.({
+        turnId,
+        threadId: bridgeSession.codexThreadId,
+      });
+      const context = event?.metadata?.codexbridge?.turnArtifactContext;
+      assert.ok(context?.artifactDir);
+      const reportPath = path.join(context.artifactDir, 'report.docx');
+      fs.writeFileSync(reportPath, 'fake docx');
+      return {
+        outputText: `已生成报告。\n\n\`\`\`codexbridge-artifacts\n[{"path":${JSON.stringify(reportPath)},"kind":"file","displayName":"report.docx","caption":"Word 报告"}]\n\`\`\``,
+        outputState: 'complete',
+        turnId,
+        threadId: bridgeSession.codexThreadId,
+        title: bridgeSession.title,
+      };
+    };
+
+    await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-artifacts-1',
+      text: '/agent 生成一份 Word 报告发给我',
+    });
+    await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-artifacts-1',
+      text: '/agent confirm',
+    });
+    const [job] = runtime.services.agentJobs.listForScope({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-artifacts-1',
+    });
+
+    const response = await runtime.services.bridgeCoordinator.runAgentJob(job);
+    const responseText = response.messages.map((message) => message.text).filter(Boolean).join('\n');
+    assert.match(responseText, /Agent 任务已完成/);
+    assert.match(responseText, /附件：1 个，正在发送。/);
+    assert.doesNotMatch(responseText, /codexbridge-artifacts/);
+    assert.equal(response.messages.some((message) => message.mediaPath?.endsWith('report.docx')), true);
+
+    const completed = runtime.services.agentJobs.getById(job.id);
+    assert.equal(completed.resultArtifacts?.length, 1);
+    assert.equal(completed.resultArtifacts?.[0]?.displayName, 'report.docx');
+    assert.match(completed.resultText ?? '', /已生成报告/);
+
+    const show = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-artifacts-1',
+      text: '/agent show 1',
+    });
+    assert.match(show.messages.map((message) => message.text).join('\n'), /附件：/);
+    assert.match(show.messages.map((message) => message.text).join('\n'), /report\.docx/);
+
+    runtime.services.agentJobs.updateJob(job.id, { resultText: null });
+    const recoveredResult = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-artifacts-1',
+      text: '/agent result 1',
+    });
+    assert.match(recoveredResult.messages.map((message) => message.text).join('\n'), /Agent 结果/);
+    assert.match(recoveredResult.messages.map((message) => message.text).join('\n'), /已生成报告/);
+
+    const resultFile = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-artifacts-1',
+      text: '/agent result 1 file',
+    });
+    assert.match(resultFile.messages.map((message) => message.text).join('\n'), /TXT 附件/);
+    assert.equal(resultFile.messages.some((message) => message.mediaPath?.endsWith('.txt')), true);
+
+    const resend = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-artifacts-1',
+      text: '/agent send 1',
+    });
+    assert.match(resend.messages.map((message) => message.text).join('\n'), /正在重新发送 Agent 附件/);
+    assert.equal(resend.messages.some((message) => message.mediaPath?.endsWith('report.docx')), true);
+  } finally {
+    if (originalOpenAiKey === undefined) {
+      delete process.env.OPENAI_API_KEY;
+    } else {
+      process.env.OPENAI_API_KEY = originalOpenAiKey;
+    }
+  }
+});
+
+test('/agent show, retry, rename, stop, and delete manage queued jobs', async () => {
+  const originalOpenAiKey = process.env.OPENAI_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+  try {
+    const { runtime } = makeRuntime({ defaultCwd: '/repo' });
+    await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-2',
+      text: '/agent 写一份项目总结',
+    });
+    await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-2',
+      text: '/agent confirm',
+    });
+    const show = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-2',
+      text: '/agent show 1',
+    });
+    assert.match(show.messages.map((message) => message.text).join('\n'), /Agent 详情/);
+
+    const renamed = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-2',
+      text: '/agent rename 1 项目总结',
+    });
+    assert.match(renamed.messages.map((message) => message.text).join('\n'), /项目总结/);
+
+    const stopped = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-2',
+      text: '/agent stop 1',
+    });
+    assert.match(stopped.messages.map((message) => message.text).join('\n'), /Agent 任务已请求停止/);
+
+    const retried = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-2',
+      text: '/agent retry 1',
+    });
+    assert.match(retried.messages.map((message) => message.text).join('\n'), /Agent 任务已重新排队/);
+
+    const deleted = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-2',
+      text: '/agent del 1',
+    });
+    assert.match(deleted.messages.map((message) => message.text).join('\n'), /Agent 任务已删除/);
+  } finally {
+    if (originalOpenAiKey === undefined) {
+      delete process.env.OPENAI_API_KEY;
+    } else {
+      process.env.OPENAI_API_KEY = originalOpenAiKey;
+    }
+  }
+});
+
+test('resolveOpenAIAgentRuntimeConfig supports OpenAI-compatible MiniMax settings', () => {
+  const config = resolveOpenAIAgentRuntimeConfig({
+    CODEXBRIDGE_AGENT_API_KEY: 'mini-key',
+    CODEXBRIDGE_AGENT_BASE_URL: 'https://api.minimax.io/v1',
+    CODEXBRIDGE_AGENT_MODEL: 'MiniMax-M2.7',
+  } as NodeJS.ProcessEnv);
+
+  assert.equal(config.apiKey, 'mini-key');
+  assert.equal(config.baseURL, 'https://api.minimax.io/v1');
+  assert.equal(config.model, 'MiniMax-M2.7');
+  assert.equal(config.useResponses, false);
+});
+
+test('resolveOpenAIAgentRuntimeConfig lets explicit API mode override defaults', () => {
+  const responsesConfig = resolveOpenAIAgentRuntimeConfig({
+    OPENAI_API_KEY: 'openai-key',
+    CODEXBRIDGE_AGENT_API: 'responses',
+  } as NodeJS.ProcessEnv);
+  const chatCompletionsConfig = resolveOpenAIAgentRuntimeConfig({
+    OPENAI_API_KEY: 'openai-key',
+    CODEXBRIDGE_AGENT_API: 'chat_completions',
+  } as NodeJS.ProcessEnv);
+
+  assert.equal(responsesConfig.useResponses, true);
+  assert.equal(chatCompletionsConfig.useResponses, false);
 });
 
 test('/skills lists visible skills for the current cwd and /skills show explains the selected skill', async () => {

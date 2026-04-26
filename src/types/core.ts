@@ -120,6 +120,54 @@ export interface AutomationJob {
   updatedAt: number;
 }
 
+export type AgentJobCategory = 'code' | 'research' | 'ops' | 'doc' | 'media' | 'mixed';
+
+export type AgentJobRiskLevel = 'low' | 'medium' | 'high';
+
+export type AgentJobMode = 'codex' | 'agents' | 'hybrid';
+
+export type AgentJobStatus =
+  | 'queued'
+  | 'planning'
+  | 'running'
+  | 'verifying'
+  | 'repairing'
+  | 'completed'
+  | 'failed'
+  | 'stopped';
+
+export interface AgentJob {
+  id: string;
+  platform: string;
+  externalScopeId: string;
+  title: string;
+  originalInput: string;
+  goal: string;
+  expectedOutput: string;
+  plan: string[];
+  category: AgentJobCategory;
+  riskLevel: AgentJobRiskLevel;
+  mode: AgentJobMode;
+  providerProfileId: string;
+  bridgeSessionId: string;
+  cwd: string | null;
+  locale: string | null;
+  status: AgentJobStatus;
+  running: boolean;
+  stopRequested: boolean;
+  maxAttempts: number;
+  attemptCount: number;
+  lastRunAt: number | null;
+  completedAt: number | null;
+  lastResultPreview: string | null;
+  resultText?: string | null;
+  resultArtifacts?: TurnArtifactDeliveredItem[] | null;
+  lastError: string | null;
+  verificationSummary: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface TurnArtifactIntent {
   requested: boolean;
   preferredKind: 'image' | 'file' | 'video' | 'audio' | null;

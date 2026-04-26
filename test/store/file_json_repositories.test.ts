@@ -298,3 +298,48 @@ test('file-backed repositories preserve plugin aliases across repository reloads
   assert.equal(aliases[0]?.alias, 'gd');
   assert.equal(aliases[0]?.pluginId, 'google-drive@openai-curated');
 });
+
+test('file-backed repositories preserve agent jobs across repository reloads', async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-json-store-'));
+  const providerProfile = makeProviderProfile('openai-default', 'openai-native', 'OpenAI Default');
+  const providerPlugin = new FakeProviderPlugin('openai-native');
+  const repositoriesA = createFileJsonRepositories(stateDir);
+  const runtimeA = createCodexBridgeRuntime({
+    providerPlugins: [providerPlugin],
+    providerProfiles: [providerProfile],
+    defaultProviderProfileId: providerProfile.id,
+    repositories: repositoriesA,
+  });
+  const session = await runtimeA.services.bridgeSessions.createDetachedSession({
+    providerProfileId: providerProfile.id,
+    cwd: '/repo',
+    title: 'Agent | Test',
+    initialSettings: {
+      locale: 'zh-CN',
+    },
+  });
+  const job = runtimeA.services.agentJobs.createJob({
+    scopeRef: {
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-store',
+    },
+    title: '测试 Agent',
+    originalInput: '测试',
+    goal: '测试持久化',
+    expectedOutput: '保存后可恢复',
+    plan: ['创建任务', '重载仓库'],
+    category: 'code',
+    riskLevel: 'low',
+    mode: 'hybrid',
+    providerProfileId: providerProfile.id,
+    bridgeSessionId: session.id,
+    cwd: '/repo',
+    locale: 'zh-CN',
+  });
+
+  const repositoriesB = createFileJsonRepositories(stateDir);
+  const restored = repositoriesB.agentJobs.getById(job.id);
+  assert.equal(restored?.title, '测试 Agent');
+  assert.equal(restored?.goal, '测试持久化');
+  assert.equal(restored?.bridgeSessionId, session.id);
+});

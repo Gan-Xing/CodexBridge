@@ -1,9 +1,11 @@
 import { ActiveTurnRegistry } from '../core/active_turn_registry.js';
+import { AgentJobService } from '../core/agent_job_service.js';
 import { AutomationJobService } from '../core/automation_job_service.js';
 import { BridgeSessionService } from '../core/bridge_session_service.js';
 import { BridgeCoordinator } from '../core/bridge_coordinator.js';
 import { WeiboHotSearchService } from '../services/weibo_hot_search.js';
 import { SessionRouter } from '../core/session_router.js';
+import { InMemoryAgentJobRepository } from '../store/in_memory/in_memory_agent_job_repository.js';
 import { InMemoryAutomationJobRepository } from '../store/in_memory/in_memory_automation_job_repository.js';
 import { InMemoryBridgeSessionRepository } from '../store/in_memory/in_memory_bridge_session_repository.js';
 import { InMemoryPlatformBindingRepository } from '../store/in_memory/in_memory_platform_binding_repository.js';
@@ -22,6 +24,7 @@ interface RuntimeRepositories {
   sessionSettings?: any;
   threadMetadata?: any;
   automationJobs?: any;
+  agentJobs?: any;
 }
 
 interface CreateCodexBridgeRuntimeOptions {
@@ -68,6 +71,7 @@ export function createCodexBridgeRuntime({
   const sessionSettingsRepository = repositories.sessionSettings ?? new InMemorySessionSettingsRepository();
   const threadMetadataRepository = repositories.threadMetadata ?? new InMemoryThreadMetadataRepository();
   const automationJobsRepository = repositories.automationJobs ?? new InMemoryAutomationJobRepository();
+  const agentJobsRepository = repositories.agentJobs ?? new InMemoryAgentJobRepository();
 
   for (const providerProfile of providerProfiles) {
     providerProfilesRepository.save(providerProfile);
@@ -93,6 +97,11 @@ export function createCodexBridgeRuntime({
     bridgeSessions,
     locale,
   });
+  const agentJobs = new AgentJobService({
+    agentJobs: agentJobsRepository,
+    bridgeSessions,
+    locale,
+  });
   const activeTurns = new ActiveTurnRegistry({ locale });
 
   const resolvedDefaultProviderProfileId = defaultProviderProfileId
@@ -101,6 +110,7 @@ export function createCodexBridgeRuntime({
   const bridgeCoordinator = new BridgeCoordinator({
     bridgeSessions,
     automationJobs,
+    agentJobs,
     activeTurns,
     providerProfiles: providerProfilesRepository,
     providerRegistry: registry,
@@ -129,12 +139,14 @@ export function createCodexBridgeRuntime({
       sessionSettings: sessionSettingsRepository,
       threadMetadata: threadMetadataRepository,
       automationJobs: automationJobsRepository,
+      agentJobs: agentJobsRepository,
     },
     services: {
       activeTurns,
       sessionRouter,
       bridgeSessions,
       automationJobs,
+      agentJobs,
       bridgeCoordinator,
     },
   };

@@ -759,18 +759,22 @@ test('WeixinBridgeRuntime reports media upload failures after Codex generates an
 
 test('WeixinBridgeRuntime rewrites ret -2 media upload failures into a fixed retry hint', async () => {
   const sentText: Array<{ externalScopeId: string; content: string }> = [];
+  const sentMedia: Array<{ externalScopeId: string; filePath: string; caption?: string | null }> = [];
   const runtime = makeRuntime({
     sendText: async ({ externalScopeId, content }) => {
       sentText.push({ externalScopeId, content });
     },
-    sendMedia: async (payload) => ({
-      success: false,
-      messageId: null,
-      sentPath: payload.filePath,
-      sentCaption: String(payload.caption ?? '').trim(),
-      error: 'sendMediaItems: -2',
-      errorCode: -2,
-    }),
+    sendMedia: async (payload) => {
+      sentMedia.push(payload);
+      return {
+        success: false,
+        messageId: null,
+        sentPath: payload.filePath,
+        sentCaption: String(payload.caption ?? '').trim(),
+        error: 'sendMediaItems: -2',
+        errorCode: -2,
+      };
+    },
     coordinator: {
       async handleInboundEvent() {
         return {
@@ -793,10 +797,64 @@ test('WeixinBridgeRuntime rewrites ret -2 media upload failures into a fixed ret
 
   await runtime.runOnce();
 
+  assert.equal(sentMedia.length, 3);
   assert.deepEqual(sentText, [{
     externalScopeId: 'wxid_1',
     content: '附件已生成，但微信上传失败：微信发送频率过快（ret: -2）。可用 /retry 重试。',
   }]);
+});
+
+test('WeixinBridgeRuntime retries ret -2 media uploads and suppresses the failure notice after success', async () => {
+  const sentText: Array<{ externalScopeId: string; content: string }> = [];
+  const sentMedia: Array<{ externalScopeId: string; filePath: string; caption?: string | null }> = [];
+  const runtime = makeRuntime({
+    sendText: async ({ externalScopeId, content }) => {
+      sentText.push({ externalScopeId, content });
+    },
+    sendMedia: async (payload) => {
+      sentMedia.push(payload);
+      if (sentMedia.length === 1) {
+        return {
+          success: false,
+          messageId: null,
+          sentPath: payload.filePath,
+          sentCaption: String(payload.caption ?? '').trim(),
+          error: 'sendMediaItems: -2',
+          errorCode: -2,
+        };
+      }
+      return {
+        success: true,
+        messageId: 'media-ok',
+        sentPath: payload.filePath,
+        sentCaption: String(payload.caption ?? '').trim(),
+        error: '',
+      };
+    },
+    coordinator: {
+      async handleInboundEvent() {
+        return {
+          type: 'message',
+          messages: [{
+            mediaPath: '/tmp/generated-report.docx',
+            caption: '报告',
+          }],
+          meta: {
+            codexTurn: {
+              outputState: 'complete',
+              previewText: '',
+              finalSource: 'thread_items_media',
+            },
+          },
+        };
+      },
+    },
+  });
+
+  await runtime.runOnce();
+
+  assert.equal(sentMedia.length, 2);
+  assert.deepEqual(sentText, []);
 });
 
 test('WeixinBridgeRuntime sends final text before media attachments in the same response', async () => {

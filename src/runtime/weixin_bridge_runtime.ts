@@ -61,6 +61,13 @@ interface BridgeCoordinatorLike {
   ): Promise<RuntimeResponse>;
   renderApprovalPrompt?(event: InboundTextEvent): Promise<string | null> | string | null;
   restartBridge?(params: { event: InboundTextEvent }): Promise<void>;
+  runAgentJob?(
+    job: any,
+    options: {
+      onProgress?: ((progress: ProviderTurnProgress) => Promise<void>) | null;
+      onApprovalRequest?: ((request: ProviderApprovalRequest) => Promise<void>) | null;
+    },
+  ): Promise<RuntimeResponse>;
 }
 
 interface StreamState {
@@ -105,6 +112,7 @@ interface WeixinBridgeRuntimeOptions {
   platformPlugin: PlatformPluginLike;
   bridgeCoordinator: BridgeCoordinatorLike;
   automationJobs?: any;
+  agentJobs?: any;
   onError?: (error: unknown) => Promise<void> | void;
   previewSoftTargetBytes?: number;
   previewHardLimitBytes?: number;
@@ -124,6 +132,7 @@ export class WeixinBridgeRuntime {
   bridgeCoordinator: BridgeCoordinatorLike;
 
   automationJobs: any;
+  agentJobs: any;
 
   onError: (error: unknown) => Promise<void> | void;
 
@@ -161,6 +170,7 @@ export class WeixinBridgeRuntime {
     platformPlugin,
     bridgeCoordinator,
     automationJobs = null,
+    agentJobs = null,
     onError = async () => {},
     previewSoftTargetBytes = 2048,
     previewHardLimitBytes = 2048,
@@ -173,6 +183,7 @@ export class WeixinBridgeRuntime {
     this.platformPlugin = platformPlugin;
     this.bridgeCoordinator = bridgeCoordinator;
     this.automationJobs = automationJobs;
+    this.agentJobs = agentJobs;
     this.onError = onError;
     this.previewSoftTargetBytes = previewSoftTargetBytes;
     this.previewHardLimitBytes = previewHardLimitBytes;
@@ -194,6 +205,7 @@ export class WeixinBridgeRuntime {
   async start(): Promise<void> {
     await this.platformPlugin.start();
     this.automationJobs?.resetRunningJobs?.();
+    this.agentJobs?.resetRunningJobs?.();
     this.startAutomationScheduler();
     this.poller = new WeixinPoller({
       plugin: this.platformPlugin,
@@ -928,26 +940,41 @@ export class WeixinBridgeRuntime {
         error: this.i18n.t('runtime.error.unknownDeliveryFailure'),
       };
     }
-    debugRuntime('artifact_delivery_attempt', {
-      scopeId: externalScopeId,
-      filePath: String(filePath ?? ''),
-      caption: truncateDebugText(caption),
-    });
-    const result = await this.platformPlugin.sendMedia({
-      externalScopeId,
-      filePath,
-      caption,
-    });
-    debugRuntime('artifact_delivery_result', {
-      scopeId: externalScopeId,
-      filePath: String(filePath ?? ''),
-      success: Boolean(result?.success),
-      messageId: result?.messageId ?? null,
-      sentPath: result?.sentPath ?? null,
-      sentCaption: truncateDebugText(result?.sentCaption),
-      error: result?.error ?? null,
-    });
-    return result ?? {
+    let lastResult: PlatformMediaDeliveryResult | null | undefined = null;
+    const maxAttempts = 3;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      if (attempt > 1) {
+        await sleep(Math.max(0, this.previewIntervalMs));
+      }
+      debugRuntime('artifact_delivery_attempt', {
+        scopeId: externalScopeId,
+        filePath: String(filePath ?? ''),
+        caption: truncateDebugText(caption),
+        attempt,
+        maxAttempts,
+      });
+      const result = await this.platformPlugin.sendMedia({
+        externalScopeId,
+        filePath,
+        caption,
+      });
+      lastResult = result;
+      debugRuntime('artifact_delivery_result', {
+        scopeId: externalScopeId,
+        filePath: String(filePath ?? ''),
+        success: Boolean(result?.success),
+        messageId: result?.messageId ?? null,
+        sentPath: result?.sentPath ?? null,
+        sentCaption: truncateDebugText(result?.sentCaption),
+        error: result?.error ?? null,
+        errorCode: result?.errorCode ?? null,
+        attempt,
+      });
+      if (result?.success || !this.isRateLimitedDeliveryFailure(result) || attempt >= maxAttempts) {
+        break;
+      }
+    }
+    return lastResult ?? {
       success: false,
       messageId: null,
       sentPath: String(filePath ?? ''),
@@ -1030,13 +1057,19 @@ export class WeixinBridgeRuntime {
 
   async runPostResponseAction(response: RuntimeResponse, event: InboundTextEvent): Promise<void> {
     const action = response?.meta?.systemAction ?? null;
-    if (!action || action.kind !== 'restart_bridge') {
+    if (!action) {
       return;
     }
-    if (typeof this.bridgeCoordinator?.restartBridge !== 'function') {
+    if (action.kind === 'run_agent_sweep') {
+      await this.runAutomationSweep();
       return;
     }
-    await this.bridgeCoordinator.restartBridge({ event });
+    if (action.kind === 'restart_bridge') {
+      if (typeof this.bridgeCoordinator?.restartBridge !== 'function') {
+        return;
+      }
+      await this.bridgeCoordinator.restartBridge({ event });
+    }
   }
 
   buildAfterCommitAction(
@@ -1044,7 +1077,7 @@ export class WeixinBridgeRuntime {
     event: InboundTextEvent,
   ): (() => Promise<void>) | null {
     const action = response?.meta?.systemAction ?? null;
-    if (!action || action.kind !== 'restart_bridge') {
+    if (!action || !['restart_bridge', 'run_agent_sweep'].includes(String(action.kind ?? ''))) {
       return null;
     }
     return async () => {
@@ -1128,7 +1161,7 @@ export class WeixinBridgeRuntime {
   }
 
   startAutomationScheduler(): void {
-    if (!this.automationJobs || this.automationPollMs <= 0) {
+    if ((!this.automationJobs && !this.agentJobs) || this.automationPollMs <= 0) {
       return;
     }
     this.stopAutomationScheduler();
@@ -1147,7 +1180,7 @@ export class WeixinBridgeRuntime {
   }
 
   async runAutomationSweep(): Promise<void> {
-    if (!this.automationJobs) {
+    if (!this.automationJobs && !this.agentJobs) {
       return;
     }
     if (this.automationSweepInFlight) {
@@ -1167,13 +1200,119 @@ export class WeixinBridgeRuntime {
   }
 
   async runAutomationSweepInternal(): Promise<void> {
-    const jobs = this.automationJobs?.claimDueJobs?.('weixin') ?? [];
-    if (!Array.isArray(jobs) || jobs.length === 0) {
+    const automationJobs = this.automationJobs?.claimDueJobs?.('weixin') ?? [];
+    if (Array.isArray(automationJobs)) {
+      for (const job of automationJobs) {
+        const task = this.runAutomationJob(job);
+        this.trackBackgroundTask(task);
+      }
+    }
+    const agentJobs = this.agentJobs?.claimQueuedJobs?.('weixin') ?? [];
+    if (!Array.isArray(agentJobs)) {
       return;
     }
-    for (const job of jobs) {
-      const task = this.runAutomationJob(job);
+    for (const job of agentJobs) {
+      const task = this.runAgentJob(job);
       this.trackBackgroundTask(task);
+    }
+  }
+
+  async runAgentJob(job: any): Promise<RuntimeResponse> {
+    const scopeId = String(job?.externalScopeId ?? '');
+    if (!scopeId || await this.isScopeBusyForAgent(job)) {
+      if (job?.id) {
+        this.agentJobs?.updateJob?.(job.id, {
+          status: 'queued',
+          running: false,
+        });
+      }
+      return {
+        type: 'message',
+        messages: [],
+      };
+    }
+    if (typeof this.bridgeCoordinator?.runAgentJob !== 'function') {
+      const error = 'Bridge coordinator does not support agent jobs.';
+      if (job?.id) {
+        this.agentJobs?.failJob?.(job.id, { error });
+      }
+      await this.sendTextWithRetry({
+        externalScopeId: scopeId,
+        content: this.i18n.t('runtime.error.agentFailed', {
+          title: String(job?.title ?? 'agent'),
+          error,
+        }),
+      });
+      return {
+        type: 'message',
+        messages: [],
+      };
+    }
+    const event: InboundTextEvent = {
+      platform: String(job.platform ?? 'weixin'),
+      externalScopeId: scopeId,
+      text: `/agent job ${job.id}`,
+      cwd: typeof job.cwd === 'string' ? job.cwd : null,
+      locale: typeof job.locale === 'string' ? job.locale : null,
+      metadata: {
+        codexbridge: {
+          agentJobId: job.id,
+        },
+      },
+    };
+    try {
+      return await this.enqueueScopeWork(scopeId, async () => this.processAgentJobEvent(event, job));
+    } catch (error) {
+      const message = formatAutomationError(error);
+      this.agentJobs?.failJob?.(job.id, {
+        error: message,
+      });
+      await this.sendTextWithRetry({
+        externalScopeId: scopeId,
+        content: this.i18n.t('runtime.error.agentFailed', {
+          title: String(job.title ?? 'agent'),
+          error: message,
+        }),
+      });
+      throw error;
+    }
+  }
+
+  async processAgentJobEvent(event: InboundTextEvent, job: any): Promise<RuntimeResponse> {
+    await this.flushPendingScopeNotice(event.externalScopeId);
+    const streamState = createStreamState();
+    const typingStart = this.safeSendTyping(event.externalScopeId, 'start');
+    const stopTypingKeepalive = this.startTypingKeepalive(event.externalScopeId);
+    try {
+      const response = await this.bridgeCoordinator.runAgentJob?.(job, {
+        onProgress: async (progress) => {
+          await this.handleProgressUpdate(event, streamState, progress);
+        },
+        onApprovalRequest: async () => {
+          await this.notifyApprovalPrompt(event);
+        },
+      }) ?? {
+        type: 'message',
+        messages: [],
+      };
+      if (response?.type !== 'message') {
+        return response;
+      }
+      const codexTurnMeta = response?.meta?.codexTurn ?? null;
+      const finalText = extractResponseMessageText(response);
+      const artifactMessages = extractResponseArtifactMessages(response);
+      if (normalizeComparableText(finalText) || codexTurnMeta) {
+        await this.ensureFinalDelivered(event, streamState, response, codexTurnMeta);
+      } else {
+        await this.stopPreviewStreaming(streamState);
+      }
+      if (artifactMessages.length > 0) {
+        await this.deliverArtifactMessages(event, artifactMessages);
+      }
+      return response;
+    } finally {
+      await typingStart;
+      await stopTypingKeepalive();
     }
   }
 
@@ -1232,6 +1371,27 @@ export class WeixinBridgeRuntime {
   }
 
   async isScopeBusyForAutomation(job: any): Promise<boolean> {
+    const scopeId = String(job?.externalScopeId ?? '');
+    if (!scopeId) {
+      return true;
+    }
+    if (this.pendingInboundMerges.has(scopeId) || this.scopeChains.has(scopeId)) {
+      return true;
+    }
+    const scopeRef = {
+      platform: String(job?.platform ?? 'weixin'),
+      externalScopeId: scopeId,
+    };
+    if (typeof (this.bridgeCoordinator as any)?.reconcileActiveTurn === 'function') {
+      const activeTurn = await (this.bridgeCoordinator as any).reconcileActiveTurn(scopeRef);
+      if (activeTurn) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  async isScopeBusyForAgent(job: any): Promise<boolean> {
     const scopeId = String(job?.externalScopeId ?? '');
     if (!scopeId) {
       return true;

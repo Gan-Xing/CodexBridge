@@ -9,6 +9,8 @@ stale TODOs.
 Already landed and no longer part of the active backlog:
 
 - `/review` for uncommitted changes and base-branch review
+- `/agent` experimental hybrid background jobs with draft-confirm, full-access Codex execution, verifier checks, and retry
+- `/plan` session-level native planning mode toggle
 - `/skills` visibility and on/off management
 - `/apps` runtime connector browsing, auth hints, and enable/disable management
 - `/plugins` visibility, aliasing, install/uninstall, and explicit plugin targeting
@@ -34,7 +36,6 @@ bridge-only slash-command glue.
 
 ### P0: Native command surface parity
 
-- [ ] Add `/plan` or `/plan-mode` so chat threads can explicitly enter native planning mode before execution
 - [ ] Decide whether native `/fork` needs a bridge command surface that is meaningfully different from current `/open`
 - [ ] Keep improving native approval, interrupted-turn, reconnect, and retry handling around long-running tasks
 - [ ] Continue expanding provider-native artifact delivery instead of adding more bridge-only glue
@@ -44,6 +45,7 @@ bridge-only slash-command glue.
 ### P1: Native background and execution environment parity
 
 - [ ] Add `codex cloud` task flows for submit/status/list/diff/apply so WeChat can act as a remote task inbox
+- [ ] Harden `/agent` with resumable execution logs, richer verifier policies, and optional OpenAI Agents SDK tracing
 - [ ] Introduce worktree-aware bridge session state instead of treating every thread as cwd-only
 - [ ] Map native worktree handoff concepts into bridge UX without breaking the existing thread binding model
 - [ ] Read project-local `.codex` environment metadata so shared local environment setup can inform bridge runs
