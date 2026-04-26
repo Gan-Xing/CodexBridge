@@ -38,6 +38,7 @@ function makeSessionSettings(overrides = {}) {
     model: null,
     reasoningEffort: null,
     serviceTier: null,
+    collaborationMode: null,
     personality: null,
     approvalPolicy: null,
     sandboxMode: null,
@@ -186,6 +187,45 @@ test('CodexProviderPlugin normalizes legacy service tier values before calling t
   });
 
   assert.deepEqual(seenServiceTiers, ['fast', 'flex']);
+});
+
+test('CodexProviderPlugin forwards plan collaboration mode into startTurn', async () => {
+  let seenCollaborationMode: string | null = null;
+  const plugin = makePlugin(() => ({
+    async start() {},
+    async startThread() {
+      return { threadId: 'thread-1', cwd: '/tmp/work', title: null };
+    },
+    async startTurn(params: any) {
+      seenCollaborationMode = params.collaborationMode;
+      return {
+        outputText: 'done',
+        threadId: params.threadId,
+        title: null,
+      };
+    },
+    async listModels() {
+      return [{
+        id: 'gpt-5.4',
+        model: 'gpt-5.4',
+        displayName: 'GPT-5.4',
+        description: '',
+        isDefault: true,
+        supportedReasoningEfforts: ['medium'],
+        defaultReasoningEffort: 'medium',
+      }];
+    },
+  }));
+
+  await plugin.startTurn({
+    providerProfile: makeProfile({ defaultModel: 'gpt-5.4' }),
+    bridgeSession: makeBridgeSession({ codexThreadId: 'thread-1' }),
+    sessionSettings: makeSessionSettings({ collaborationMode: 'plan' }),
+    event: { platform: 'weixin', externalScopeId: 'wxid_1', text: 'plan this change' },
+    inputText: 'plan this change',
+  });
+
+  assert.equal(seenCollaborationMode, 'plan');
 });
 
 test('CodexProviderPlugin startReview runs native review through the injected review runner without rebinding a chat thread', async () => {

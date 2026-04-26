@@ -38,7 +38,7 @@ Project bootstrap is now focused on:
 
 Current implemented bridge pieces:
 
-- Core session routing with WeChat-friendly slash commands, including `/helps`, `/status`, `/usage`, `/login`, `/stop`, `/review`, `/skills`, `/automation`, `/weibo`, `/new`, `/uploads`, `/provider`, `/models`, `/model`, `/personality`, `/instructions`, `/fast`, `/threads`, `/search`, `/next`, `/prev`, `/open`, `/peek`, `/rename`, `/permissions`, `/allow`, `/deny`, `/reconnect`, `/retry`, `/restart`, and `/lang`
+- Core session routing with WeChat-friendly slash commands, including `/helps`, `/status`, `/usage`, `/login`, `/stop`, `/review`, `/plan`, `/skills`, `/automation`, `/weibo`, `/new`, `/uploads`, `/provider`, `/models`, `/model`, `/personality`, `/instructions`, `/fast`, `/threads`, `/search`, `/next`, `/prev`, `/open`, `/peek`, `/rename`, `/permissions`, `/allow`, `/deny`, `/reconnect`, `/retry`, `/restart`, and `/lang`
 - File-backed JSON repositories for persistent bridge state
 - WeChat platform skeleton for Hermes-compatible iLink config loading, QR account state reuse, inbound DM normalization, long-poll client/poller wiring, context-token persistence, text chunking, and outbound text/typing delivery
 - Codex profile loader and initial Codex app-server client/plugin path for shared thread execution
@@ -59,6 +59,9 @@ Recommended entrypoints:
 /review
 /rv
 /review base main
+/plan
+/pl
+/plan on
 /skills
 /sk
 /skills search 新闻
@@ -154,6 +157,21 @@ Examples:
 /auto del 1
 ```
 
+### `/plan` and `/pl`
+
+Inspect or switch the session-level collaboration mode for future turns.
+
+Examples:
+
+```text
+/plan
+/pl
+/plan on
+/plan off
+```
+
+`/plan on` enables native `plan` mode for later turns in the current bridge session. `/plan off` restores the native `default` collaboration mode. This is a mode toggle, not an approval flow.
+
 ### `/model` and `/m`
 
 Check or switch the model used for future turns.
@@ -182,6 +200,7 @@ Best-practice rule:
 - use `/helps` for command discovery
 - use `/login` and `/login list` to manage the host Codex account pool before switching accounts with `/login <index>`
 - use `/review`, `/review base <branch>`, or `/review commit <sha>` when you want a native Codex code review without changing the current thread binding
+- use `/plan on` when you want later turns in the current session to prioritize planning first, and `/plan off` when you want to restore the default collaboration mode
 - use `/skills` to inspect what Codex can currently see in the active project, `/skills search <keyword>` for related matches, and `/skills show <index>` to understand what a skill is for before enabling or disabling it
 - use `/auto add ...` in natural language first; the bridge will draft a schedule, then `/auto confirm` creates the job
 - use `/threads` and numeric indexes on WeChat instead of copying raw thread ids

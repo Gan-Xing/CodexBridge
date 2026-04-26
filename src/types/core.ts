@@ -20,6 +20,7 @@ export interface SessionSettings {
   model: string | null;
   reasoningEffort: string | null;
   serviceTier: string | null;
+  collaborationMode?: 'plan' | 'default' | null;
   personality?: 'friendly' | 'pragmatic' | 'none' | null;
   accessPreset?: 'read-only' | 'default' | 'full-access' | null;
   approvalPolicy?: string | null;

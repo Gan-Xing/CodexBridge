@@ -174,6 +174,29 @@ Examples:
 /review commit HEAD~1
 ```
 
+### `/plan` and `/pl`
+
+Inspect or toggle the current bridge session plan mode.
+
+- `/plan` shows the current mode
+- `/plan on` enables native `plan` mode for later turns in the current session
+- `/plan off` restores native `default` mode
+
+Examples:
+
+```text
+/plan
+/pl
+/plan on
+/plan off
+```
+
+Notes:
+
+- this is a session-level collaboration mode toggle, not an approval flow
+- when enabled, later normal messages start in native `plan` mode
+- when disabled, later normal messages return to native `default` mode
+
 ### `/skills` and `/sk`
 
 List the skills currently visible to Codex for the active session cwd, search for related skills, inspect what a skill is for, and enable or disable it.

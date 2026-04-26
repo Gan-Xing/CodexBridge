@@ -189,7 +189,7 @@ export class CodexProviderPlugin {
       personality,
       approvalPolicy: sessionSettings?.approvalPolicy ?? 'on-request',
       sandboxMode: sessionSettings?.sandboxMode ?? 'workspace-write',
-      collaborationMode: 'default',
+      collaborationMode: normalizeCodexCollaborationMode(sessionSettings?.collaborationMode ?? null),
       developerInstructions,
       onProgress,
       onTurnStarted,
@@ -845,4 +845,8 @@ function normalizeCodexServiceTier(value: string | null | undefined): string | n
     return 'flex';
   }
   return normalized;
+}
+
+function normalizeCodexCollaborationMode(value: string | null | undefined): 'default' | 'plan' {
+  return String(value ?? '').trim().toLowerCase() === 'plan' ? 'plan' : 'default';
 }

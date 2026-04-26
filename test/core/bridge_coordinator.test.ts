@@ -1002,6 +1002,11 @@ test('bridge coordinator auto-rebinds to a new session when stale thread resume 
     externalScopeId: 'wx-user-1',
     text: 'hello codexbridge',
   });
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-1',
+    text: '/plan on',
+  });
   openai.threads.delete(original.session.codexThreadId);
   openai.resumeThread = async ({ threadId }) => {
     openai.resumeThreadCalls.push({ threadId });
@@ -1023,6 +1028,10 @@ test('bridge coordinator auto-rebinds to a new session when stale thread resume 
   });
   assert.notEqual(rebound?.id, original.session?.bridgeSessionId);
   assert.notEqual(rebound?.codexThreadId, original.session?.codexThreadId);
+  assert.equal(
+    rebound ? runtime.services.bridgeSessions.getSessionSettings(rebound.id)?.collaborationMode : null,
+    'plan',
+  );
 });
 
 test('bridge coordinator recreates a scope session when Codex reports a damaged rollout file', async () => {
@@ -2564,6 +2573,54 @@ test('/fast off forces flex service tier for the next turn', async () => {
   assert.equal(openai.startTurnCalls.at(-1)?.sessionSettings?.serviceTier, 'flex');
 });
 
+test('/plan shows current mode and updates the next turn collaboration mode', async () => {
+  const { runtime, openai } = makeRuntime();
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-plan-1',
+    text: '/new /home/ubuntu/dev/CodexBridge',
+  });
+
+  const current = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-plan-1',
+    text: '/plan',
+  });
+  assert.equal(current.messages[0]?.text ?? '', '当前计划模式：（默认）');
+
+  const enabled = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-plan-1',
+    text: '/plan on',
+  });
+  assert.equal(enabled.messages[0]?.text ?? '', '计划模式已开启。');
+  assert.equal(enabled.messages[1]?.text ?? '', '当前计划模式：开启');
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-plan-1',
+    text: '请先规划一下这个改动',
+  });
+  assert.equal(openai.startTurnCalls.at(-1)?.sessionSettings?.collaborationMode, 'plan');
+
+  const status = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-plan-1',
+    text: '/status details',
+  });
+  const statusText = status.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(statusText, /计划模式：开启/);
+
+  const disabled = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-plan-1',
+    text: '/plan off',
+  });
+  assert.equal(disabled.messages[0]?.text ?? '', '计划模式已关闭，已恢复默认协作模式。');
+  assert.equal(disabled.messages[1]?.text ?? '', '当前计划模式：（默认）');
+});
+
 test('legacy service tier values are normalized to fast/flex in status output', async () => {
   const { runtime, openai } = makeRuntime();
 
@@ -3266,6 +3323,11 @@ test('/new creates a fresh session on the current provider profile', async () =>
     externalScopeId: 'wx-user-1',
     text: '/personality pragmatic',
   });
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-1',
+    text: '/plan on',
+  });
 
   const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
     platform: 'weixin',
@@ -3284,6 +3346,10 @@ test('/new creates a fresh session on the current provider profile', async () =>
     runtime.services.bridgeSessions.getSessionSettings(rebound.id)?.personality,
     'pragmatic',
   );
+  assert.equal(
+    runtime.services.bridgeSessions.getSessionSettings(rebound.id)?.collaborationMode,
+    'plan',
+  );
 });
 
 test('/provider switches the scope to a new provider-backed session', async () => {
@@ -3297,6 +3363,11 @@ test('/provider switches the scope to a new provider-backed session', async () =
     platform: 'weixin',
     externalScopeId: 'wx-user-1',
     text: '/personality friendly',
+  });
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-1',
+    text: '/plan on',
   });
 
   const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
@@ -3316,6 +3387,47 @@ test('/provider switches the scope to a new provider-backed session', async () =
   assert.equal(
     runtime.services.bridgeSessions.getSessionSettings(rebound.id)?.personality,
     'friendly',
+  );
+  assert.equal(
+    runtime.services.bridgeSessions.getSessionSettings(rebound.id)?.collaborationMode,
+    'plan',
+  );
+});
+
+test('/open preserves plan mode when rebinding to another thread', async () => {
+  const { runtime, openai } = makeRuntime();
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-open-plan-1',
+    text: 'hello',
+  });
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-open-plan-1',
+    text: '/plan on',
+  });
+
+  const created = await openai.startThread({
+    providerProfile: makeProviderProfile('openai-default', 'openai-native', 'OpenAI Default'),
+    cwd: '/home/ubuntu/dev/CodexBridge',
+    title: 'Second thread',
+    metadata: {},
+  });
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-open-plan-1',
+    text: `/open ${created.threadId}`,
+  });
+
+  const rebound = runtime.services.bridgeSessions.resolveScopeSession({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-open-plan-1',
+  });
+  assert.ok(rebound);
+  assert.equal(
+    runtime.services.bridgeSessions.getSessionSettings(rebound.id)?.collaborationMode,
+    'plan',
   );
 });
 

@@ -646,6 +646,8 @@ export class BridgeCoordinator {
         return this.handleModelsCommand(event);
       case 'model':
         return this.handleModelCommand(event, command.args);
+      case 'plan':
+        return this.handlePlanCommand(event, command.args);
       case 'personality':
         return this.handlePersonalityCommand(event, command.args);
       case 'instructions':
@@ -718,6 +720,7 @@ export class BridgeCoordinator {
       this.t('coordinator.status.workingDirectory', { cwd: session.cwd ?? this.defaultCwd ?? this.t('common.notSet') }),
       this.t('coordinator.status.speedMode', { value: formatSpeedMode(settings?.serviceTier ?? null) }),
       this.t('coordinator.status.model', { value: modelValue }),
+      this.t('coordinator.status.planMode', { value: formatPlanMode(settings?.collaborationMode ?? null, this.currentI18n) }),
       this.t('coordinator.status.personality', { value: formatPersonality(settings?.personality ?? null, this.currentI18n) }),
       this.t('coordinator.status.reasoningEffort', { value: settings?.reasoningEffort ?? '' }),
       this.t('coordinator.status.accessPreset', { value: settings?.accessPreset ?? '' }),
@@ -735,6 +738,7 @@ export class BridgeCoordinator {
       this.t('coordinator.status.workingDirectory', { cwd: session.cwd ?? this.defaultCwd ?? this.t('common.notSet') }),
       this.t('coordinator.status.speedMode', { value: formatSpeedMode(settings?.serviceTier ?? null) }),
       this.t('coordinator.status.model', { value: settings?.model ?? this.t('common.default') }),
+      this.t('coordinator.status.planMode', { value: formatPlanMode(settings?.collaborationMode ?? null, this.currentI18n) }),
       this.t('coordinator.status.personality', { value: formatPersonality(settings?.personality ?? null, this.currentI18n) }),
       this.t('coordinator.status.reasoningEffort', { value: settings?.reasoningEffort ?? this.t('common.default') }),
       this.t('coordinator.status.serviceTier', { value: normalizeServiceTier(settings?.serviceTier) ?? this.t('common.default') }),
@@ -1185,10 +1189,9 @@ export class BridgeCoordinator {
     const nextSession = await this.bridgeSessions.createSessionForScope(scopeRef, {
       providerProfileId,
       cwd: args.join(' ').trim() || existing?.cwd || this.resolveEventCwd(event),
-      initialSettings: {
+      initialSettings: this.buildReboundSessionSettings(existingSettings, {
         locale: this.resolveScopeLocale(scopeRef, event),
-        personality: existingSettings?.personality ?? null,
-      },
+      }),
       providerStartOptions: {
         sourcePlatform: event.platform,
         trigger: 'new-command',
@@ -1804,6 +1807,8 @@ export class BridgeCoordinator {
       ], this.buildScopedSessionMeta(event));
     }
     const scopeRef = toScopeRef(event);
+    const currentSession = this.bridgeSessions.resolveScopeSession(scopeRef);
+    const currentSettings = currentSession ? this.bridgeSessions.getSessionSettings(currentSession.id) : null;
     const resolvedThread = this.resolveRequestedThread(event, requested);
     if (!resolvedThread.ok) {
       return messageResponse([resolvedThread.message], this.buildScopedSessionMeta(event));
@@ -1816,9 +1821,9 @@ export class BridgeCoordinator {
         codexThreadId: resolvedThread.threadId,
       },
       {
-        initialSettings: {
+        initialSettings: this.buildReboundSessionSettings(currentSettings, {
           locale: this.resolveScopeLocale(scopeRef, event),
-        },
+        }),
       },
     );
     return messageResponse([
@@ -1987,6 +1992,72 @@ export class BridgeCoordinator {
     }
     this.bridgeSessions.upsertSessionSettings(session.id, updates);
     return messageResponse([...messages, this.t('coordinator.permissions.nextTurn')], buildSessionMeta(session));
+  }
+
+  async handlePlanCommand(event, args) {
+    const normalizedArgs = args.map((arg) => String(arg ?? '').trim()).filter((arg) => arg.length > 0);
+    if (normalizedArgs.length > 1) {
+      return this.handleHelpsCommand(event, ['plan']);
+    }
+    const action = String(normalizedArgs[0] ?? '').trim().toLowerCase();
+    const enable = !action || ['on', 'enable', 'enabled', 'plan', '1'].includes(action);
+    const disable = ['off', 'disable', 'disabled', 'default', 'normal', '0'].includes(action);
+    const scopeRef = toScopeRef(event);
+    const session = this.bridgeSessions.resolveScopeSession(scopeRef);
+    if (!normalizedArgs.length) {
+      const currentMode = formatPlanMode(
+        session ? this.bridgeSessions.getSessionSettings(session.id)?.collaborationMode ?? null : null,
+        this.currentI18n,
+      );
+      const lines = [
+        this.t('coordinator.plan.current', { value: currentMode }),
+        this.t('coordinator.plan.usage'),
+        this.t('coordinator.plan.help'),
+      ];
+      return messageResponse(lines, session ? buildSessionMeta(session) : this.buildScopedSessionMeta(event));
+    }
+    if (!enable && !disable) {
+      return this.handleHelpsCommand(event, ['plan']);
+    }
+    const activeResponse = await this.rejectIfActiveTurnForCommand(event, 'plan');
+    if (activeResponse) {
+      return activeResponse;
+    }
+    if (disable) {
+      if (!session) {
+        return messageResponse([
+          this.t('coordinator.plan.disabled'),
+          this.t('coordinator.plan.current', { value: formatPlanMode(null, this.currentI18n) }),
+        ], this.buildScopedSessionMeta(event));
+      }
+      this.bridgeSessions.upsertSessionSettings(session.id, {
+        collaborationMode: 'default',
+      });
+      return messageResponse([
+        this.t('coordinator.plan.disabled'),
+        this.t('coordinator.plan.current', { value: formatPlanMode('default', this.currentI18n) }),
+        this.t('coordinator.permissions.nextTurn'),
+      ], buildSessionMeta(session));
+    }
+    const ensuredSession = await this.bridgeSessions.resolveOrCreateScopeSession(scopeRef, {
+      providerProfileId: this.resolveScopeProviderProfile(scopeRef).id,
+      cwd: this.resolveEventCwd(event),
+      initialSettings: {
+        locale: this.resolveScopeLocale(scopeRef, event),
+      },
+      providerStartOptions: {
+        sourcePlatform: event.platform,
+        trigger: 'plan-command',
+      },
+    });
+    this.bridgeSessions.upsertSessionSettings(ensuredSession.id, {
+      collaborationMode: 'plan',
+    });
+    return messageResponse([
+      this.t('coordinator.plan.enabled'),
+      this.t('coordinator.plan.current', { value: formatPlanMode('plan', this.currentI18n) }),
+      this.t('coordinator.permissions.nextTurn'),
+    ], buildSessionMeta(ensuredSession));
   }
 
   async handlePersonalityCommand(event, args) {
@@ -2293,10 +2364,9 @@ export class BridgeCoordinator {
     const currentSettings = current ? this.bridgeSessions.getSessionSettings(current.id) : null;
     const switched = await this.bridgeSessions.switchScopeProvider(scopeRef, {
       nextProviderProfileId: profile.id,
-      initialSettings: {
+      initialSettings: this.buildReboundSessionSettings(currentSettings, {
         locale: this.resolveScopeLocale(scopeRef, event),
-        personality: currentSettings?.personality ?? null,
-      },
+      }),
       providerStartOptions: {
         sourcePlatform: event.platform,
         trigger: 'provider-command',
@@ -5693,19 +5763,7 @@ export class BridgeCoordinator {
       providerProfileId: session.providerProfileId,
       cwd: normalizeCwd(session.cwd) ?? this.resolveEventCwd(event) ?? this.defaultCwd ?? null,
       title: session.title ?? null,
-      initialSettings: {
-        locale,
-        model: currentSettings?.model ?? null,
-        reasoningEffort: currentSettings?.reasoningEffort ?? null,
-        serviceTier: currentSettings?.serviceTier ?? null,
-        personality: currentSettings?.personality ?? null,
-        accessPreset: currentSettings?.accessPreset ?? null,
-        approvalPolicy: currentSettings?.approvalPolicy ?? null,
-        sandboxMode: currentSettings?.sandboxMode ?? null,
-        metadata: {
-          ...(currentSettings?.metadata ?? {}),
-        },
-      },
+      initialSettings: this.buildReboundSessionSettings(currentSettings, { locale }),
       providerStartOptions: {
         sourcePlatform: event.platform,
         trigger,
@@ -5726,6 +5784,27 @@ export class BridgeCoordinator {
       trigger,
     });
     return this.startTurnOnSession(nextSession, event, options);
+  }
+
+  buildReboundSessionSettings(
+    currentSettings: SessionSettings | null,
+    overrides: Partial<SessionSettings> = {},
+  ): Partial<SessionSettings> {
+    return {
+      locale: currentSettings?.locale ?? null,
+      model: currentSettings?.model ?? null,
+      reasoningEffort: currentSettings?.reasoningEffort ?? null,
+      serviceTier: currentSettings?.serviceTier ?? null,
+      collaborationMode: currentSettings?.collaborationMode ?? null,
+      personality: currentSettings?.personality ?? null,
+      accessPreset: currentSettings?.accessPreset ?? null,
+      approvalPolicy: currentSettings?.approvalPolicy ?? null,
+      sandboxMode: currentSettings?.sandboxMode ?? null,
+      metadata: {
+        ...(currentSettings?.metadata ?? {}),
+      },
+      ...overrides,
+    };
   }
 }
 
@@ -7427,6 +7506,25 @@ function getCommandHelpSpecs(i18n: Translator) {
       i18n.t('coordinator.help.note.model'),
     ],
   }),
+  plan: freezeCommandHelp({
+    name: 'plan',
+    aliases: ['pl'],
+    summary: i18n.t('coordinator.help.summary.plan'),
+    usage: [
+      '/plan',
+      '/plan on',
+      '/plan off',
+      '/plan -h',
+    ],
+    examples: [
+      '/plan',
+      '/plan on',
+      '/plan off',
+    ],
+    notes: [
+      i18n.t('coordinator.help.note.plan'),
+    ],
+  }),
   personality: freezeCommandHelp({
     name: 'personality',
     aliases: ['psn'],
@@ -7753,6 +7851,7 @@ const COMMAND_HELP_ORDER = Object.freeze([
   'provider',
   'models',
   'model',
+  'plan',
   'personality',
   'instructions',
   'fast',
@@ -7795,6 +7894,7 @@ const COMMAND_ALIAS_DEFINITIONS = Object.freeze({
   provider: ['pd'],
   models: ['ms'],
   model: ['m'],
+  plan: ['pl'],
   personality: ['psn'],
   instructions: ['ins'],
   fast: [],
@@ -9549,6 +9649,12 @@ function normalizeServiceTier(value) {
 
 function formatSpeedMode(serviceTier) {
   return normalizeServiceTier(serviceTier) === FAST_SERVICE_TIER ? 'fast' : 'normal';
+}
+
+function formatPlanMode(value, i18n: Translator) {
+  return String(value ?? '').trim().toLowerCase() === 'plan'
+    ? i18n.t('common.enabled')
+    : i18n.t('common.default');
 }
 
 function formatPersonality(value, i18n: Translator) {
