@@ -10,6 +10,10 @@ Already landed and no longer part of the active backlog:
 
 - `/review` for uncommitted changes and base-branch review
 - `/skills` visibility and on/off management
+- `/apps` runtime connector browsing, auth hints, and enable/disable management
+- `/plugins` visibility, aliasing, install/uninstall, and explicit plugin targeting
+- `/mcp` status, auth, reload, and enable/disable management
+- `/automation` draft-confirm flow and WeChat delivery-oriented scheduling
 - WeChat thread browsing with `/threads`, `/open`, `/search`, `/peek`, `/rename`
 - Thread cleanup and organization flows such as archive/restore and pin/unpin
 - Native-ish reconnect, retry, approval, and attachment delivery hardening
@@ -31,8 +35,6 @@ bridge-only slash-command glue.
 ### P0: Native command surface parity
 
 - [ ] Add `/plan` or `/plan-mode` so chat threads can explicitly enter native planning mode before execution
-- [ ] Add `/mcp` status and management flows on top of native `codex mcp` primitives
-- [ ] Add `/plugins` visibility and basic marketplace/status flows on top of native `codex plugin` primitives
 - [ ] Decide whether native `/fork` needs a bridge command surface that is meaningfully different from current `/open`
 - [ ] Keep improving native approval, interrupted-turn, reconnect, and retry handling around long-running tasks
 - [ ] Continue expanding provider-native artifact delivery instead of adding more bridge-only glue
