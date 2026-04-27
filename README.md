@@ -38,7 +38,7 @@ Project bootstrap is now focused on:
 
 Current implemented bridge pieces:
 
-- Core session routing with WeChat-friendly slash commands, including `/helps`, `/status`, `/usage`, `/login`, `/stop`, `/review`, `/agent`, `/plan`, `/skills`, `/automation`, `/weibo`, `/new`, `/uploads`, `/provider`, `/models`, `/model`, `/personality`, `/instructions`, `/fast`, `/threads`, `/search`, `/next`, `/prev`, `/open`, `/peek`, `/rename`, `/permissions`, `/allow`, `/deny`, `/reconnect`, `/retry`, `/restart`, and `/lang`
+- Core session routing with WeChat-friendly slash commands, including `/helps`, `/status`, `/usage`, `/login`, `/stop`, `/review`, `/agent`, `/plan`, `/skills`, `/plugins`, `/automation`, `/weibo`, `/new`, `/uploads`, `/provider`, `/models`, `/model`, `/personality`, `/instructions`, `/fast`, `/threads`, `/search`, `/next`, `/prev`, `/open`, `/peek`, `/rename`, `/permissions`, `/allow`, `/deny`, `/reconnect`, `/retry`, `/restart`, and `/lang`
 - File-backed JSON repositories for persistent bridge state
 - WeChat platform skeleton for Hermes-compatible iLink config loading, QR account state reuse, inbound DM normalization, long-poll client/poller wiring, context-token persistence, text chunking, and outbound text/typing delivery
 - Codex profile loader and initial Codex app-server client/plugin path for shared thread execution
@@ -73,6 +73,10 @@ Recommended entrypoints:
 /sk
 /skills search 新闻
 /skills show 1
+/plugins
+/pg
+/pg search 日记
+/pg show 1
 /auto
 /auto add 每30分钟检查一次系统状态，有变化发送给我
 /auto confirm

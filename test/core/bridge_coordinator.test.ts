@@ -4741,6 +4741,124 @@ test('/plugins shows featured plugins, category summaries, category items, and p
   assert.match(detailText, /需要认证/u);
 });
 
+test('/plugins search uses mixed semantic and fuzzy matching and updates numeric selection context', async () => {
+  const { runtime, openai } = makeRuntime({
+    defaultCwd: '/tmp/openai-default',
+  });
+  openai.pluginCatalog = {
+    featuredPluginIds: [],
+    marketplaceLoadErrors: [],
+    marketplaces: [{
+      name: 'openai-curated',
+      path: null,
+      displayName: 'OpenAI Curated',
+      plugins: [
+        {
+          id: 'notion@openai-curated',
+          name: 'notion',
+          installed: true,
+          enabled: true,
+          installPolicy: 'AVAILABLE',
+          authPolicy: 'ON_USE',
+          marketplaceName: 'openai-curated',
+          marketplacePath: null,
+          marketplaceDisplayName: 'OpenAI Curated',
+          displayName: 'Notion',
+          shortDescription: 'Workspace databases, notes, journals, and task lists',
+        },
+        {
+          id: 'google-drive@openai-curated',
+          name: 'google-drive',
+          installed: false,
+          enabled: false,
+          installPolicy: 'AVAILABLE',
+          authPolicy: 'ON_USE',
+          marketplaceName: 'openai-curated',
+          marketplacePath: null,
+          marketplaceDisplayName: 'OpenAI Curated',
+          displayName: 'Google Drive',
+          shortDescription: 'Docs, Sheets, and cloud drive workflows',
+        },
+        {
+          id: 'logtail@openai-curated',
+          name: 'logtail',
+          installed: false,
+          enabled: false,
+          installPolicy: 'AVAILABLE',
+          authPolicy: 'ON_USE',
+          marketplaceName: 'openai-curated',
+          marketplacePath: null,
+          marketplaceDisplayName: 'OpenAI Curated',
+          displayName: 'Logtail',
+          shortDescription: 'Operational logs and observability pipelines',
+        },
+      ],
+    }],
+  };
+  openai.pluginDetails.set('notion', {
+    summary: openai.pluginCatalog.marketplaces[0].plugins[0],
+    marketplaceName: 'openai-curated',
+    marketplacePath: null,
+    description: 'Capture diary entries, todo lists, task databases, and project notes in a workspace.',
+    apps: [{
+      id: 'notion',
+      name: 'Notion',
+      needsAuth: true,
+      description: 'Workspace database connector',
+    }],
+    mcpServers: [],
+    skills: [],
+  });
+  openai.pluginDetails.set('google-drive', {
+    summary: openai.pluginCatalog.marketplaces[0].plugins[1],
+    marketplaceName: 'openai-curated',
+    marketplacePath: null,
+    description: 'Google Docs, Sheets, and Drive file workflows.',
+    apps: [{
+      id: 'google-drive',
+      name: 'Google Drive',
+      needsAuth: true,
+      description: 'Drive connector',
+    }],
+    mcpServers: [],
+    skills: [],
+  });
+  openai.pluginDetails.set('logtail', {
+    summary: openai.pluginCatalog.marketplaces[0].plugins[2],
+    marketplaceName: 'openai-curated',
+    marketplacePath: null,
+    description: 'Search operational logs and production telemetry.',
+    apps: [],
+    mcpServers: ['logtail'],
+    skills: [],
+  });
+
+  const semantic = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-plugins-search',
+    text: '/pg search 日记',
+  });
+  const semanticText = semantic.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(semanticText, /插件搜索/u);
+  assert.match(semanticText, /1\. Notion/u);
+  assert.doesNotMatch(semanticText, /Logtail/u);
+
+  const semanticDetail = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-plugins-search',
+    text: '/pg show 1',
+  });
+  assert.match(semanticDetail.messages[0]?.text ?? '', /插件详情 \| 1\. Notion/u);
+
+  const fuzzy = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-plugins-search',
+    text: '/pg search gogle drve',
+  });
+  const fuzzyText = fuzzy.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(fuzzyText, /1\. Google Drive/u);
+});
+
 test('/plugins only manage package install/uninstall and redirect runtime toggles to dedicated surfaces', async () => {
   const { runtime, openai } = makeRuntime({
     defaultCwd: '/tmp/openai-default',

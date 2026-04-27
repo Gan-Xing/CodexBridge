@@ -61,6 +61,7 @@ import type {
 
 const THREAD_PAGE_SIZE = 5;
 const PLUGIN_CATEGORY_PAGE_SIZE = 20;
+const PLUGIN_SEARCH_MIN_SCORE = 64;
 const APP_PAGE_SIZE = 12;
 const THREAD_PREVIEW_LIMIT = 72;
 const THREAD_HISTORY_TURN_LIMIT = 3;
@@ -199,11 +200,18 @@ type PluginCategoryBucket = {
   items: ProviderPluginDetail[];
 };
 
+type PluginSearchMatch = {
+  detail: ProviderPluginDetail;
+  score: number;
+};
+
 type PluginBrowserState = {
   providerProfileId: string;
   cwd: string | null;
-  mode: 'featured' | 'category';
+  mode: 'featured' | 'category' | 'search';
   categoryKey: string | null;
+  searchTerm?: string | null;
+  pageNumber?: number;
   items: ProviderPluginSummary[];
   updatedAt: number;
 };
@@ -3928,6 +3936,9 @@ export class BridgeCoordinator {
           ? await this.handlePluginsCategoryItemsCommand(event, providerProfile, categoryToken, pageToken)
           : await this.handlePluginsCategorySummaryCommand(event, providerProfile);
       }
+      if (subcommand === 'search' || subcommand === 'find') {
+        return await this.handlePluginsSearchCommand(event, providerProfile, normalizedArgs.slice(1));
+      }
       if (subcommand === 'show') {
         return await this.handlePluginsShowCommand(event, providerProfile, normalizedArgs.slice(1).join(' '));
       }
@@ -4196,6 +4207,44 @@ export class BridgeCoordinator {
         aliases,
         pageNumber,
         pageCount,
+      }),
+      this.buildScopedSessionMeta(event),
+    );
+  }
+
+  async handlePluginsSearchCommand(event, providerProfile, args = []) {
+    const parsed = parsePluginSearchArgs(args);
+    if (!parsed.searchTerm) {
+      return await this.handleHelpsCommand(event, ['plugins']);
+    }
+    const result = await this.fetchPluginsForEvent(event, providerProfile);
+    const details = await this.readPluginDetailsForSummaries(providerProfile, result.allPlugins);
+    const aliases = this.resolveDisplayPluginAliases(event, providerProfile, result.allPlugins);
+    const matches = searchPluginDetails(details, parsed.searchTerm);
+    const pageCount = Math.max(1, Math.ceil(matches.length / PLUGIN_CATEGORY_PAGE_SIZE));
+    const pageNumber = Math.min(parsed.pageNumber ?? 1, pageCount);
+    const offset = (pageNumber - 1) * PLUGIN_CATEGORY_PAGE_SIZE;
+    const pageItems = matches.slice(offset, offset + PLUGIN_CATEGORY_PAGE_SIZE);
+    this.pluginBrowserStates.set(formatPlatformScopeKey(event.platform, event.externalScopeId), {
+      providerProfileId: providerProfile.id,
+      cwd: result.cwd,
+      mode: 'search',
+      categoryKey: null,
+      searchTerm: parsed.searchTerm,
+      pageNumber,
+      items: pageItems.map((match) => match.detail.summary),
+      updatedAt: this.now(),
+    });
+    return messageResponse(
+      renderPluginSearchLines({
+        i18n: this.currentI18n,
+        cwd: result.cwd,
+        searchTerm: parsed.searchTerm,
+        pageItems,
+        aliases,
+        pageNumber,
+        pageCount,
+        totalCount: matches.length,
       }),
       this.buildScopedSessionMeta(event),
     );
@@ -5166,6 +5215,25 @@ export class BridgeCoordinator {
         });
         return;
       }
+    }
+    if (previous.mode === 'search' && previous.searchTerm) {
+      const details = await this.readPluginDetailsForSummaries(providerProfile, result.allPlugins);
+      const matches = searchPluginDetails(details, previous.searchTerm);
+      const pageCount = Math.max(1, Math.ceil(matches.length / PLUGIN_CATEGORY_PAGE_SIZE));
+      const pageNumber = Math.min(previous.pageNumber ?? 1, pageCount);
+      const offset = (pageNumber - 1) * PLUGIN_CATEGORY_PAGE_SIZE;
+      const pageItems = matches.slice(offset, offset + PLUGIN_CATEGORY_PAGE_SIZE);
+      this.pluginBrowserStates.set(scopeKey, {
+        providerProfileId: providerProfile.id,
+        cwd: result.cwd,
+        mode: 'search',
+        categoryKey: null,
+        searchTerm: previous.searchTerm,
+        pageNumber,
+        items: pageItems.map((match) => match.detail.summary),
+        updatedAt: this.now(),
+      });
+      return;
     }
     this.pluginBrowserStates.set(scopeKey, {
       providerProfileId: providerProfile.id,
@@ -9021,6 +9089,7 @@ function getCommandHelpSpecs(i18n: Translator) {
       '/pg reload',
       '/pg list',
       '/pg list <序号> [页码]',
+      '/pg search <关键词> [页码]',
       '/pg show <序号|名称>',
       '/pg alias',
       '/pg alias <序号|名称> <短别名>',
@@ -9036,6 +9105,9 @@ function getCommandHelpSpecs(i18n: Translator) {
       '/pg list',
       '/pg list 1',
       '/pg list 1 2',
+      '/pg search 日记',
+      '/pg search google drive',
+      '/pg search todo 2',
       '/pg show 1',
       '/pg alias 1 gd',
       '/pg alias confirm',
@@ -10188,6 +10260,250 @@ function resolvePluginCategorySelection(token: string, buckets: PluginCategoryBu
   };
 }
 
+function parsePluginSearchArgs(args: unknown[]): { searchTerm: string; pageNumber: number | null } {
+  const tokens = Array.isArray(args)
+    ? args.map((value) => String(value ?? '').trim()).filter(Boolean)
+    : [];
+  if (tokens.length === 0) {
+    return { searchTerm: '', pageNumber: null };
+  }
+  const lastPage = tokens.length >= 2 ? parsePositiveIntegerToken(tokens.at(-1)) : null;
+  const searchTokens = lastPage ? tokens.slice(0, -1) : tokens;
+  return {
+    searchTerm: searchTokens.join(' ').trim(),
+    pageNumber: lastPage,
+  };
+}
+
+const PLUGIN_SEARCH_SYNONYM_GROUPS = [
+  ['todo', 'todos', 'task', 'tasks', 'checklist', '待办', '任务', '清单', '事项'],
+  ['diary', 'journal', 'journals', 'notion', 'database', 'databases', 'workspace', '日记'],
+  ['log', 'logs', 'record', 'records', '日志', '记录', '流水', '操作记录'],
+  ['note', 'notes', 'notebook', 'memo', '笔记', '备注', '随手记'],
+  ['daily', 'daily report', 'standup', '日报', '每日', '日更', '复盘'],
+  ['notion', 'database', 'databases', 'wiki', 'workspace', 'knowledge', '知识库', '数据库', '文档库'],
+  ['drive', 'google drive', 'docs', 'sheets', 'spreadsheet', 'google', '文档', '表格', '云盘', '网盘'],
+  ['calendar', 'schedule', 'schedules', 'reminder', 'event', 'events', '日历', '日程', '提醒', '计划'],
+  ['mail', 'email', 'gmail', 'inbox', '邮件', '邮箱', '收件箱'],
+  ['github', 'git', 'repo', 'repository', 'repositories', 'pull request', 'issue', '代码', '仓库', '提交'],
+  ['mcp', 'server', 'servers', 'tool', 'tools', '工具', '服务'],
+  ['skill', 'skills', 'workflow', 'workflows', '技能', '工作流'],
+  ['slack', 'chat', 'message', 'messages', 'team', '聊天', '消息', '团队'],
+  ['linear', 'project', 'projects', 'ticket', 'tickets', 'issue', 'issues', '项目', '工单', '缺陷'],
+] as const;
+
+function splitPluginSearchTokens(value: unknown): string[] {
+  const normalized = normalizePluginLookupToken(value)
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim();
+  return normalized ? normalized.split(' ').filter(Boolean) : [];
+}
+
+function buildPluginSearchTokens(searchTerm: string): string[] {
+  const normalizedQuery = normalizePluginLookupToken(searchTerm);
+  const tokens = new Set(splitPluginSearchTokens(normalizedQuery));
+  for (const group of PLUGIN_SEARCH_SYNONYM_GROUPS) {
+    const normalizedGroup = group
+      .flatMap((entry) => [normalizePluginLookupToken(entry), ...splitPluginSearchTokens(entry)])
+      .filter(Boolean);
+    if (normalizedGroup.some((entry) => tokens.has(entry) || (entry.length >= 2 && normalizedQuery.includes(entry)))) {
+      for (const entry of normalizedGroup) {
+        tokens.add(entry);
+      }
+    }
+  }
+  return Array.from(tokens).filter((token) => token.length > 0);
+}
+
+function collectPluginSearchFields(detail: ProviderPluginDetail): { primary: string[]; secondary: string[] } {
+  const summary = detail.summary;
+  const primary = [
+    summary.id,
+    summary.name,
+    summary.displayName ?? '',
+    summary.marketplaceName,
+    summary.marketplaceDisplayName ?? '',
+  ];
+  const secondary = [
+    summary.shortDescription ?? '',
+    summary.longDescription ?? '',
+    detail.description ?? '',
+    summary.category ?? '',
+    summary.developerName ?? '',
+    summary.websiteUrl ?? '',
+    summary.sourceType ?? '',
+    summary.sourcePath ?? '',
+    summary.sourceRemoteMarketplaceName ?? '',
+    ...(Array.isArray(summary.capabilities) ? summary.capabilities : []),
+    ...(Array.isArray(summary.defaultPrompts) ? summary.defaultPrompts : []),
+    ...detail.apps.flatMap((app) => [
+      app.id,
+      app.name,
+      app.description ?? '',
+    ]),
+    ...detail.mcpServers,
+    ...detail.skills.flatMap((skill) => [
+      skill.name,
+      skill.displayName ?? '',
+      skill.description ?? '',
+      skill.path ?? '',
+    ]),
+  ];
+  return {
+    primary: primary.map((value) => String(value ?? '').trim()).filter(Boolean),
+    secondary: secondary.map((value) => String(value ?? '').trim()).filter(Boolean),
+  };
+}
+
+function isPluginSubsequenceMatch(needle: string, haystack: string): boolean {
+  if (needle.length < 3 || haystack.length < 3 || needle.length > haystack.length + 2) {
+    return false;
+  }
+  let index = 0;
+  for (const char of haystack) {
+    if (char === needle[index]) {
+      index += 1;
+      if (index >= needle.length) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function pluginEditDistance(left: string, right: string): number {
+  if (left === right) {
+    return 0;
+  }
+  if (!left) {
+    return right.length;
+  }
+  if (!right) {
+    return left.length;
+  }
+  const previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  const current = Array.from({ length: right.length + 1 }, () => 0);
+  for (let leftIndex = 1; leftIndex <= left.length; leftIndex += 1) {
+    current[0] = leftIndex;
+    for (let rightIndex = 1; rightIndex <= right.length; rightIndex += 1) {
+      const cost = left[leftIndex - 1] === right[rightIndex - 1] ? 0 : 1;
+      current[rightIndex] = Math.min(
+        previous[rightIndex] + 1,
+        current[rightIndex - 1] + 1,
+        previous[rightIndex - 1] + cost,
+      );
+    }
+    for (let index = 0; index < previous.length; index += 1) {
+      previous[index] = current[index];
+    }
+  }
+  return previous[right.length] ?? Math.max(left.length, right.length);
+}
+
+function isPluginFuzzyTokenMatch(token: string, fieldToken: string): boolean {
+  if (token.length < 3 || fieldToken.length < 3) {
+    return false;
+  }
+  if (isPluginSubsequenceMatch(token, fieldToken)) {
+    return true;
+  }
+  const maxDistance = token.length <= 5 ? 1 : 2;
+  return Math.abs(token.length - fieldToken.length) <= maxDistance
+    && pluginEditDistance(token, fieldToken) <= maxDistance;
+}
+
+function scorePluginTokenAgainstField(token: string, normalizedField: string): number {
+  if (!token || !normalizedField) {
+    return 0;
+  }
+  if (normalizedField === token) {
+    return 72;
+  }
+  if (normalizedField.startsWith(token)) {
+    return 48;
+  }
+  if (normalizedField.includes(token)) {
+    return token.length >= 3 ? 32 : 12;
+  }
+  const fieldTokens = splitPluginSearchTokens(normalizedField);
+  let best = 0;
+  for (const fieldToken of fieldTokens) {
+    if (fieldToken === token) {
+      best = Math.max(best, 64);
+    } else if (fieldToken.startsWith(token)) {
+      best = Math.max(best, 36);
+    } else if (fieldToken.includes(token)) {
+      best = Math.max(best, 24);
+    } else if (token.length >= 3 && token.includes(fieldToken) && fieldToken.length >= 3) {
+      best = Math.max(best, 18);
+    } else if (isPluginFuzzyTokenMatch(token, fieldToken)) {
+      best = Math.max(best, 16);
+    }
+  }
+  return best;
+}
+
+function scorePluginMatch(detail: ProviderPluginDetail, searchTerm: string): number {
+  const normalizedQuery = normalizePluginLookupToken(searchTerm);
+  if (!normalizedQuery) {
+    return 0;
+  }
+  const tokens = buildPluginSearchTokens(searchTerm);
+  if (tokens.length === 0) {
+    return 0;
+  }
+  const fields = collectPluginSearchFields(detail);
+  const primary = fields.primary.map((field) => normalizePluginLookupToken(field)).filter(Boolean);
+  const secondary = fields.secondary.map((field) => normalizePluginLookupToken(field)).filter(Boolean);
+  let score = 0;
+  for (const field of primary) {
+    if (field === normalizedQuery) {
+      score += 240;
+    } else if (field.startsWith(normalizedQuery)) {
+      score += 180;
+    } else if (field.includes(normalizedQuery)) {
+      score += 120;
+    }
+  }
+  for (const field of secondary) {
+    if (field === normalizedQuery) {
+      score += 120;
+    } else if (field.startsWith(normalizedQuery)) {
+      score += 84;
+    } else if (field.includes(normalizedQuery)) {
+      score += 56;
+    }
+  }
+  for (const token of tokens) {
+    const primaryBest = primary.reduce((best, field) => Math.max(best, scorePluginTokenAgainstField(token, field)), 0);
+    const secondaryBest = secondary.reduce((best, field) => Math.max(best, scorePluginTokenAgainstField(token, field)), 0);
+    score += primaryBest * 2 + secondaryBest;
+  }
+  if (detail.summary.installed) {
+    score += 4;
+  }
+  if (detail.summary.enabled) {
+    score += 2;
+  }
+  return score;
+}
+
+function searchPluginDetails(details: ProviderPluginDetail[], searchTerm: string): PluginSearchMatch[] {
+  return details
+    .map((detail) => ({
+      detail,
+      score: scorePluginMatch(detail, searchTerm),
+    }))
+    .filter((entry) => entry.score >= PLUGIN_SEARCH_MIN_SCORE)
+    .sort((left, right) => {
+      if (right.score !== left.score) {
+        return right.score - left.score;
+      }
+      return comparePluginsForDisplay(left.detail.summary, right.detail.summary);
+    });
+}
+
 function comparePluginsForDisplay(left: ProviderPluginSummary, right: ProviderPluginSummary): number {
   if (left.installed !== right.installed) {
     return left.installed ? -1 : 1;
@@ -10568,6 +10884,65 @@ function renderPluginCategoryItemsLines({
     }));
   }
   lines.push(i18n.t('coordinator.plugins.actionsHint'));
+  return lines;
+}
+
+function renderPluginSearchLines({
+  i18n,
+  cwd,
+  searchTerm,
+  pageItems,
+  aliases = [],
+  pageNumber,
+  pageCount,
+  totalCount,
+}: {
+  i18n: Translator;
+  cwd: string | null;
+  searchTerm: string;
+  pageItems: PluginSearchMatch[];
+  aliases?: ResolvedPluginAlias[];
+  pageNumber: number;
+  pageCount: number;
+  totalCount: number;
+}) {
+  const lines = [
+    i18n.t('coordinator.plugins.searchTitle', {
+      cwd: cwd ?? i18n.t('common.notSet'),
+      term: searchTerm,
+      count: totalCount,
+      page: pageNumber,
+      pages: pageCount,
+    }),
+  ];
+  if (totalCount === 0) {
+    lines.push(i18n.t('coordinator.plugins.noMatch'));
+    lines.push(i18n.t('coordinator.plugins.searchActionsHint', { term: searchTerm }));
+    return lines;
+  }
+  for (const [index, match] of pageItems.entries()) {
+    const detail = match.detail;
+    const plugin = detail.summary;
+    const kindTags = summarizePluginKinds(detail, i18n);
+    const suffix = kindTags.length === 1 && kindTags[0] === i18n.t('coordinator.plugins.kind.other')
+      ? ''
+      : ` [${kindTags.join('/')}]`;
+    lines.push(`${index + 1}. ${getPluginDisplayName(plugin)} [${getPluginStatusLabel(plugin, i18n)}]${suffix}${formatPluginAliasSuffix(plugin, aliases, i18n)}`);
+    lines.push(`   ${truncateInlineText(detail.description || getPluginDescription(plugin), 88)}`);
+  }
+  if (pageCount > 1) {
+    const actions = [] as string[];
+    if (pageNumber > 1) {
+      actions.push(`/pg search ${searchTerm} ${pageNumber - 1}`);
+    }
+    if (pageNumber < pageCount) {
+      actions.push(`/pg search ${searchTerm} ${pageNumber + 1}`);
+    }
+    lines.push(i18n.t('coordinator.plugins.searchPageHint', {
+      actions: actions.join('  '),
+    }));
+  }
+  lines.push(i18n.t('coordinator.plugins.searchActionsHint', { term: searchTerm }));
   return lines;
 }
 

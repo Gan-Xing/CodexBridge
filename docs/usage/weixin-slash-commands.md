@@ -56,6 +56,10 @@ It borrows the most useful CLI help conventions while staying chat-friendly:
 /sk
 /skills search 新闻
 /skills show 1
+/plugins
+/pg
+/pg search 日记
+/pg show 1
 /auto
 /auto add 每30分钟检查一次系统状态，有变化发送给我
 /auto confirm
@@ -270,6 +274,35 @@ Examples:
 /skills on 2
 /skills off 2
 /skills reload
+```
+
+### `/plugins` and `/pg`
+
+Browse and manage native Codex plugin packages. Search uses a local hybrid matcher: exact/fuzzy text matching over plugin metadata plus bilingual synonym expansion for common needs such as todo, diary, mail, calendar, repository, MCP, and skills. It only shows high-relevance matches, so broad words like logs or notes do not flood unrelated plugin results.
+
+- `/plugins` or `/pg` shows featured plugins
+- `/pg search <keyword>` searches plugin names, descriptions, capabilities, bundled Apps, MCP servers, and Skills
+- `/pg search <keyword> <page>` opens another search result page
+- `/pg list` groups plugins by capability type
+- `/pg show <index|name>` explains what the selected plugin provides
+- `/pg add <index|name>` installs a plugin package
+- `/pg del <index|name>` uninstalls a plugin package
+- `/pg alias <index|name> <alias>` sets a short alias for later `/use` or `@alias` calls
+
+Examples:
+
+```text
+/plugins
+/pg
+/pg search 日记
+/pg search todo
+/pg search gogle drve
+/pg search 邮箱 2
+/pg list
+/pg list 1
+/pg show 1
+/pg add 1
+/pg alias 1 gd
 ```
 
 ### `/automation` and `/auto`
