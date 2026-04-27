@@ -1,4 +1,4 @@
-import type { AgentJob, AutomationJob, BridgeSession, PluginAlias, SessionSettings, ThreadMetadata } from './core.js';
+import type { AgentJob, AssistantRecord, AutomationJob, BridgeSession, PluginAlias, SessionSettings, ThreadMetadata } from './core.js';
 import type { ProviderProfile } from './provider.js';
 
 export interface PlatformBinding {
@@ -57,4 +57,11 @@ export interface AgentJobRepository {
   save(job: AgentJob): AgentJob;
   delete(id: string): void;
   list(): AgentJob[];
+}
+
+export interface AssistantRecordRepository {
+  getById(id: string): AssistantRecord | null;
+  save(record: AssistantRecord): AssistantRecord;
+  delete(id: string): void;
+  list(): AssistantRecord[];
 }

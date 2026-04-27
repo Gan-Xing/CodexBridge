@@ -179,6 +179,7 @@ async function runWeixinServe(args: string[]) {
     defaultCwd,
     locale: i18n.locale,
     repositories,
+    assistantAttachmentRoot: path.join(stateDir, 'assistant', 'attachments'),
     codexAuthManager,
     restartBridge: async ({ event }) => {
       await queueWeixinBridgeRestart({
@@ -193,6 +194,7 @@ async function runWeixinServe(args: string[]) {
     bridgeCoordinator: runtime.services.bridgeCoordinator,
     automationJobs: runtime.services.automationJobs,
     agentJobs: runtime.services.agentJobs,
+    assistantRecords: runtime.services.assistantRecords,
     onError: (async (error: unknown) => {
       process.stderr.write(`[weixin] ${formatError(error)}\n`);
     }) as any,

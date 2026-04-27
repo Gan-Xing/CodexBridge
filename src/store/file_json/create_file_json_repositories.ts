@@ -1,5 +1,6 @@
 import type {
   AgentJobRepository,
+  AssistantRecordRepository,
   AutomationJobRepository,
   BridgeSessionRepository,
   PlatformBindingRepository,
@@ -10,6 +11,7 @@ import type {
 } from '../../types/repository.js';
 import path from 'node:path';
 import { FileJsonAgentJobRepository } from './file_json_agent_job_repository.js';
+import { FileJsonAssistantRecordRepository } from './file_json_assistant_record_repository.js';
 import { FileJsonAutomationJobRepository } from './file_json_automation_job_repository.js';
 import { FileJsonBridgeSessionRepository } from './file_json_bridge_session_repository.js';
 import { FileJsonPlatformBindingRepository } from './file_json_platform_binding_repository.js';
@@ -27,6 +29,7 @@ export function createFileJsonRepositories(stateDir: string): {
   threadMetadata: ThreadMetadataRepository;
   automationJobs: AutomationJobRepository;
   agentJobs: AgentJobRepository;
+  assistantRecords: AssistantRecordRepository;
 } {
   return {
     providerProfiles: new FileJsonProviderProfileRepository(path.join(stateDir, 'provider_profiles.json')),
@@ -37,5 +40,6 @@ export function createFileJsonRepositories(stateDir: string): {
     threadMetadata: new FileJsonThreadMetadataRepository(path.join(stateDir, 'thread_metadata.json')),
     automationJobs: new FileJsonAutomationJobRepository(path.join(stateDir, 'automation_jobs.json')),
     agentJobs: new FileJsonAgentJobRepository(path.join(stateDir, 'agent_jobs.json')),
+    assistantRecords: new FileJsonAssistantRecordRepository(path.join(stateDir, 'assistant_records.json')),
   };
 }

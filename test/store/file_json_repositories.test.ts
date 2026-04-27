@@ -299,6 +299,42 @@ test('file-backed repositories preserve plugin aliases across repository reloads
   assert.equal(aliases[0]?.pluginId, 'google-drive@openai-curated');
 });
 
+test('file-backed repositories preserve assistant records across runtime restarts', async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-json-store-'));
+  const providerProfile = makeProviderProfile('openai-default', 'openai-native', 'OpenAI Default');
+  const providerPlugin = new FakeProviderPlugin('openai-native');
+
+  const runtimeA = createCodexBridgeRuntime({
+    providerPlugins: [providerPlugin],
+    providerProfiles: [providerProfile],
+    defaultProviderProfileId: providerProfile.id,
+    repositories: createFileJsonRepositories(stateDir),
+  });
+
+  await runtimeA.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-assistant',
+    text: '/log 今天保存一条文件仓储测试 #CodexBridge',
+  });
+
+  const runtimeB = createCodexBridgeRuntime({
+    providerPlugins: [providerPlugin],
+    providerProfiles: [providerProfile],
+    defaultProviderProfileId: providerProfile.id,
+    repositories: createFileJsonRepositories(stateDir),
+  });
+
+  const list = await runtimeB.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-assistant',
+    text: '/log',
+  });
+
+  const text = list.messages.map((message: any) => message?.text ?? '').join('\n');
+  assert.match(text, /文件仓储测试/);
+  assert.match(text, /CodexBridge/);
+});
+
 test('file-backed repositories preserve agent jobs across repository reloads', async () => {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-json-store-'));
   const providerProfile = makeProviderProfile('openai-default', 'openai-native', 'OpenAI Default');

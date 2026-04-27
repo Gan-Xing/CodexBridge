@@ -38,7 +38,7 @@ Project bootstrap is now focused on:
 
 Current implemented bridge pieces:
 
-- Core session routing with WeChat-friendly slash commands, including `/helps`, `/status`, `/usage`, `/login`, `/stop`, `/review`, `/agent`, `/plan`, `/skills`, `/plugins`, `/automation`, `/weibo`, `/new`, `/uploads`, `/provider`, `/models`, `/model`, `/personality`, `/instructions`, `/fast`, `/threads`, `/search`, `/next`, `/prev`, `/open`, `/peek`, `/rename`, `/permissions`, `/allow`, `/deny`, `/reconnect`, `/retry`, `/restart`, and `/lang`
+- Core session routing with WeChat-friendly slash commands, including `/helps`, `/status`, `/usage`, `/login`, `/stop`, `/review`, `/agent`, `/plan`, `/skills`, `/plugins`, `/automation`, `/weibo`, `/new`, `/uploads`, `/as`, `/log`, `/todo`, `/remind`, `/note`, `/provider`, `/models`, `/model`, `/personality`, `/instructions`, `/fast`, `/threads`, `/search`, `/next`, `/prev`, `/open`, `/peek`, `/rename`, `/permissions`, `/allow`, `/deny`, `/reconnect`, `/retry`, `/restart`, and `/lang`
 - File-backed JSON repositories for persistent bridge state
 - WeChat platform skeleton for Hermes-compatible iLink config loading, QR account state reuse, inbound DM normalization, long-poll client/poller wiring, context-token persistence, text chunking, and outbound text/typing delivery
 - Codex profile loader and initial Codex app-server client/plugin path for shared thread execution
@@ -83,6 +83,15 @@ Recommended entrypoints:
 /auto list
 /auto rename 1 晚间部署巡检
 /auto del 1
+/as 今天修复了 /pg search 日记召回太宽的问题 #CodexBridge
+/as 明天上午10点提醒我给王总回电话
+/as ok
+/as edit 把王总改成李总，时间改成明天上午11点
+/log 今天测试微信桥接，发现插件搜索需要更高相关度
+/todo 检查服务器磁盘空间
+/todo done 1
+/remind 每周一早上9点提醒我看项目进度
+/note Notion 适合结构化日志，Google Drive 适合导出归档
 /helps threads
 /stop
 /sp
@@ -168,6 +177,36 @@ Examples:
 /auto del 1
 ```
 
+### `/as`, `/log`, `/todo`, `/remind`, and `/note`
+
+Personal assistant records for WeChat. `/as` is the natural-language entry; `/log`, `/todo`, `/remind`, and `/note` force the category.
+
+Examples:
+
+```text
+/as 今天修复了 /pg search 日记召回太宽的问题 #CodexBridge
+/as 明天上午10点提醒我给王总回电话
+/as ok
+/as 给王总回电话这件事已经完成了
+/as ok
+/as 修马桶发票已经拿回来了
+/as edit 备注：还差医药发票不确定
+/as ok
+/log 今天测试微信桥接，发现插件搜索需要更高相关度
+/todo 检查服务器磁盘空间
+/todo done 1
+/remind 每周一早上9点提醒我看项目进度
+/note Notion 适合结构化日志，Google Drive 适合导出归档
+```
+
+`/as` also manages existing records with natural language. If the message looks like an update, completion, cancellation, or deletion, the bridge searches records in the current WeChat chat, shows a pending update draft, and only writes it after `/as ok`. Use `/as edit <change instruction>` to refine that pending update draft, or `/as cancel` to discard it.
+
+For natural-language updates, the bridge prefers a short-lived Codex app-server rewrite thread, so the host Codex subscription handles the “original record + modification instruction” merge. API-key based Agents SDK normalization is only a fallback when Codex normalization is unavailable; local rules are the final fallback.
+
+`/up` can stage files first. If the final message is `/as`, `/log`, `/todo`, `/remind`, or `/note`, the staged files are archived onto the assistant record under `~/.codexbridge/assistant/attachments/YYYY/MM/DD/<recordId>/`; structured records are stored in `~/.codexbridge/runtime/assistant_records.json`.
+
+Boundary: `/remind` only notifies, `/todo` tracks user-owned work, and `/auto` runs scheduled system work.
+
 ### `/plan` and `/pl`
 
 Inspect or switch the session-level collaboration mode for future turns.
@@ -203,7 +242,7 @@ Examples:
 /agent del 1
 ```
 
-The experimental workflow is hybrid: OpenAI Agents SDK is used for planning and semantic verification when an Agent API key is available, Codex app-server performs the actual repository execution, and the bridge keeps job state plus WeChat delivery. Long text results can be paged with `/agent result <index>` or exported as a phone-friendly TXT attachment with `/agent result <index> file`. Jobs with generated attachments keep artifact records, so `/agent send <index>` can resend the file if WeChat rate-limits the first delivery. If Agents SDK is unavailable, Codex/local fallback still creates a usable draft and verifier path.
+The experimental workflow is hybrid but Codex-first: Codex app-server is preferred for planning, execution, and verification so an existing Codex subscription is used by default. OpenAI Agents SDK is only a fallback when an Agent API key is configured and the Codex normalization/verifier path is unavailable. Long text results can be paged with `/agent result <index>` or exported as a phone-friendly TXT attachment with `/agent result <index> file`. Jobs with generated attachments keep artifact records, so `/agent send <index>` can resend the file if WeChat rate-limits the first delivery. If both Codex normalization and Agents SDK are unavailable, local fallback still creates a usable draft and verifier path.
 
 Agent planner/verifier configuration:
 
@@ -219,7 +258,7 @@ CODEXBRIDGE_AGENT_MODEL=MiniMax-M2.7
 CODEXBRIDGE_AGENT_API=chat_completions
 ```
 
-`CODEXBRIDGE_AGENT_API_KEY` takes precedence over `OPENAI_API_KEY`. When `CODEXBRIDGE_AGENT_BASE_URL` or `OPENAI_BASE_URL` is set, the bridge defaults Agents SDK calls to Chat Completions compatibility mode unless `CODEXBRIDGE_AGENT_API=responses` is explicitly set.
+`CODEXBRIDGE_AGENT_API_KEY` takes precedence over `OPENAI_API_KEY` for the fallback Agents SDK path. The default path still uses Codex app-server first. When `CODEXBRIDGE_AGENT_BASE_URL` or `OPENAI_BASE_URL` is set, the bridge defaults Agents SDK calls to Chat Completions compatibility mode unless `CODEXBRIDGE_AGENT_API=responses` is explicitly set.
 
 ### `/model` and `/m`
 

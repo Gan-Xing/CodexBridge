@@ -29,7 +29,7 @@ It borrows the most useful CLI help conventions while staying chat-friendly:
 - `/helps` shows the full command catalog
 - `/helps <command>` shows one command in detail
 - every slash command supports `-h`, `--help`, `-help`, and `-helps`
-- every slash command also supports a short alias such as `/h`, `/st`, `/us`, `/lg`, `/sp`, `/rv`, `/ag`, `/sk`, `/n`, `/up`, `/pd`, `/ms`, `/m`, `/psn`, `/ins`, `/th`, `/se`, `/nx`, `/pv`, `/o`, `/pk`, `/rn`, `/perm`, `/al`, `/dn`, `/rc`, `/rt`, and `/rs`
+- every slash command also supports a short alias such as `/h`, `/st`, `/us`, `/lg`, `/sp`, `/rv`, `/ag`, `/sk`, `/n`, `/up`, `/as`, `/td`, `/rmd`, `/nt`, `/pd`, `/ms`, `/m`, `/psn`, `/ins`, `/th`, `/se`, `/nx`, `/pv`, `/o`, `/pk`, `/rn`, `/perm`, `/al`, `/dn`, `/rc`, `/rt`, and `/rs`
 - `/lang` and `/lang <zh|en>` to switch reply language for this scope (higher priority than env).
 - thread browsing is index-first on WeChat, so `/open 2` is preferred over copying raw thread ids
 
@@ -66,6 +66,16 @@ It borrows the most useful CLI help conventions while staying chat-friendly:
 /auto list
 /auto rename 1 晚间部署巡检
 /auto del 1
+/as 今天修复了 /pg search 日记召回太宽的问题 #CodexBridge
+/as 明天上午10点提醒我给王总回电话
+/as ok
+/as 给王总回电话这件事已经完成了
+/as ok
+/log 今天测试微信桥接，发现插件搜索需要更高相关度
+/todo 检查服务器磁盘空间
+/todo done 1
+/remind 每周一早上9点提醒我看项目进度
+/note Notion 适合结构化日志，Google Drive 适合导出归档
 /stop
 /sp
 /provider
@@ -219,7 +229,7 @@ Examples:
 /agent del 1
 ```
 
-Implementation note: the workflow is hybrid. OpenAI Agents SDK is used for planning and semantic verification when `CODEXBRIDGE_AGENT_API_KEY` or `OPENAI_API_KEY` is available. Codex app-server performs actual repository execution. Long text results are kept separately from the preview, so `/agent result <index>` can page through the full answer and `/agent result <index> file` can export it as phone-friendly TXT. Jobs with generated attachments keep artifact records, so `/agent send <index>` can resend the file if WeChat rate-limits the first delivery. If Agents SDK is unavailable, Codex/local fallback keeps the command usable.
+Implementation note: the workflow is Codex-first hybrid. Codex app-server is preferred for planning, execution, and semantic verification, so a host Codex subscription is used by default. OpenAI Agents SDK is only a fallback when `CODEXBRIDGE_AGENT_API_KEY` or `OPENAI_API_KEY` is configured and the Codex normalization/verifier path is unavailable. Long text results are kept separately from the preview, so `/agent result <index>` can page through the full answer and `/agent result <index> file` can export it as phone-friendly TXT. Jobs with generated attachments keep artifact records, so `/agent send <index>` can resend the file if WeChat rate-limits the first delivery. If both Codex and Agents SDK normalization are unavailable, local fallback keeps the command usable.
 
 MiniMax/OpenAI-compatible example:
 
@@ -229,6 +239,65 @@ CODEXBRIDGE_AGENT_BASE_URL=https://api.minimax.io/v1
 CODEXBRIDGE_AGENT_MODEL=MiniMax-M2.7
 CODEXBRIDGE_AGENT_API=chat_completions
 ```
+
+### `/as`, `/log`, `/todo`, `/remind`, and `/note`
+
+Save personal assistant records from WeChat.
+
+- `/as <text>` is the unified natural-language entry. It classifies the text as log, todo, reminder, or note.
+- `/log <text>` forces a log record.
+- `/todo <text>` forces a todo record. Use `/todo done 1` to complete it.
+- `/remind <text>` forces a reminder. Phrases such as `明天上午10点` and `每周一早上9点` are parsed locally.
+- `/note <text>` forces a note record.
+- Logs and notes are saved directly. `/as` todo/reminder drafts ask for confirmation with `/as ok`.
+- `/as edit <change instruction>` refines the pending draft by merging the new instruction back into the original matched record.
+- `/as <natural update>` can also update existing records. If the text looks like completion, cancellation, deletion, or progress update, the bridge searches matching records in the current WeChat chat, asks Codex to merge the original record with the new instruction, and asks for `/as ok` before writing.
+- `/as search <keyword>` searches records in the current WeChat chat.
+- `/as show 1` shows full content and attachment paths.
+- `/as del 1` archives a record.
+
+Examples:
+
+```text
+/as 今天修复了 /pg search 日记召回太宽的问题 #CodexBridge
+/as 明天上午10点提醒我给王总回电话
+/as ok
+/as edit 把王总改成李总，时间改成明天上午11点
+/as cancel
+/as 给王总回电话这件事已经完成了
+/as ok
+/as 修马桶发票已经拿回来了
+/as edit 备注：还差医药发票不确定
+/as ok
+/log 今天测试微信桥接，发现插件搜索需要更高相关度
+/todo 下周五前整理 CodexBridge 视频脚本 p1
+/todo done 1
+/remind 每周一早上9点提醒我看项目进度
+/note Notion 适合结构化日志，Google Drive 适合导出归档
+```
+
+Attachment workflow:
+
+```text
+/up
+发送一个或多个文件、图片、语音、视频
+/as 把这些资料记录为合同附件 #合同
+```
+
+When `/up` is active, finishing with `/as`, `/log`, `/todo`, `/remind`, or `/note` archives the staged files into the assistant attachment directory instead of sending the batch to Codex as a normal thread prompt.
+
+Data layout:
+
+```text
+~/.codexbridge/runtime/assistant_records.json
+~/.codexbridge/assistant/attachments/YYYY/MM/DD/<recordId>/
+```
+
+Boundary with `/auto`:
+
+- `/remind` only notifies you at a time.
+- `/todo` tracks work you will do.
+- `/auto` runs scheduled system work and sends the result back to WeChat.
 
 ### `/plan` and `/pl`
 

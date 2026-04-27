@@ -32,6 +32,10 @@ import type {
   AgentJobCategory,
   AgentJobMode,
   AgentJobRiskLevel,
+  AssistantRecord,
+  AssistantRecordPriority,
+  AssistantRecordStatus,
+  AssistantRecordType,
   AutomationMode,
   AutomationSchedule,
   PlatformScopeRef,
@@ -158,6 +162,37 @@ type PendingAgentDraft = AgentDraftCandidate & {
   locale: string | null;
   cwd: string | null;
   initialSettings: Partial<SessionSettings>;
+};
+
+type AssistantRecordUpdateAction = 'update' | 'complete' | 'cancel' | 'archive';
+
+type PendingAssistantRecordUpdateDraft = {
+  createdAt: number;
+  rawInput: string;
+  instructions: string[];
+  targetRecordId: string;
+  matchedRecord: AssistantRecord;
+  action: AssistantRecordUpdateAction;
+  updatedRecord: AssistantRecord;
+  matchedScore: number;
+  normalizedBy: 'codex' | 'agents-sdk' | 'local';
+  changeSummary: string | null;
+};
+
+type AssistantRecordRewriteCandidate = {
+  action: AssistantRecordUpdateAction;
+  type: AssistantRecordType;
+  title: string;
+  content: string;
+  status: AssistantRecordStatus;
+  priority: AssistantRecordPriority;
+  dueAt: number | null;
+  remindAt: number | null;
+  recurrence: string | null;
+  project: string | null;
+  tags: string[];
+  changeSummary: string;
+  confidence: number;
 };
 
 type AgentVerificationResult = {
@@ -331,6 +366,7 @@ export class BridgeCoordinator {
   bridgeSessions: any;
   automationJobs: any;
   agentJobs: any;
+  assistantRecords: any;
   activeTurns: any;
   providerProfiles: any;
   providerRegistry: any;
@@ -354,6 +390,7 @@ export class BridgeCoordinator {
   pendingInstructionsEditsByScope: Map<string, { startedAt: number }>;
   pendingAutomationDraftsByScope: Map<string, PendingAutomationDraft>;
   pendingAgentDraftsByScope: Map<string, PendingAgentDraft>;
+  pendingAssistantUpdateDraftsByScope: Map<string, PendingAssistantRecordUpdateDraft>;
   localeContext: AsyncLocalStorage<SupportedLocale>;
   i18n: Translator;
 
@@ -361,6 +398,7 @@ export class BridgeCoordinator {
     bridgeSessions,
     automationJobs = null,
     agentJobs = null,
+    assistantRecords = null,
     activeTurns = null,
     providerProfiles,
     providerRegistry,
@@ -377,6 +415,7 @@ export class BridgeCoordinator {
     this.bridgeSessions = bridgeSessions;
     this.automationJobs = automationJobs;
     this.agentJobs = agentJobs;
+    this.assistantRecords = assistantRecords;
     this.activeTurns = activeTurns;
     this.providerProfiles = providerProfiles;
     this.providerRegistry = providerRegistry;
@@ -399,6 +438,7 @@ export class BridgeCoordinator {
     this.pendingInstructionsEditsByScope = new Map();
     this.pendingAutomationDraftsByScope = new Map();
     this.pendingAgentDraftsByScope = new Map();
+    this.pendingAssistantUpdateDraftsByScope = new Map();
     this.localeContext = new AsyncLocalStorage();
     this.i18n = createI18n(locale);
   }
@@ -645,6 +685,16 @@ export class BridgeCoordinator {
         return this.handleNewCommand(event, command.args);
       case 'uploads':
         return this.handleUploadsCommand(event, command.args);
+      case 'assistant':
+        return this.handleAssistantCommand(event, command.args, null);
+      case 'log':
+        return this.handleAssistantCommand(event, command.args, 'log');
+      case 'todo':
+        return this.handleAssistantCommand(event, command.args, 'todo');
+      case 'remind':
+        return this.handleAssistantCommand(event, command.args, 'reminder');
+      case 'note':
+        return this.handleAssistantCommand(event, command.args, 'note');
       case 'stop':
       case 'interrupt':
         return this.handleStopCommand(event);
@@ -1101,6 +1151,18 @@ export class BridgeCoordinator {
     this.pendingAutomationDraftsByScope.delete(buildAutomationDraftKey(scopeRef));
   }
 
+  getPendingAssistantUpdateDraft(scopeRef: PlatformScopeRef): PendingAssistantRecordUpdateDraft | null {
+    return this.pendingAssistantUpdateDraftsByScope.get(buildAssistantUpdateDraftKey(scopeRef)) ?? null;
+  }
+
+  setPendingAssistantUpdateDraft(scopeRef: PlatformScopeRef, draft: PendingAssistantRecordUpdateDraft) {
+    this.pendingAssistantUpdateDraftsByScope.set(buildAssistantUpdateDraftKey(scopeRef), draft);
+  }
+
+  clearPendingAssistantUpdateDraft(scopeRef: PlatformScopeRef) {
+    this.pendingAssistantUpdateDraftsByScope.delete(buildAssistantUpdateDraftKey(scopeRef));
+  }
+
   async handlePendingInstructionsEdit(event) {
     if (!String(event.text ?? '').trim()) {
       return messageResponse([
@@ -1311,6 +1373,605 @@ export class BridgeCoordinator {
       this.t('coordinator.uploads.statusHint'),
       this.t('coordinator.uploads.cancelHint'),
     ], buildSessionMeta(session));
+  }
+
+  async handleAssistantCommand(event, args, forcedType: AssistantRecordType | null = null) {
+    if (!this.assistantRecords) {
+      return messageResponse([this.t('coordinator.assistant.unsupported')], this.buildScopedSessionMeta(event));
+    }
+    const scopeRef = toScopeRef(event);
+    const commandName = assistantCommandNameForType(forcedType);
+    const action = String(args[0] ?? '').trim().toLowerCase();
+    const typeFilter = forcedType ?? null;
+    if (['list', 'ls', 'status'].includes(action)) {
+      return this.renderAssistantList(event, typeFilter);
+    }
+    if (action === 'search') {
+      const query = args.slice(1).join(' ').trim();
+      if (!query) {
+        return messageResponse([
+          this.t('coordinator.assistant.searchUsage', { command: commandName }),
+        ], this.buildScopedSessionMeta(event));
+      }
+      return this.renderAssistantList(event, typeFilter, query);
+    }
+    if (action === 'show') {
+      return this.handleAssistantShowCommand(event, args.slice(1), typeFilter);
+    }
+    if (['done', 'complete'].includes(action)) {
+      return this.handleAssistantDoneCommand(event, args.slice(1), typeFilter);
+    }
+    if (['del', 'delete', 'archive'].includes(action)) {
+      return this.handleAssistantDeleteCommand(event, args.slice(1), typeFilter);
+    }
+    if (action === 'ok' || action === 'confirm') {
+      return this.handleAssistantConfirmCommand(event, typeFilter);
+    }
+    if (action === 'cancel') {
+      if (args[1]) {
+        return this.handleAssistantCancelRecordCommand(event, args.slice(1), typeFilter);
+      }
+      return this.handleAssistantCancelPendingCommand(event, typeFilter);
+    }
+    if (action === 'edit') {
+      return this.handleAssistantEditPendingCommand(event, args.slice(1), forcedType);
+    }
+    const rawInput = args.join(' ').trim();
+    if (!rawInput) {
+      return this.renderAssistantList(event, typeFilter);
+    }
+    const uploadContext = this.resolveActiveUploadContext(scopeRef);
+    if (!uploadContext.state?.active && forcedType === null) {
+      const updateDraft = await this.buildAssistantRecordUpdateDraft(event, scopeRef, rawInput);
+      if (updateDraft) {
+        this.setPendingAssistantUpdateDraft(scopeRef, updateDraft);
+        return messageResponse(this.renderAssistantUpdateDraftLines(updateDraft), this.buildScopedSessionMeta(event));
+      }
+    }
+    const draft = this.assistantRecords.parseDraft(rawInput, forcedType);
+    const shouldConfirm = this.assistantRecords.shouldConfirmDraft(draft, forcedType);
+    const record = await this.assistantRecords.createRecord({
+      scopeRef,
+      source: event.platform === 'telegram' ? 'telegram' : 'weixin',
+      contextThreadId: uploadContext.session?.codexThreadId ?? this.bridgeSessions.resolveScopeSession(scopeRef)?.codexThreadId ?? null,
+      timezone: extractEventTimezone(event),
+      draft,
+      status: shouldConfirm ? 'pending' : 'active',
+      parseStatus: shouldConfirm ? 'auto' : forcedType ? 'confirmed' : 'auto',
+      uploadItems: uploadContext.state?.active ? uploadContext.state.items : [],
+    });
+    if (uploadContext.session && uploadContext.state?.active) {
+      await this.removeUploadBatchFiles(uploadContext.session, uploadContext.state);
+      this.setUploadsStateForSession(uploadContext.session.id, null);
+    }
+    if (record.status === 'pending') {
+      return messageResponse(this.renderAssistantPendingLines(record, commandName), this.buildScopedSessionMeta(event));
+    }
+    return messageResponse(this.renderAssistantSavedLines(record, commandName), this.buildScopedSessionMeta(event));
+  }
+
+  async handleAssistantShowCommand(event, args, typeFilter: AssistantRecordType | null) {
+    const scopeRef = toScopeRef(event);
+    const token = String(args[0] ?? '').trim();
+    const record = this.assistantRecords.resolveForScope(scopeRef, token, typeFilter);
+    if (!record) {
+      return messageResponse([this.t('coordinator.assistant.notFound')], this.buildScopedSessionMeta(event));
+    }
+    return messageResponse(this.renderAssistantDetailLines(record), this.buildScopedSessionMeta(event));
+  }
+
+  async handleAssistantDoneCommand(event, args, typeFilter: AssistantRecordType | null) {
+    const scopeRef = toScopeRef(event);
+    const token = String(args[0] ?? '').trim();
+    const record = this.assistantRecords.resolveForScope(scopeRef, token, typeFilter);
+    if (!record) {
+      return messageResponse([this.t('coordinator.assistant.notFound')], this.buildScopedSessionMeta(event));
+    }
+    const updated = this.assistantRecords.completeRecord(record.id);
+    return messageResponse([
+      this.t('coordinator.assistant.done', { title: updated.title }),
+    ], this.buildScopedSessionMeta(event));
+  }
+
+  async handleAssistantDeleteCommand(event, args, typeFilter: AssistantRecordType | null) {
+    const scopeRef = toScopeRef(event);
+    const token = String(args[0] ?? '').trim();
+    const record = this.assistantRecords.resolveForScope(scopeRef, token, typeFilter);
+    if (!record) {
+      return messageResponse([this.t('coordinator.assistant.notFound')], this.buildScopedSessionMeta(event));
+    }
+    const updated = this.assistantRecords.archiveRecord(record.id);
+    return messageResponse([
+      this.t('coordinator.assistant.deleted', { title: updated.title }),
+    ], this.buildScopedSessionMeta(event));
+  }
+
+  async handleAssistantCancelRecordCommand(event, args, typeFilter: AssistantRecordType | null) {
+    const scopeRef = toScopeRef(event);
+    const token = String(args[0] ?? '').trim();
+    const record = this.assistantRecords.resolveForScope(scopeRef, token, typeFilter);
+    if (!record) {
+      return messageResponse([this.t('coordinator.assistant.notFound')], this.buildScopedSessionMeta(event));
+    }
+    const updated = this.assistantRecords.cancelRecord(record.id);
+    return messageResponse([
+      this.t('coordinator.assistant.cancelled', { title: updated.title }),
+    ], this.buildScopedSessionMeta(event));
+  }
+
+  async handleAssistantConfirmCommand(event, typeFilter: AssistantRecordType | null) {
+    const scopeRef = toScopeRef(event);
+    if (!typeFilter) {
+      const updateDraft = this.getPendingAssistantUpdateDraft(scopeRef);
+      if (updateDraft) {
+        const updated = this.applyAssistantRecordUpdateDraft(updateDraft);
+        this.clearPendingAssistantUpdateDraft(scopeRef);
+        if (!updated) {
+          return messageResponse([this.t('coordinator.assistant.notFound')], this.buildScopedSessionMeta(event));
+        }
+        return messageResponse(this.renderAssistantUpdateAppliedLines(updateDraft, updated), this.buildScopedSessionMeta(event));
+      }
+    }
+    const record = this.assistantRecords.getLatestPendingForScope(scopeRef, typeFilter);
+    if (!record) {
+      return messageResponse([this.t('coordinator.assistant.noPending')], this.buildScopedSessionMeta(event));
+    }
+    if (record.type === 'reminder' && !record.remindAt && !record.recurrence) {
+      return messageResponse([
+        this.t('coordinator.assistant.reminderNeedsTime'),
+        this.t('coordinator.assistant.editHint', { command: assistantCommandNameForType(typeFilter) }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const updated = this.assistantRecords.confirmRecord(record.id);
+    return messageResponse(this.renderAssistantSavedLines(updated, assistantCommandNameForType(typeFilter)), this.buildScopedSessionMeta(event));
+  }
+
+  async handleAssistantCancelPendingCommand(event, typeFilter: AssistantRecordType | null) {
+    const scopeRef = toScopeRef(event);
+    if (!typeFilter) {
+      const updateDraft = this.getPendingAssistantUpdateDraft(scopeRef);
+      if (updateDraft) {
+        this.clearPendingAssistantUpdateDraft(scopeRef);
+        return messageResponse([
+          this.t('coordinator.assistant.updateDraftCancelled'),
+        ], this.buildScopedSessionMeta(event));
+      }
+    }
+    const record = this.assistantRecords.getLatestPendingForScope(scopeRef, typeFilter);
+    if (!record) {
+      return messageResponse([this.t('coordinator.assistant.noPending')], this.buildScopedSessionMeta(event));
+    }
+    const updated = this.assistantRecords.cancelRecord(record.id);
+    return messageResponse([
+      this.t('coordinator.assistant.cancelled', { title: updated.title }),
+    ], this.buildScopedSessionMeta(event));
+  }
+
+  async handleAssistantEditPendingCommand(event, args, forcedType: AssistantRecordType | null) {
+    const input = args.join(' ').trim();
+    if (!input) {
+      return messageResponse([
+        this.t('coordinator.assistant.editNeedsText'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const scopeRef = toScopeRef(event);
+    if (!forcedType) {
+      const updateDraft = this.getPendingAssistantUpdateDraft(scopeRef);
+      if (updateDraft) {
+        const instructions = [...updateDraft.instructions, input];
+        const baseRecord = this.assistantRecords.getById(updateDraft.targetRecordId) ?? updateDraft.matchedRecord;
+        const updatedRecord = await this.previewAssistantRecordAction(event, scopeRef, baseRecord, instructions, updateDraft.action);
+        const updatedDraft: PendingAssistantRecordUpdateDraft = {
+          ...updateDraft,
+          rawInput: instructions.join('\n'),
+          instructions,
+          matchedRecord: cloneAssistantRecord(baseRecord),
+          updatedRecord: updatedRecord.record,
+          normalizedBy: updatedRecord.normalizedBy,
+          changeSummary: updatedRecord.changeSummary,
+        };
+        this.setPendingAssistantUpdateDraft(scopeRef, updatedDraft);
+        return messageResponse(this.renderAssistantUpdateDraftLines(updatedDraft), this.buildScopedSessionMeta(event));
+      }
+    }
+    const record = this.assistantRecords.getLatestPendingForScope(scopeRef, forcedType ?? null);
+    if (!record) {
+      return messageResponse([this.t('coordinator.assistant.noPending')], this.buildScopedSessionMeta(event));
+    }
+    const updated = this.assistantRecords.updatePendingFromInstruction(record, input, forcedType);
+    return messageResponse(this.renderAssistantPendingLines(updated, assistantCommandNameForType(forcedType)), this.buildScopedSessionMeta(event));
+  }
+
+  async buildAssistantRecordUpdateDraft(event, scopeRef: PlatformScopeRef, rawInput: string): Promise<PendingAssistantRecordUpdateDraft | null> {
+    const action = inferAssistantRecordNaturalAction(rawInput);
+    if (!action) {
+      return null;
+    }
+    const match = findBestAssistantRecordMatch(this.assistantRecords.listForScope(scopeRef, null), rawInput);
+    if (!match) {
+      return null;
+    }
+    const resolvedAction = action === 'complete' && shouldTreatAssistantCompletionAsPartialUpdate(match.record, rawInput)
+      ? 'update'
+      : action;
+    const instructions = [rawInput];
+    const updatedRecord = await this.previewAssistantRecordAction(event, scopeRef, match.record, instructions, resolvedAction);
+    return {
+      createdAt: this.now(),
+      rawInput,
+      instructions,
+      targetRecordId: match.record.id,
+      matchedRecord: cloneAssistantRecord(match.record),
+      action: resolvedAction,
+      updatedRecord: updatedRecord.record,
+      matchedScore: match.score,
+      normalizedBy: updatedRecord.normalizedBy,
+      changeSummary: updatedRecord.changeSummary,
+    };
+  }
+
+  async previewAssistantRecordAction(
+    event,
+    scopeRef: PlatformScopeRef,
+    record: AssistantRecord,
+    instructions: string[],
+    action: AssistantRecordUpdateAction,
+  ): Promise<{ record: AssistantRecord; normalizedBy: 'codex' | 'agents-sdk' | 'local'; changeSummary: string | null }> {
+    const rawInput = instructions.join('\n');
+    if (action === 'update') {
+      const codexRecord = await this.previewAssistantRecordUpdateWithCodex(event, scopeRef, record, instructions).catch(() => null);
+      if (codexRecord) {
+        return codexRecord;
+      }
+      const agentsRecord = await normalizeAssistantRecordUpdateWithOpenAIAgents(record, instructions, this.currentI18n.locale, this.now()).catch(() => null);
+      if (agentsRecord) {
+        return agentsRecord;
+      }
+      return {
+        record: this.assistantRecords.previewUpdate(record, rawInput, null),
+        normalizedBy: 'local',
+        changeSummary: null,
+      };
+    }
+    const now = this.now();
+    const parsedJson = {
+      ...(record.parsedJson ?? {}),
+      lastNaturalAction: {
+        action,
+        instruction: rawInput,
+        appliedAt: now,
+        parser: 'local-rule-natural-action',
+      },
+    };
+    const next: AssistantRecord = {
+      ...record,
+      originalText: appendAssistantActionOriginalText(record.originalText, rawInput),
+      parsedJson,
+      parseStatus: 'edited',
+      attachments: record.attachments.map((attachment) => ({ ...attachment })),
+      updatedAt: now,
+    };
+    if (action === 'complete') {
+      return {
+        record: {
+          ...next,
+          status: 'done',
+          completedAt: now,
+        },
+        normalizedBy: 'local',
+        changeSummary: null,
+      };
+    }
+    if (action === 'cancel') {
+      return {
+        record: {
+          ...next,
+          status: 'cancelled',
+          cancelledAt: now,
+        },
+        normalizedBy: 'local',
+        changeSummary: null,
+      };
+    }
+    return {
+      record: {
+        ...next,
+        status: 'archived',
+        archivedAt: now,
+      },
+      normalizedBy: 'local',
+      changeSummary: null,
+    };
+  }
+
+  async previewAssistantRecordUpdateWithCodex(
+    event,
+    scopeRef: PlatformScopeRef,
+    record: AssistantRecord,
+    instructions: string[],
+  ): Promise<{ record: AssistantRecord; normalizedBy: 'codex'; changeSummary: string | null } | null> {
+    const boundSession = this.bridgeSessions.resolveScopeSession(scopeRef);
+    const providerProfile = boundSession
+      ? this.requireProviderProfile(boundSession.providerProfileId)
+      : this.resolveScopeProviderProfile(scopeRef);
+    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+    if (!providerPlugin || typeof providerPlugin.startThread !== 'function' || typeof providerPlugin.startTurn !== 'function') {
+      return null;
+    }
+    const inheritedSettings = boundSession
+      ? this.bridgeSessions.getSessionSettings(boundSession.id)
+      : null;
+    const locale = inheritedSettings?.locale ?? this.resolveScopeLocale(scopeRef, event);
+    const cwd = normalizeCwd(boundSession?.cwd) ?? this.resolveEventCwd(event) ?? null;
+    const thread = await providerPlugin.startThread({
+      providerProfile,
+      cwd,
+      title: 'Assistant Record Rewriter',
+      metadata: {
+        sourcePlatform: event.platform,
+        source: 'assistant-record-rewriter',
+      },
+    });
+    const parserSession = {
+      id: crypto.randomUUID(),
+      providerProfileId: providerProfile.id,
+      codexThreadId: thread.threadId,
+      cwd: thread.cwd ?? cwd,
+      title: thread.title ?? 'Assistant Record Rewriter',
+      createdAt: this.now(),
+      updatedAt: this.now(),
+    };
+    const prompt = buildAssistantRecordRewritePrompt(record, instructions, locale, this.now());
+    const result = await providerPlugin.startTurn({
+      providerProfile,
+      bridgeSession: parserSession,
+      sessionSettings: {
+        bridgeSessionId: parserSession.id,
+        model: inheritedSettings?.model ?? null,
+        reasoningEffort: inheritedSettings?.reasoningEffort ?? null,
+        serviceTier: inheritedSettings?.serviceTier ?? null,
+        collaborationMode: null,
+        personality: null,
+        accessPreset: 'read-only',
+        approvalPolicy: 'never',
+        sandboxMode: 'read-only',
+        locale,
+        metadata: {},
+        updatedAt: this.now(),
+      },
+      event: {
+        ...event,
+        text: prompt,
+        cwd: parserSession.cwd ?? null,
+        locale,
+        attachments: [],
+      },
+      inputText: prompt,
+    });
+    const candidate = parseAssistantRecordRewriteCandidate(result.outputText, record);
+    if (!candidate) {
+      return null;
+    }
+    const rewritten = applyAssistantRecordRewriteCandidate(record, candidate, instructions, 'codex', this.now());
+    if (!rewritten) {
+      return null;
+    }
+    return {
+      record: rewritten,
+      normalizedBy: 'codex',
+      changeSummary: candidate.changeSummary || null,
+    };
+  }
+
+  applyAssistantRecordUpdateDraft(draft: PendingAssistantRecordUpdateDraft): AssistantRecord | null {
+    const existing = this.assistantRecords.getById(draft.targetRecordId);
+    if (!existing) {
+      return null;
+    }
+    const record = draft.updatedRecord;
+    return this.assistantRecords.updateRecord(existing.id, {
+      type: record.type,
+      status: record.status,
+      title: record.title,
+      content: record.content,
+      originalText: record.originalText,
+      priority: record.priority,
+      project: record.project,
+      tags: record.tags,
+      dueAt: record.dueAt,
+      remindAt: record.remindAt,
+      recurrence: record.recurrence,
+      attachments: record.attachments,
+      parseStatus: record.parseStatus,
+      confidence: record.confidence,
+      parsedJson: record.parsedJson,
+      lastRemindedAt: record.lastRemindedAt,
+      completedAt: record.completedAt,
+      cancelledAt: record.cancelledAt,
+      archivedAt: record.archivedAt,
+    });
+  }
+
+  renderAssistantList(event, typeFilter: AssistantRecordType | null, query = '') {
+    const scopeRef = toScopeRef(event);
+    const records = query
+      ? this.assistantRecords.searchForScope(scopeRef, query, typeFilter)
+      : this.assistantRecords.listForScope(scopeRef, typeFilter);
+    const title = query
+      ? this.t('coordinator.assistant.searchTitle', { query })
+      : this.t('coordinator.assistant.listTitle', { type: this.t(`coordinator.assistant.type.${typeFilter ?? 'all'}`) });
+    if (records.length === 0) {
+      return messageResponse([
+        title,
+        this.t('coordinator.assistant.empty'),
+        this.t('coordinator.assistant.addHint'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const lines = [
+      title,
+      ...records.slice(0, 10).flatMap((record, index) => this.renderAssistantListItem(record, index + 1)),
+      this.t('coordinator.assistant.listActions'),
+    ];
+    return messageResponse(lines, this.buildScopedSessionMeta(event));
+  }
+
+  renderAssistantListItem(record: AssistantRecord, index: number): string[] {
+    const head = `${index}. [${this.t(`coordinator.assistant.type.${record.type}`)}] ${record.title}`;
+    const lines = [
+      head,
+      this.t('coordinator.assistant.listMeta', {
+        status: this.t(`coordinator.assistant.status.${record.status}`),
+        priority: this.t(`coordinator.assistant.priority.${record.priority}`),
+      }),
+    ];
+    const timeLine = renderAssistantRecordTimeLine(record, this.currentI18n);
+    if (timeLine) {
+      lines.push(timeLine);
+    }
+    if (record.attachments.length > 0) {
+      lines.push(this.t('coordinator.assistant.attachmentCount', { count: record.attachments.length }));
+    }
+    if (record.tags.length > 0) {
+      lines.push(this.t('coordinator.assistant.tagsLine', { value: record.tags.join(', ') }));
+    }
+    return lines;
+  }
+
+  renderAssistantPendingLines(record: AssistantRecord, commandName: string): string[] {
+    const lines = [
+      this.t('coordinator.assistant.pendingTitle'),
+      this.t('coordinator.assistant.detectedType', { type: this.t(`coordinator.assistant.type.${record.type}`) }),
+      this.t('coordinator.assistant.recordTitle', { title: record.title }),
+    ];
+    this.pushAssistantContentLines(lines, record);
+    const timeLine = renderAssistantRecordTimeLine(record, this.currentI18n);
+    if (timeLine) {
+      lines.push(timeLine);
+    }
+    if (record.attachments.length > 0) {
+      lines.push(this.t('coordinator.assistant.attachmentCount', { count: record.attachments.length }));
+    }
+    lines.push(this.t('coordinator.assistant.confirmHint', { command: commandName }));
+    lines.push(this.t('coordinator.assistant.editHint', { command: commandName }));
+    lines.push(this.t('coordinator.assistant.cancelHint', { command: commandName }));
+    return lines;
+  }
+
+  renderAssistantSavedLines(record: AssistantRecord, commandName: string): string[] {
+    const lines = [
+      this.t('coordinator.assistant.saved'),
+      this.t('coordinator.assistant.detectedType', { type: this.t(`coordinator.assistant.type.${record.type}`) }),
+      this.t('coordinator.assistant.recordTitle', { title: record.title }),
+    ];
+    this.pushAssistantContentLines(lines, record);
+    const timeLine = renderAssistantRecordTimeLine(record, this.currentI18n);
+    if (timeLine) {
+      lines.push(timeLine);
+    }
+    if (record.attachments.length > 0) {
+      lines.push(this.t('coordinator.assistant.attachmentCount', { count: record.attachments.length }));
+    }
+    lines.push(this.t('coordinator.assistant.showHint', { command: commandName }));
+    return lines;
+  }
+
+  renderAssistantUpdateDraftLines(draft: PendingAssistantRecordUpdateDraft): string[] {
+    const record = draft.updatedRecord;
+    const lines = [
+      this.t('coordinator.assistant.updateDraftTitle'),
+      this.t('coordinator.assistant.updateDraftTarget', { title: draft.matchedRecord.title }),
+      this.t('coordinator.assistant.updateDraftAction', {
+        action: this.t(`coordinator.assistant.updateAction.${draft.action}`),
+      }),
+      this.t('coordinator.assistant.detectedType', { type: this.t(`coordinator.assistant.type.${record.type}`) }),
+      this.t('coordinator.assistant.statusLine', { value: this.t(`coordinator.assistant.status.${record.status}`) }),
+    ];
+    if (draft.action === 'update') {
+      if (draft.changeSummary) {
+        lines.push(this.t('coordinator.assistant.changeSummary', { value: draft.changeSummary }));
+      }
+      this.pushAssistantContentLines(lines, record);
+      const timeLine = renderAssistantRecordTimeLine(record, this.currentI18n);
+      if (timeLine) {
+        lines.push(timeLine);
+      }
+    }
+    lines.push(this.t('coordinator.assistant.confirmHint', { command: '/as' }));
+    lines.push(this.t('coordinator.assistant.editHint', { command: '/as' }));
+    lines.push(this.t('coordinator.assistant.cancelHint', { command: '/as' }));
+    return lines;
+  }
+
+  renderAssistantUpdateAppliedLines(draft: PendingAssistantRecordUpdateDraft, record: AssistantRecord): string[] {
+    const lines = [
+      this.t('coordinator.assistant.updateApplied'),
+      this.t('coordinator.assistant.updateDraftTarget', { title: draft.matchedRecord.title }),
+      this.t('coordinator.assistant.updateDraftAction', {
+        action: this.t(`coordinator.assistant.updateAction.${draft.action}`),
+      }),
+      this.t('coordinator.assistant.statusLine', { value: this.t(`coordinator.assistant.status.${record.status}`) }),
+    ];
+    if (draft.action === 'update') {
+      if (draft.changeSummary) {
+        lines.push(this.t('coordinator.assistant.changeSummary', { value: draft.changeSummary }));
+      }
+      this.pushAssistantContentLines(lines, record);
+      const timeLine = renderAssistantRecordTimeLine(record, this.currentI18n);
+      if (timeLine) {
+        lines.push(timeLine);
+      }
+    }
+    lines.push(this.t('coordinator.assistant.showHint', { command: '/as' }));
+    return lines;
+  }
+
+  renderAssistantDetailLines(record: AssistantRecord): string[] {
+    const lines = [
+      this.t('coordinator.assistant.detailTitle', { title: record.title }),
+      this.t('coordinator.assistant.detectedType', { type: this.t(`coordinator.assistant.type.${record.type}`) }),
+      this.t('coordinator.assistant.statusLine', { value: this.t(`coordinator.assistant.status.${record.status}`) }),
+      this.t('coordinator.assistant.priorityLine', { value: this.t(`coordinator.assistant.priority.${record.priority}`) }),
+    ];
+    if (record.content) {
+      this.pushAssistantContentLines(lines, record);
+    }
+    const timeLine = renderAssistantRecordTimeLine(record, this.currentI18n);
+    if (timeLine) {
+      lines.push(timeLine);
+    }
+    if (record.tags.length > 0) {
+      lines.push(this.t('coordinator.assistant.tagsLine', { value: record.tags.join(', ') }));
+    }
+    if (record.attachments.length > 0) {
+      lines.push(this.t('coordinator.assistant.attachmentsTitle', { count: record.attachments.length }));
+      for (const attachment of record.attachments) {
+        lines.push(`${attachment.filename}`);
+        lines.push(attachment.storagePath);
+      }
+    }
+    lines.push(this.t('coordinator.assistant.detailActions'));
+    return lines;
+  }
+
+  pushAssistantContentLines(lines: string[], record: AssistantRecord): void {
+    const content = String(record?.content ?? '').trim();
+    if (!content) {
+      return;
+    }
+    lines.push(this.t('coordinator.assistant.contentLabel'));
+    lines.push(content);
+  }
+
+  resolveActiveUploadContext(scopeRef: PlatformScopeRef): { session: any | null; state: UploadBatchState | null } {
+    const session = this.bridgeSessions.resolveScopeSession(scopeRef);
+    if (!session) {
+      return { session: null, state: null };
+    }
+    const state = this.getUploadsStateForSession(session.id);
+    if (!state?.active) {
+      return { session, state: null };
+    }
+    return { session, state };
   }
 
   async handleUploadsStatusCommand(event) {
@@ -3264,16 +3925,16 @@ export class BridgeCoordinator {
   }
 
   async normalizeAgentDraft(event, scopeRef: PlatformScopeRef, rawInput: string): Promise<PendingAgentDraft> {
-    const openAiDraft = await normalizeAgentDraftWithOpenAIAgents(rawInput, this.currentI18n.locale).catch(() => null);
-    if (openAiDraft) {
-      const draft = this.buildPendingAgentDraft(event, scopeRef, openAiDraft, rawInput, 'agents-sdk');
+    const codexDraft = await this.normalizeAgentDraftWithCodex(event, scopeRef, rawInput).catch(() => null);
+    if (codexDraft) {
+      const draft = this.buildPendingAgentDraft(event, scopeRef, codexDraft, rawInput, 'codex');
       if (draft) {
         return draft;
       }
     }
-    const codexDraft = await this.normalizeAgentDraftWithCodex(event, scopeRef, rawInput).catch(() => null);
-    if (codexDraft) {
-      const draft = this.buildPendingAgentDraft(event, scopeRef, codexDraft, rawInput, 'codex');
+    const openAiDraft = await normalizeAgentDraftWithOpenAIAgents(rawInput, this.currentI18n.locale).catch(() => null);
+    if (openAiDraft) {
+      const draft = this.buildPendingAgentDraft(event, scopeRef, openAiDraft, rawInput, 'agents-sdk');
       if (draft) {
         return draft;
       }
@@ -6737,13 +7398,13 @@ export class BridgeCoordinator {
         nextAction: 'retry',
       };
     }
-    const semantic = await verifyAgentResultWithOpenAIAgents(job, result, this.currentI18n.locale).catch(() => null);
-    if (semantic) {
-      return semantic;
-    }
     const codexVerification = await this.verifyAgentResultWithCodex(job, result, session).catch(() => null);
     if (codexVerification) {
       return codexVerification;
+    }
+    const semantic = await verifyAgentResultWithOpenAIAgents(job, result, this.currentI18n.locale).catch(() => null);
+    if (semantic) {
+      return semantic;
     }
     return {
       pass: true,
@@ -7324,6 +7985,35 @@ async function verifyAgentResultWithOpenAIAgents(job: AgentJob, result, locale: 
   return parseAgentVerificationResult(output);
 }
 
+async function normalizeAssistantRecordUpdateWithOpenAIAgents(
+  record: AssistantRecord,
+  instructions: string[],
+  locale: string | null,
+  now: number,
+): Promise<{ record: AssistantRecord; normalizedBy: 'agents-sdk'; changeSummary: string | null } | null> {
+  if (!resolveOpenAIAgentRuntimeConfig().apiKey) {
+    return null;
+  }
+  const output = await runOpenAIAgentJson({
+    name: 'CodexBridge Assistant Record Rewriter',
+    instructions: 'Rewrite assistant records as strict JSON only. Do not use markdown.',
+    input: buildAssistantRecordRewritePrompt(record, instructions, locale, now),
+  });
+  const candidate = parseAssistantRecordRewriteCandidate(output, record);
+  if (!candidate) {
+    return null;
+  }
+  const rewritten = applyAssistantRecordRewriteCandidate(record, candidate, instructions, 'agents-sdk', now);
+  if (!rewritten) {
+    return null;
+  }
+  return {
+    record: rewritten,
+    normalizedBy: 'agents-sdk',
+    changeSummary: candidate.changeSummary || null,
+  };
+}
+
 async function runOpenAIAgentJson({ name, instructions, input }: {
   name: string;
   instructions: string;
@@ -7531,6 +8221,268 @@ function parseAgentVerificationResult(value: unknown): AgentVerificationResult |
     issues,
     nextAction: Boolean(parsed.pass) ? 'complete' : nextAction,
   };
+}
+
+function buildAssistantRecordRewritePrompt(
+  record: AssistantRecord,
+  instructions: string[],
+  locale: string | null,
+  now: number,
+): string {
+  const language = normalizeLocale(locale) === 'zh-CN' ? '中文' : 'English';
+  const sourceRecord = {
+    id: record.id,
+    type: record.type,
+    title: record.title,
+    content: record.content,
+    status: record.status,
+    priority: record.priority,
+    project: record.project,
+    tags: record.tags,
+    dueAt: record.dueAt,
+    remindAt: record.remindAt,
+    recurrence: record.recurrence,
+    timezone: record.timezone,
+  };
+  return [
+    `你是 CodexBridge 助理记录更新规范化器。请用${language}理解用户的修改意图，把“原记录”和“修改提示”合并成一条完整记录。`,
+    '只返回严格 JSON，不要 Markdown，不要解释。',
+    '',
+    '关键规则：',
+    '- content 必须是完整合并后的记录内容，不能只返回增量。',
+    '- 保留原记录里没有被用户否定的事实。',
+    '- 如果用户说“不是 A，是 B”，必须把 A 修正为 B。',
+    '- 删除“帮我记一下、这个东西要记一下、帮我整理、之后还得记一下”等对 AI 的元指令，不要写进 content。',
+    '- 如果用户给了安排、步骤、列表，请整理成清晰的多行内容。',
+    '- 不确定时保守更新，不要编造新事实。',
+    '',
+    'Schema:',
+    '{"action":"update","type":"log|todo|reminder|note|uncategorized","title":"短标题","content":"完整合并后的内容","status":"pending|active|done|cancelled|archived","priority":"low|normal|high","dueAt":null,"remindAt":null,"recurrence":null,"project":null,"tags":[],"changeSummary":"这次具体改了什么","confidence":0.0}',
+    '',
+    `当前时间：${new Date(now).toISOString()}`,
+    '',
+    '原记录 JSON：',
+    JSON.stringify(sourceRecord, null, 2),
+    '',
+    '修改提示：',
+    ...instructions.map((instruction, index) => `${index + 1}. ${instruction}`),
+  ].join('\n');
+}
+
+function parseAssistantRecordRewriteCandidate(value: unknown, fallbackRecord: AssistantRecord): AssistantRecordRewriteCandidate | null {
+  const parsed = parseJsonObject(value);
+  if (!parsed) {
+    return null;
+  }
+  const content = normalizeMultilineText(parsed.content ?? parsed.updatedContent ?? parsed.updated_content);
+  if (!content || isAssistantRecordRewriteSchemaPlaceholder(content)) {
+    return null;
+  }
+  const type = normalizeAssistantRecordType(parsed.type) ?? fallbackRecord.type;
+  const title = truncateText(compactWhitespace(parsed.title ?? '') || compactWhitespace(content), 80);
+  return {
+    action: normalizeAssistantRecordUpdateAction(parsed.action) ?? 'update',
+    type,
+    title: title || fallbackRecord.title,
+    content,
+    status: normalizeAssistantRecordStatus(parsed.status) ?? fallbackRecord.status,
+    priority: normalizeAssistantRecordPriority(parsed.priority) ?? fallbackRecord.priority,
+    dueAt: readAssistantTimestampField(parsed, ['dueAt', 'due_at'], fallbackRecord.dueAt),
+    remindAt: readAssistantTimestampField(parsed, ['remindAt', 'remind_at'], fallbackRecord.remindAt),
+    recurrence: readAssistantNullableStringField(parsed, ['recurrence'], fallbackRecord.recurrence),
+    project: readAssistantNullableStringField(parsed, ['project'], fallbackRecord.project),
+    tags: readAssistantStringArrayField(parsed, ['tags'], fallbackRecord.tags),
+    changeSummary: truncateText(compactWhitespace(parsed.changeSummary ?? parsed.change_summary ?? ''), 120),
+    confidence: clampAssistantConfidence(Number(parsed.confidence ?? fallbackRecord.confidence ?? 0.8)),
+  };
+}
+
+function applyAssistantRecordRewriteCandidate(
+  record: AssistantRecord,
+  candidate: AssistantRecordRewriteCandidate,
+  instructions: string[],
+  source: 'codex' | 'agents-sdk',
+  now: number,
+): AssistantRecord | null {
+  if (!candidate.content.trim()) {
+    return null;
+  }
+  const inputText = instructions.join('\n');
+  const parsedJson = {
+    ...(record.parsedJson ?? {}),
+    lastNaturalAction: {
+      action: candidate.action,
+      instruction: inputText,
+      appliedAt: now,
+      parser: `${source}-assistant-record-rewrite`,
+      changeSummary: candidate.changeSummary || null,
+    },
+  };
+  const next: AssistantRecord = {
+    ...record,
+    type: candidate.type,
+    title: candidate.title || record.title,
+    content: candidate.content,
+    status: candidate.status,
+    priority: candidate.priority,
+    project: candidate.project,
+    tags: candidate.tags,
+    dueAt: candidate.dueAt,
+    remindAt: candidate.remindAt,
+    recurrence: candidate.recurrence,
+    originalText: appendAssistantActionOriginalText(record.originalText, inputText),
+    confidence: Math.max(record.confidence, candidate.confidence),
+    parsedJson,
+    parseStatus: 'edited',
+    attachments: record.attachments.map((attachment) => ({ ...attachment })),
+    updatedAt: now,
+  };
+  return {
+    ...next,
+    completedAt: candidate.status === 'done' ? (record.completedAt ?? now) : record.completedAt,
+    cancelledAt: candidate.status === 'cancelled' ? (record.cancelledAt ?? now) : record.cancelledAt,
+    archivedAt: candidate.status === 'archived' ? (record.archivedAt ?? now) : record.archivedAt,
+  };
+}
+
+function cloneAssistantRecord(record: AssistantRecord): AssistantRecord {
+  return {
+    ...record,
+    tags: [...record.tags],
+    attachments: record.attachments.map((attachment) => ({ ...attachment })),
+    parsedJson: record.parsedJson ? { ...record.parsedJson } : null,
+  };
+}
+
+function normalizeMultilineText(value: unknown): string {
+  return String(value ?? '')
+    .replace(/\r\n?/gu, '\n')
+    .split('\n')
+    .map((line) => line.trim())
+    .join('\n')
+    .replace(/\n{3,}/gu, '\n\n')
+    .trim();
+}
+
+function isAssistantRecordRewriteSchemaPlaceholder(content: string): boolean {
+  const normalized = compactWhitespace(content).toLowerCase();
+  return normalized === '完整合并后的内容'
+    || normalized === 'complete merged content';
+}
+
+function normalizeAssistantRecordUpdateAction(value: unknown): AssistantRecordUpdateAction | null {
+  const normalized = compactWhitespace(value).toLowerCase();
+  if (normalized === 'update' || normalized === 'complete' || normalized === 'cancel' || normalized === 'archive') {
+    return normalized;
+  }
+  return null;
+}
+
+function normalizeAssistantRecordType(value: unknown): AssistantRecordType | null {
+  const normalized = compactWhitespace(value).toLowerCase();
+  if (
+    normalized === 'log'
+    || normalized === 'todo'
+    || normalized === 'reminder'
+    || normalized === 'note'
+    || normalized === 'uncategorized'
+  ) {
+    return normalized;
+  }
+  return null;
+}
+
+function normalizeAssistantRecordStatus(value: unknown): AssistantRecordStatus | null {
+  const normalized = compactWhitespace(value).toLowerCase();
+  if (
+    normalized === 'pending'
+    || normalized === 'active'
+    || normalized === 'done'
+    || normalized === 'cancelled'
+    || normalized === 'archived'
+  ) {
+    return normalized;
+  }
+  return null;
+}
+
+function normalizeAssistantRecordPriority(value: unknown): AssistantRecordPriority | null {
+  const normalized = compactWhitespace(value).toLowerCase();
+  if (normalized === 'low' || normalized === 'normal' || normalized === 'high') {
+    return normalized;
+  }
+  return null;
+}
+
+function readAssistantTimestampField(
+  parsed: Record<string, any>,
+  keys: string[],
+  fallback: number | null,
+): number | null {
+  for (const key of keys) {
+    if (!Object.prototype.hasOwnProperty.call(parsed, key)) {
+      continue;
+    }
+    return normalizeAssistantTimestamp(parsed[key]);
+  }
+  return fallback;
+}
+
+function normalizeAssistantTimestamp(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') {
+    return null;
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  const parsed = Date.parse(String(value));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function readAssistantNullableStringField(
+  parsed: Record<string, any>,
+  keys: string[],
+  fallback: string | null,
+): string | null {
+  for (const key of keys) {
+    if (!Object.prototype.hasOwnProperty.call(parsed, key)) {
+      continue;
+    }
+    const normalized = String(parsed[key] ?? '').trim();
+    return normalized || null;
+  }
+  return fallback;
+}
+
+function readAssistantStringArrayField(
+  parsed: Record<string, any>,
+  keys: string[],
+  fallback: string[],
+): string[] {
+  for (const key of keys) {
+    if (!Object.prototype.hasOwnProperty.call(parsed, key)) {
+      continue;
+    }
+    if (!Array.isArray(parsed[key])) {
+      return [];
+    }
+    const values = new Set<string>();
+    for (const value of parsed[key]) {
+      const normalized = compactWhitespace(value);
+      if (normalized) {
+        values.add(normalized.replace(/^#/u, ''));
+      }
+    }
+    return [...values];
+  }
+  return [...fallback];
+}
+
+function clampAssistantConfidence(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0.8;
+  }
+  return Math.max(0, Math.min(1, value));
 }
 
 function isAgentDraftSchemaPlaceholder(title: string, goal: string, expectedOutput: string): boolean {
@@ -8153,6 +9105,10 @@ function extractAutomationAddBody(text: string): string {
 }
 
 function buildAutomationDraftKey(scopeRef: PlatformScopeRef): string {
+  return formatPlatformScopeKey(scopeRef.platform, scopeRef.externalScopeId);
+}
+
+function buildAssistantUpdateDraftKey(scopeRef: PlatformScopeRef): string {
   return formatPlatformScopeKey(scopeRef.platform, scopeRef.externalScopeId);
 }
 
@@ -8846,6 +9802,248 @@ function normalizeCommandName(value) {
   return COMMAND_CANONICAL_NAME_MAP.get(normalized) ?? normalized;
 }
 
+function assistantCommandNameForType(type: AssistantRecordType | null): string {
+  switch (type) {
+    case 'log':
+      return '/log';
+    case 'todo':
+      return '/todo';
+    case 'reminder':
+      return '/remind';
+    case 'note':
+      return '/note';
+    default:
+      return '/as';
+  }
+}
+
+function renderAssistantRecordTimeLine(record: AssistantRecord, i18n: Translator): string {
+  if (record.type === 'reminder' && record.remindAt) {
+    return i18n.t('coordinator.assistant.remindAtLine', {
+      value: formatDateTimeForAssistant(record.remindAt),
+    });
+  }
+  if (record.type === 'todo' && record.dueAt) {
+    return i18n.t('coordinator.assistant.dueAtLine', {
+      value: formatDateTimeForAssistant(record.dueAt),
+    });
+  }
+  if (record.recurrence) {
+    return i18n.t('coordinator.assistant.recurrenceLine', {
+      value: record.recurrence,
+    });
+  }
+  return '';
+}
+
+function formatDateTimeForAssistant(timestamp: number): string {
+  if (!Number.isFinite(timestamp)) {
+    return '';
+  }
+  const date = new Date(timestamp);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  const hour = String(date.getHours()).padStart(2, '0');
+  const minute = String(date.getMinutes()).padStart(2, '0');
+  return `${year}-${month}-${day} ${hour}:${minute}`;
+}
+
+function inferAssistantRecordNaturalAction(input: string): AssistantRecordUpdateAction | null {
+  const value = compactWhitespace(input).toLowerCase();
+  if (!value) {
+    return null;
+  }
+  if (/(?:删除|删掉|移除|归档|清掉|清除)/u.test(value)) {
+    return 'archive';
+  }
+  if (/(?:取消|不用了|不需要了|作废|撤销|先不做|不用做|不要了)/u.test(value)) {
+    return 'cancel';
+  }
+  if (
+    /(?:全部|全都|所有|这件事|这个事|这条|该事项|任务|提醒).{0,16}(?:完成|做完|搞定|办完|处理完|结束)/u.test(value)
+    || /(?:已经|已)(?:完成|做完|搞定|办完|处理完|结束)/u.test(value)
+    || /(?:已经|已).{0,10}(?:打了|打过|回复了|联系了|提交了|整理完|修好了)/u.test(value)
+  ) {
+    return 'complete';
+  }
+  if (
+    /(?:还差|剩下|补充|更新|进展|状态|改成|改为|改到|改在|变成|换成|提前|推迟|延期|延后|已经|已拿|拿回|拿到|没有|还欠|少了|多了|加上|追加|改一下|变更)/u.test(value)
+  ) {
+    return 'update';
+  }
+  return null;
+}
+
+function findBestAssistantRecordMatch(records: AssistantRecord[], input: string): { record: AssistantRecord; score: number } | null {
+  const scored = records
+    .filter((record) => record.status !== 'archived')
+    .map((record) => ({ record, score: scoreAssistantRecordMatch(record, input) }))
+    .filter((entry) => entry.score >= 30)
+    .sort((left, right) => right.score - left.score || right.record.updatedAt - left.record.updatedAt);
+  return scored[0] ?? null;
+}
+
+function scoreAssistantRecordMatch(record: AssistantRecord, input: string): number {
+  const haystack = normalizeAssistantMatchText([
+    record.title,
+    record.content,
+    record.originalText,
+    record.project ?? '',
+    ...record.tags,
+  ].join('\n'));
+  const title = normalizeAssistantMatchText(record.title);
+  const normalizedInput = normalizeAssistantMatchText(input);
+  if (!haystack || !normalizedInput) {
+    return 0;
+  }
+  let score = 0;
+  if (title && (normalizedInput.includes(title) || title.includes(normalizedInput))) {
+    score += 70;
+  }
+  if (haystack.includes(normalizedInput)) {
+    score += 50;
+  }
+  const tokens = extractAssistantMatchTokens(input);
+  const matchedTokens = new Set<string>();
+  for (const token of tokens) {
+    if (!haystack.includes(token)) {
+      continue;
+    }
+    matchedTokens.add(token);
+    score += token.length >= 4 ? 12 : 8;
+    if (title.includes(token)) {
+      score += 4;
+    }
+  }
+  if (matchedTokens.has('发票') && /发票/u.test(haystack)) {
+    score += 10;
+  }
+  if (record.status === 'done' || record.status === 'cancelled') {
+    score -= 15;
+  }
+  return score;
+}
+
+function normalizeAssistantMatchText(value: string): string {
+  return String(value ?? '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, '')
+    .trim();
+}
+
+function extractAssistantMatchTokens(input: string): string[] {
+  const tokens = new Set<string>();
+  for (const match of String(input ?? '').matchAll(/[\p{Script=Han}]+|[a-zA-Z0-9._-]+/gu)) {
+    const raw = String(match[0] ?? '').toLowerCase();
+    if (!raw || ASSISTANT_MATCH_STOPWORDS.has(raw)) {
+      continue;
+    }
+    if (/^[\p{Script=Han}]+$/u.test(raw)) {
+      if (raw.length <= 4) {
+        addAssistantMatchToken(tokens, raw);
+      }
+      const maxLength = Math.min(4, raw.length);
+      for (let size = 2; size <= maxLength; size += 1) {
+        for (let index = 0; index + size <= raw.length; index += 1) {
+          addAssistantMatchToken(tokens, raw.slice(index, index + size));
+        }
+      }
+      continue;
+    }
+    addAssistantMatchToken(tokens, raw);
+  }
+  return [...tokens];
+}
+
+function addAssistantMatchToken(tokens: Set<string>, token: string): void {
+  const normalized = normalizeAssistantMatchText(token);
+  if (normalized.length < 2 || ASSISTANT_MATCH_STOPWORDS.has(normalized)) {
+    return;
+  }
+  tokens.add(normalized);
+}
+
+const ASSISTANT_MATCH_STOPWORDS = new Set([
+  '今天',
+  '明天',
+  '昨天',
+  '已经',
+  '完成',
+  '做完',
+  '搞定',
+  '事情',
+  '这个',
+  '那个',
+  '这件',
+  '那件',
+  '记录',
+  '提醒',
+  '帮我',
+  '一下',
+  '处理',
+  '更新',
+  '状态',
+  '进展',
+  '还有',
+  '还差',
+  '剩下',
+  '取消',
+  '删除',
+  '拿回',
+  '拿到',
+  '需要',
+  '不用',
+  '任务',
+  '修改',
+  '改成',
+  '改到',
+]);
+
+function shouldTreatAssistantCompletionAsPartialUpdate(record: AssistantRecord, input: string): boolean {
+  const text = String(input ?? '');
+  if (/(?:全部|全都|所有|都)(?:已经)?(?:拿到|拿回|完成|处理|搞定|办完)/u.test(text)) {
+    return false;
+  }
+  if (/(?:还差|剩下|其中|部分|另外|其他|第[一二三四五六七八九十0-9]+|这张|那张|这个|那个)/u.test(text)) {
+    return true;
+  }
+  if (/发票/u.test(text) && /发票/u.test(record.content) && hasListLikeAssistantContent(record.content)) {
+    return true;
+  }
+  return false;
+}
+
+function hasListLikeAssistantContent(content: string): boolean {
+  const lines = String(content ?? '').split(/\r?\n/u);
+  const numbered = lines.filter((line) => /^\s*(?:\d+[\).、]|[-*])\s+/u.test(line)).length;
+  return numbered >= 2;
+}
+
+function appendAssistantActionOriginalText(originalText: string, input: string): string {
+  const normalizedInput = String(input ?? '').trim();
+  if (!normalizedInput) {
+    return String(originalText ?? '').trim();
+  }
+  const current = String(originalText ?? '').trim();
+  const line = `自然语言更新：${normalizedInput}`;
+  return current ? `${current}\n${line}` : line;
+}
+
+function extractEventTimezone(event: any): string | null {
+  const metadata = event?.metadata;
+  if (metadata && typeof metadata === 'object' && !Array.isArray(metadata)) {
+    const timezone = (metadata as Record<string, any>).timezone
+      ?? (metadata as Record<string, any>).timeZone
+      ?? ((metadata as Record<string, any>).weixin as Record<string, any> | undefined)?.timezone
+      ?? ((metadata as Record<string, any>).weixin as Record<string, any> | undefined)?.timeZone;
+    if (typeof timezone === 'string' && timezone.trim()) {
+      return timezone.trim();
+    }
+  }
+  return null;
+}
+
 function normalizeHelpTarget(value) {
   const normalized = normalizeCommandName(String(value ?? '').replace(/^\//u, ''));
   if (!normalized) {
@@ -9278,6 +10476,115 @@ function getCommandHelpSpecs(i18n: Translator) {
       i18n.t('coordinator.help.note.uploads'),
     ],
   }),
+  assistant: freezeCommandHelp({
+    name: 'as',
+    aliases: ['assistant'],
+    summary: i18n.t('coordinator.help.summary.assistant'),
+    usage: [
+      '/as <自然语言>',
+      '/as ok',
+      '/as edit <修改提示>',
+      '/as cancel',
+      '/as search <关键词>',
+      '/as show <序号|id>',
+      '/as del <序号|id>',
+      '/as -h',
+    ],
+    examples: [
+      '/as 今天修复了 /pg search 日记召回太宽的问题 #CodexBridge',
+      '/as 明天上午10点提醒我给王总回电话',
+      '/as ok',
+      '/as edit 把王总改成李总，时间改成明天上午11点',
+      '/as 给王总回电话这件事已经完成了',
+      '/as 修马桶发票已经拿回来了',
+      '/as search CodexBridge',
+      '/up 之后发送 /as 把这些资料记录为项目附件',
+    ],
+    notes: [
+      i18n.t('coordinator.help.note.assistant'),
+    ],
+  }),
+  log: freezeCommandHelp({
+    name: 'log',
+    aliases: [],
+    summary: i18n.t('coordinator.help.summary.log'),
+    usage: [
+      '/log <自然语言>',
+      '/log search <关键词>',
+      '/log show <序号|id>',
+      '/log del <序号|id>',
+      '/log -h',
+    ],
+    examples: [
+      '/log 今天测试微信桥接，发现插件搜索需要更高相关度',
+      '/log search 微信桥接',
+    ],
+    notes: [
+      i18n.t('coordinator.help.note.log'),
+    ],
+  }),
+  todo: freezeCommandHelp({
+    name: 'todo',
+    aliases: ['td'],
+    summary: i18n.t('coordinator.help.summary.todo'),
+    usage: [
+      '/todo <自然语言>',
+      '/todo done <序号|id>',
+      '/todo show <序号|id>',
+      '/todo del <序号|id>',
+      '/todo -h',
+    ],
+    examples: [
+      '/todo 检查服务器磁盘空间',
+      '/todo 下周五前整理 CodexBridge 视频脚本 p1',
+      '/todo done 1',
+    ],
+    notes: [
+      i18n.t('coordinator.help.note.todo'),
+    ],
+  }),
+  remind: freezeCommandHelp({
+    name: 'remind',
+    aliases: ['rmd'],
+    summary: i18n.t('coordinator.help.summary.remind'),
+    usage: [
+      '/remind <自然语言>',
+      '/remind ok',
+      '/remind edit <修改提示>',
+      '/remind cancel',
+      '/remind show <序号|id>',
+      '/remind del <序号|id>',
+      '/remind -h',
+    ],
+    examples: [
+      '/remind 明天上午10点提醒我给王总回电话',
+      '/remind edit 时间改成明天上午11点',
+      '/remind 每周一早上9点提醒我看项目进度',
+      '/remind cancel 1',
+    ],
+    notes: [
+      i18n.t('coordinator.help.note.remind'),
+    ],
+  }),
+  note: freezeCommandHelp({
+    name: 'note',
+    aliases: ['nt'],
+    summary: i18n.t('coordinator.help.summary.note'),
+    usage: [
+      '/note <自然语言>',
+      '/note search <关键词>',
+      '/note show <序号|id>',
+      '/note del <序号|id>',
+      '/note -h',
+    ],
+    examples: [
+      '/note Notion 适合结构化日志，Google Drive 适合导出归档',
+      '/note search Notion',
+    ],
+    notes: [
+      i18n.t('coordinator.help.note.note'),
+    ],
+  }),
   provider: freezeCommandHelp({
     name: 'provider',
     aliases: ['pd'],
@@ -9675,6 +10982,11 @@ const COMMAND_HELP_ORDER = Object.freeze([
   'weibo',
   'new',
   'uploads',
+  'assistant',
+  'log',
+  'todo',
+  'remind',
+  'note',
   'provider',
   'models',
   'model',
@@ -9719,6 +11031,11 @@ const COMMAND_ALIAS_DEFINITIONS = Object.freeze({
   weibo: ['wb'],
   new: ['n'],
   uploads: ['up', 'ul'],
+  assistant: ['as'],
+  log: [],
+  todo: ['td'],
+  remind: ['rmd'],
+  note: ['nt'],
   provider: ['pd'],
   models: ['ms'],
   model: ['m'],

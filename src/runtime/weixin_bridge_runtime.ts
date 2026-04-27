@@ -113,6 +113,7 @@ interface WeixinBridgeRuntimeOptions {
   bridgeCoordinator: BridgeCoordinatorLike;
   automationJobs?: any;
   agentJobs?: any;
+  assistantRecords?: any;
   onError?: (error: unknown) => Promise<void> | void;
   previewSoftTargetBytes?: number;
   previewHardLimitBytes?: number;
@@ -133,6 +134,7 @@ export class WeixinBridgeRuntime {
 
   automationJobs: any;
   agentJobs: any;
+  assistantRecords: any;
 
   onError: (error: unknown) => Promise<void> | void;
 
@@ -171,6 +173,7 @@ export class WeixinBridgeRuntime {
     bridgeCoordinator,
     automationJobs = null,
     agentJobs = null,
+    assistantRecords = null,
     onError = async () => {},
     previewSoftTargetBytes = 2048,
     previewHardLimitBytes = 2048,
@@ -184,6 +187,7 @@ export class WeixinBridgeRuntime {
     this.bridgeCoordinator = bridgeCoordinator;
     this.automationJobs = automationJobs;
     this.agentJobs = agentJobs;
+    this.assistantRecords = assistantRecords;
     this.onError = onError;
     this.previewSoftTargetBytes = previewSoftTargetBytes;
     this.previewHardLimitBytes = previewHardLimitBytes;
@@ -1161,7 +1165,7 @@ export class WeixinBridgeRuntime {
   }
 
   startAutomationScheduler(): void {
-    if ((!this.automationJobs && !this.agentJobs) || this.automationPollMs <= 0) {
+    if ((!this.automationJobs && !this.agentJobs && !this.assistantRecords) || this.automationPollMs <= 0) {
       return;
     }
     this.stopAutomationScheduler();
@@ -1180,7 +1184,7 @@ export class WeixinBridgeRuntime {
   }
 
   async runAutomationSweep(): Promise<void> {
-    if (!this.automationJobs && !this.agentJobs) {
+    if (!this.automationJobs && !this.agentJobs && !this.assistantRecords) {
       return;
     }
     if (this.automationSweepInFlight) {
@@ -1215,6 +1219,29 @@ export class WeixinBridgeRuntime {
       const task = this.runAgentJob(job);
       this.trackBackgroundTask(task);
     }
+    const reminders = this.assistantRecords?.claimDueReminders?.('weixin') ?? [];
+    if (Array.isArray(reminders)) {
+      for (const reminder of reminders) {
+        const task = this.deliverAssistantReminder(reminder);
+        this.trackBackgroundTask(task);
+      }
+    }
+  }
+
+  async deliverAssistantReminder(record: any): Promise<RuntimeResponse> {
+    const scopeId = String(record?.scopeId ?? '');
+    if (!scopeId) {
+      return { type: 'message', messages: [] };
+    }
+    const content = renderAssistantReminderMessage(record, this.i18n);
+    if (!content) {
+      return { type: 'message', messages: [] };
+    }
+    await this.sendTextWithRetry({
+      externalScopeId: scopeId,
+      content,
+    });
+    return { type: 'message', messages: [{ text: content }] };
   }
 
   async runAgentJob(job: any): Promise<RuntimeResponse> {
@@ -1824,6 +1851,28 @@ function extractStringArray(value: unknown): string[] {
   return value
     .map((item) => String(item ?? '').trim())
     .filter(Boolean);
+}
+
+function renderAssistantReminderMessage(record: any, i18n: Translator): string {
+  const title = String(record?.title ?? '').trim() || i18n.t('runtime.assistant.untitledReminder');
+  const content = String(record?.content ?? '').trim();
+  const lines = [
+    i18n.t('runtime.assistant.reminderTitle', { title }),
+  ];
+  if (content && content !== title) {
+    lines.push(content);
+  }
+  if (Array.isArray(record?.attachments) && record.attachments.length > 0) {
+    lines.push(i18n.t('runtime.assistant.attachmentCount', { count: record.attachments.length }));
+    for (const attachment of record.attachments.slice(0, 3)) {
+      const storagePath = String(attachment?.storagePath ?? '').trim();
+      if (storagePath) {
+        lines.push(storagePath);
+      }
+    }
+  }
+  lines.push(i18n.t('runtime.assistant.reminderActions'));
+  return lines.join('\n');
 }
 
 function extractCompletionPromise(outcome: any): Promise<void> | null {

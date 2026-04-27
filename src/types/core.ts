@@ -51,6 +51,60 @@ export interface UploadBatchState {
   items: UploadBatchItem[];
 }
 
+export type AssistantRecordType = 'log' | 'todo' | 'reminder' | 'note' | 'uncategorized';
+
+export type AssistantRecordStatus = 'pending' | 'active' | 'done' | 'cancelled' | 'archived';
+
+export type AssistantRecordPriority = 'low' | 'normal' | 'high';
+
+export type AssistantRecordParseStatus = 'auto' | 'confirmed' | 'edited';
+
+export type AssistantAttachmentKind = 'image' | 'video' | 'audio' | 'document' | 'archive' | 'other';
+
+export interface AssistantAttachment {
+  id: string;
+  recordId: string;
+  originalPath: string;
+  storagePath: string;
+  filename: string;
+  originalFilename: string | null;
+  mimeType: string | null;
+  sizeBytes: number | null;
+  sha256: string | null;
+  kind: AssistantAttachmentKind;
+  createdAt: number;
+}
+
+export interface AssistantRecord {
+  id: string;
+  type: AssistantRecordType;
+  status: AssistantRecordStatus;
+  title: string;
+  content: string;
+  originalText: string;
+  priority: AssistantRecordPriority;
+  project: string | null;
+  tags: string[];
+  dueAt: number | null;
+  remindAt: number | null;
+  recurrence: string | null;
+  timezone: string;
+  source: 'weixin' | 'telegram' | 'manual' | 'import';
+  platform: string;
+  scopeId: string;
+  contextThreadId: string | null;
+  attachments: AssistantAttachment[];
+  parseStatus: AssistantRecordParseStatus;
+  confidence: number;
+  parsedJson: Record<string, unknown> | null;
+  lastRemindedAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+  completedAt: number | null;
+  cancelledAt: number | null;
+  archivedAt: number | null;
+}
+
 export interface ThreadMetadata {
   providerProfileId: string;
   threadId: string;

@@ -9,13 +9,14 @@ stale TODOs.
 Already landed and no longer part of the active backlog:
 
 - `/review` for uncommitted changes and base-branch review
-- `/agent` experimental hybrid background jobs with draft-confirm, full-access Codex execution, verifier checks, and retry
+- `/agent` experimental Codex-first hybrid background jobs with draft-confirm, full-access Codex execution, verifier checks, and retry
 - `/plan` session-level native planning mode toggle
 - `/skills` visibility and on/off management
 - `/apps` runtime connector browsing, auth hints, and enable/disable management
 - `/plugins` visibility, aliasing, install/uninstall, and explicit plugin targeting
 - `/mcp` status, auth, reload, and enable/disable management
 - `/automation` draft-confirm flow and WeChat delivery-oriented scheduling
+- Assistant records via `/as`, `/log`, `/todo`, `/remind`, and `/note`, including Codex-normalized natural-language record updates, `/up` attachment archival, and reminder claiming
 - WeChat thread browsing with `/threads`, `/open`, `/search`, `/peek`, `/rename`
 - Thread cleanup and organization flows such as archive/restore and pin/unpin
 - Native-ish reconnect, retry, approval, and attachment delivery hardening
@@ -51,6 +52,7 @@ bridge-only slash-command glue.
 - [ ] Read project-local `.codex` environment metadata so shared local environment setup can inform bridge runs
 - [ ] Expose native multi-agent or subagent controls once the bridge can present them clearly in chat
 - [ ] Keep refining file delivery defaults so generated artifacts feel like first-class Codex outputs
+- [ ] Add optional sync targets for assistant records, such as Notion, Google Drive, or Calendar, while keeping local records as source of truth
 
 ### P2: Native desktop-only capability parity
 

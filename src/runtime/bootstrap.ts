@@ -1,11 +1,14 @@
+import path from 'node:path';
 import { ActiveTurnRegistry } from '../core/active_turn_registry.js';
 import { AgentJobService } from '../core/agent_job_service.js';
+import { AssistantRecordService } from '../core/assistant_record_service.js';
 import { AutomationJobService } from '../core/automation_job_service.js';
 import { BridgeSessionService } from '../core/bridge_session_service.js';
 import { BridgeCoordinator } from '../core/bridge_coordinator.js';
 import { WeiboHotSearchService } from '../services/weibo_hot_search.js';
 import { SessionRouter } from '../core/session_router.js';
 import { InMemoryAgentJobRepository } from '../store/in_memory/in_memory_agent_job_repository.js';
+import { InMemoryAssistantRecordRepository } from '../store/in_memory/in_memory_assistant_record_repository.js';
 import { InMemoryAutomationJobRepository } from '../store/in_memory/in_memory_automation_job_repository.js';
 import { InMemoryBridgeSessionRepository } from '../store/in_memory/in_memory_bridge_session_repository.js';
 import { InMemoryPlatformBindingRepository } from '../store/in_memory/in_memory_platform_binding_repository.js';
@@ -25,6 +28,7 @@ interface RuntimeRepositories {
   threadMetadata?: any;
   automationJobs?: any;
   agentJobs?: any;
+  assistantRecords?: any;
 }
 
 interface CreateCodexBridgeRuntimeOptions {
@@ -35,6 +39,7 @@ interface CreateCodexBridgeRuntimeOptions {
   defaultCwd?: string | null;
   locale?: string | null;
   repositories?: RuntimeRepositories;
+  assistantAttachmentRoot?: string | null;
   restartBridge?: ((params: { event: any }) => Promise<void>) | null;
   codexAuthManager?: any;
   codexInstructionsManager?: any;
@@ -49,6 +54,7 @@ export function createCodexBridgeRuntime({
   defaultCwd = null,
   locale = null,
   repositories = {},
+  assistantAttachmentRoot = null,
   restartBridge = null,
   codexAuthManager = null,
   codexInstructionsManager = null,
@@ -72,6 +78,7 @@ export function createCodexBridgeRuntime({
   const threadMetadataRepository = repositories.threadMetadata ?? new InMemoryThreadMetadataRepository();
   const automationJobsRepository = repositories.automationJobs ?? new InMemoryAutomationJobRepository();
   const agentJobsRepository = repositories.agentJobs ?? new InMemoryAgentJobRepository();
+  const assistantRecordsRepository = repositories.assistantRecords ?? new InMemoryAssistantRecordRepository();
 
   for (const providerProfile of providerProfiles) {
     providerProfilesRepository.save(providerProfile);
@@ -102,6 +109,11 @@ export function createCodexBridgeRuntime({
     bridgeSessions,
     locale,
   });
+  const assistantRecords = new AssistantRecordService({
+    assistantRecords: assistantRecordsRepository,
+    attachmentRoot: assistantAttachmentRoot
+      ?? path.join(defaultCwd ?? process.cwd(), '.codexbridge', 'assistant', 'attachments'),
+  });
   const activeTurns = new ActiveTurnRegistry({ locale });
 
   const resolvedDefaultProviderProfileId = defaultProviderProfileId
@@ -111,6 +123,7 @@ export function createCodexBridgeRuntime({
     bridgeSessions,
     automationJobs,
     agentJobs,
+    assistantRecords,
     activeTurns,
     providerProfiles: providerProfilesRepository,
     providerRegistry: registry,
@@ -140,6 +153,7 @@ export function createCodexBridgeRuntime({
       threadMetadata: threadMetadataRepository,
       automationJobs: automationJobsRepository,
       agentJobs: agentJobsRepository,
+      assistantRecords: assistantRecordsRepository,
     },
     services: {
       activeTurns,
@@ -147,6 +161,7 @@ export function createCodexBridgeRuntime({
       bridgeSessions,
       automationJobs,
       agentJobs,
+      assistantRecords,
       bridgeCoordinator,
     },
   };

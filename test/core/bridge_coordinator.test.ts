@@ -1826,6 +1826,10 @@ test('/helps lists all supported slash commands and help entrypoints', async () 
   assert.match(text, /\/stop \(\/sp\) 请求中断当前正在执行的回复/);
   assert.match(text, /\/review \(\/rv\) 对当前工作区改动运行原生 Codex 代码审查/);
   assert.match(text, /\/uploads \(\/up, \/ul\) 开启上传暂存模式/);
+  assert.match(text, /\/as \(\/assistant\) 助理记录统一入口/);
+  assert.match(text, /\/todo \(\/td\) 强制保存或管理代办事项/);
+  assert.match(text, /\/remind \(\/rmd\) 强制保存或管理提醒事项/);
+  assert.match(text, /\/note \(\/nt\) 强制保存一条笔记/);
   assert.match(text, /\/provider \(\/pd\) 查看可用 provider/);
   assert.match(text, /\/models \(\/ms\) 列出当前 provider 的可用模型/);
   assert.match(text, /\/model \(\/m\) 查看或切换当前 scope 的模型设置/);
@@ -1861,6 +1865,10 @@ test('/helps renders English help text when locale is set to en', async () => {
   assert.match(text, /\/login \(\/lg\) Manage the host Codex login account/);
   assert.match(text, /\/review \(\/rv\) Run a native Codex code review for the current workspace changes/);
   assert.match(text, /\/uploads \(\/up, \/ul\) Enter upload staging mode/);
+  assert.match(text, /\/as \(\/assistant\) Unified assistant record entry/);
+  assert.match(text, /\/todo \(\/td\) Force-save or manage todo records/);
+  assert.match(text, /\/remind \(\/rmd\) Force-save or manage reminder records/);
+  assert.match(text, /\/note \(\/nt\) Force-save a note record/);
   assert.match(text, /\/allow \(\/al\) Inspect and approve in-turn approval requests/);
   assert.match(text, /\/deny \(\/dn\) Deny the current in-turn approval request/);
   assert.match(text, /\/retry \(\/rt\) Retry the previous request in the same thread/);
@@ -2282,6 +2290,413 @@ test('/uploads cancel clears the staged batch', async () => {
     text: '/up status',
   });
   assert.equal(status.messages[0]?.text ?? '', '当前没有进行中的上传暂存。先发送 /uploads。');
+});
+
+test('/log saves and lists assistant log records', async () => {
+  const defaultCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-assistant-log-'));
+  const { runtime } = makeRuntime({ defaultCwd });
+
+  const saved = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-assistant-log-1',
+    text: '/log 今天测试微信桥接，发现插件搜索需要更高相关度 #CodexBridge',
+  });
+
+  const savedText = saved.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(savedText, /助理记录已保存/);
+  assert.match(savedText, /类型：日志/);
+
+  const list = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-assistant-log-1',
+    text: '/log',
+  });
+  const listText = list.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(listText, /助理记录 \| 日志/);
+  assert.match(listText, /CodexBridge/);
+
+  const records = runtime.repositories.assistantRecords.list();
+  assert.equal(records.length, 1);
+  assert.equal(records[0]?.type, 'log');
+  assert.deepEqual(records[0]?.tags, ['CodexBridge']);
+});
+
+test('/as creates a pending reminder and confirms it', async () => {
+  const defaultCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-assistant-remind-'));
+  const { runtime } = makeRuntime({ defaultCwd });
+
+  const draft = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-assistant-remind-1',
+    text: '/as 明天上午10点提醒我给王总回电话',
+  });
+  const draftText = draft.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(draftText, /助理记录待确认/);
+  assert.match(draftText, /类型：提醒/);
+  assert.match(draftText, /确认：\/as ok/);
+
+  const pending = runtime.repositories.assistantRecords.list()[0];
+  assert.equal(pending?.status, 'pending');
+  assert.equal(pending?.type, 'reminder');
+  assert.equal(typeof pending?.remindAt, 'number');
+
+  const confirmed = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-assistant-remind-1',
+    text: '/as ok',
+  });
+  const confirmedText = confirmed.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(confirmedText, /助理记录已保存/);
+
+  const active = runtime.repositories.assistantRecords.list()[0];
+  assert.equal(active?.status, 'active');
+  assert.equal(active?.parseStatus, 'confirmed');
+});
+
+test('/as edit modifies the pending assistant record instead of replacing it', async () => {
+  const defaultCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-assistant-edit-'));
+  const { runtime } = makeRuntime({ defaultCwd });
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-assistant-edit-1',
+    text: '/as 明天上午10点提醒我给王总回电话 #客户',
+  });
+  const before = runtime.repositories.assistantRecords.list()[0];
+  assert.equal(before?.type, 'reminder');
+  assert.match(before?.content ?? '', /王总/);
+
+  const edited = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-assistant-edit-1',
+    text: '/as edit 把王总改成李总，时间改成明天上午11点，加 #重要客户',
+  });
+
+  const editedText = edited.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(editedText, /助理记录待确认/);
+  assert.match(editedText, /李总/);
+
+  const after = runtime.repositories.assistantRecords.list()[0];
+  assert.equal(after?.id, before?.id);
+  assert.equal(after?.type, 'reminder');
+  assert.equal(after?.status, 'pending');
+  assert.match(after?.content ?? '', /李总/);
+  assert.doesNotMatch(after?.content ?? '', /王总/);
+  assert.match(after?.content ?? '', /明天上午11点/);
+  assert.equal(new Date(after?.remindAt ?? 0).getHours(), 11);
+  assert.deepEqual(after?.tags, ['客户', '重要客户']);
+  assert.match(after?.originalText ?? '', /修改提示/);
+});
+
+test('/as strips assistant-only instructions and shows full organized content', async () => {
+  const defaultCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-assistant-invoice-'));
+  const { runtime } = makeRuntime({ defaultCwd });
+  const text = [
+    '/as 助理贝亚 现在还欠我3张发票。关于要拿回来的发票，情况如下：',
+    '',
+    '1. 之前有一个被退回去的发票',
+    '2. 我这个医药的发票（不知道有没有）',
+    '3. 修马桶的发票',
+    '',
+    '应该是这三张发票，你帮我整理一下，看看放哪里比较合适，我之后还得记一下',
+  ].join('\n');
+
+  const pending = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-assistant-invoice-1',
+    text,
+  });
+
+  const pendingText = pending.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(pendingText, /标题：助理贝亚待取回 3 张发票/);
+  assert.match(pendingText, /内容：\n助理贝亚 现在还欠我3张发票/);
+  assert.match(pendingText, /1\. 之前有一个被退回去的发票/);
+  assert.match(pendingText, /3\. 修马桶的发票/);
+  assert.doesNotMatch(pendingText, /你帮我整理一下/);
+  assert.doesNotMatch(pendingText, /…/);
+
+  const record = runtime.repositories.assistantRecords.list()[0];
+  assert.equal(record?.type, 'todo');
+  assert.equal(record?.title, '助理贝亚待取回 3 张发票');
+  assert.doesNotMatch(record?.content ?? '', /看看放哪里比较合适/);
+  assert.doesNotMatch(record?.content ?? '', /我之后还得记一下/);
+  assert.equal(record?.parsedJson?.strippedAssistantInstruction, true);
+
+  const confirmed = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-assistant-invoice-1',
+    text: '/as ok',
+  });
+  const confirmedText = confirmed.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(confirmedText, /助理记录已保存/);
+  assert.match(confirmedText, /内容：\n助理贝亚 现在还欠我3张发票/);
+  assert.doesNotMatch(confirmedText, /你帮我整理一下/);
+});
+
+test('/as natural language updates a matching assistant record after confirmation', async () => {
+  const defaultCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-assistant-natural-update-'));
+  const { runtime } = makeRuntime({ defaultCwd });
+  const scopeId = 'wx-user-assistant-natural-update-1';
+  const text = [
+    '/as 助理贝亚 现在还欠我3张发票。关于要拿回来的发票，情况如下：',
+    '1. 之前有一个被退回去的发票',
+    '2. 我这个医药的发票（不知道有没有）',
+    '3. 修马桶的发票',
+  ].join('\n');
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: scopeId,
+    text,
+  });
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: scopeId,
+    text: '/as ok',
+  });
+
+  const before = runtime.repositories.assistantRecords.list()[0];
+  assert.equal(before?.status, 'active');
+  assert.doesNotMatch(before?.content ?? '', /修马桶发票已经拿回来了/);
+
+  const draft = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: scopeId,
+    text: '/as 修马桶发票已经拿回来了',
+  });
+  const draftText = draft.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(draftText, /找到可能相关的助理记录/);
+  assert.match(draftText, /匹配记录：助理贝亚待取回 3 张发票/);
+  assert.match(draftText, /动作：更新内容/);
+  assert.match(draftText, /补充修改：修马桶发票已经拿回来了/);
+  assert.match(draftText, /确认：\/as ok/);
+
+  const unchanged = runtime.repositories.assistantRecords.list()[0];
+  assert.doesNotMatch(unchanged?.content ?? '', /修马桶发票已经拿回来了/);
+
+  const confirmed = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: scopeId,
+    text: '/as ok',
+  });
+  const confirmedText = confirmed.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(confirmedText, /助理记录已更新/);
+  assert.match(confirmedText, /补充修改：修马桶发票已经拿回来了/);
+
+  const after = runtime.repositories.assistantRecords.list()[0];
+  assert.equal(after?.status, 'active');
+  assert.match(after?.content ?? '', /修马桶发票已经拿回来了/);
+});
+
+test('/as uses Codex rewrite to merge natural-language edits into the matched assistant record', async () => {
+  const defaultCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-assistant-codex-update-'));
+  const { runtime, openai } = makeRuntime({ defaultCwd });
+  const scopeId = 'wx-user-assistant-codex-update-1';
+  const originalStartTurn = openai.startTurn.bind(openai);
+  openai.startTurn = async (args: any) => {
+    openai.startTurnCalls.push(args);
+    if (String(args.inputText ?? '').includes('助理记录更新规范化器')) {
+      return {
+        outputText: JSON.stringify({
+          action: 'update',
+          type: 'todo',
+          title: '阿尼比莱克鲁第二期账单安排',
+          content: [
+            '阿尼比莱克鲁第二期账单发票下午要做。做好以后，第二期账单也安排在下午处理。',
+            '',
+            '具体安排：',
+            '1. 下午发送给办事处',
+            '2. 明天（周二）提交给业主',
+          ].join('\n'),
+          status: 'active',
+          priority: 'normal',
+          dueAt: null,
+          remindAt: null,
+          recurrence: null,
+          project: null,
+          tags: [],
+          changeSummary: '把第二张单更正为第二期账单，并补充发送与提交安排。',
+          confidence: 0.93,
+        }),
+        turnId: `${args.bridgeSession.codexThreadId}-turn-1`,
+        threadId: args.bridgeSession.codexThreadId,
+        title: args.bridgeSession.title,
+      };
+    }
+    return originalStartTurn(args);
+  };
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: scopeId,
+    text: '/todo 阿尼比莱克鲁第二期账单发票下午要做。做好以后，第二张单也安排在下午处理。',
+  });
+  const before = runtime.repositories.assistantRecords.list()[0];
+  assert.match(before?.content ?? '', /第二张单/);
+
+  const draft = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: scopeId,
+    text: [
+      '/as 内容改一下，不是第二张单，是第二期账单。',
+      '',
+      '具体安排如下：',
+      '1. 下午要发送给办事处',
+      '2. 明天（周二）要提交给业主',
+      '',
+      '这个东西要记一下。',
+    ].join('\n'),
+  });
+
+  const draftText = draft.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(draftText, /找到可能相关的助理记录/);
+  assert.match(draftText, /匹配记录：阿尼比莱克鲁/);
+  assert.match(draftText, /修改摘要：把第二张单更正为第二期账单/);
+  assert.match(draftText, /内容：\n阿尼比莱克鲁第二期账单发票下午要做/);
+  assert.match(draftText, /2\. 明天（周二）提交给业主/);
+  assert.doesNotMatch(draftText, /这个东西要记一下/);
+  assert.equal(openai.startTurnCalls.some((call: any) => String(call.inputText ?? '').includes('原记录 JSON')), true);
+
+  const unchanged = runtime.repositories.assistantRecords.list()[0];
+  assert.match(unchanged?.content ?? '', /第二张单/);
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: scopeId,
+    text: '/as ok',
+  });
+
+  const after = runtime.repositories.assistantRecords.list()[0];
+  assert.match(after?.content ?? '', /第二期账单也安排在下午处理/);
+  assert.doesNotMatch(after?.content ?? '', /这个东西要记一下/);
+});
+
+test('/as natural language can complete a matching assistant record after confirmation', async () => {
+  const defaultCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-assistant-natural-complete-'));
+  const { runtime } = makeRuntime({ defaultCwd });
+  const scopeId = 'wx-user-assistant-natural-complete-1';
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: scopeId,
+    text: '/todo 给王总回电话',
+  });
+
+  const draft = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: scopeId,
+    text: '/as 给王总回电话这件事已经完成了',
+  });
+  const draftText = draft.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(draftText, /找到可能相关的助理记录/);
+  assert.match(draftText, /动作：标记完成/);
+  assert.match(draftText, /状态：已完成/);
+
+  const before = runtime.repositories.assistantRecords.list()[0];
+  assert.equal(before?.status, 'active');
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: scopeId,
+    text: '/as ok',
+  });
+
+  const after = runtime.repositories.assistantRecords.list()[0];
+  assert.equal(after?.status, 'done');
+  assert.equal(typeof after?.completedAt, 'number');
+});
+
+test('/todo can complete assistant todo records by index', async () => {
+  const defaultCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-assistant-todo-'));
+  const { runtime } = makeRuntime({ defaultCwd });
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-assistant-todo-1',
+    text: '/todo 检查服务器磁盘空间',
+  });
+
+  const done = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-assistant-todo-1',
+    text: '/todo done 1',
+  });
+  assert.match(done.messages.map((message) => message.text ?? '').join('\n'), /已完成/);
+
+  const record = runtime.repositories.assistantRecords.list()[0];
+  assert.equal(record?.status, 'done');
+  assert.equal(typeof record?.completedAt, 'number');
+});
+
+test('assistant reminder service claims due reminders once', async () => {
+  const defaultCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-assistant-due-'));
+  const { runtime } = makeRuntime({ defaultCwd });
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-assistant-due-1',
+    text: '/remind 明天上午10点提醒我给王总回电话',
+  });
+  const record = runtime.repositories.assistantRecords.list()[0];
+  runtime.services.assistantRecords.updateRecord(record.id, {
+    remindAt: Date.now() - 1000,
+    status: 'active',
+  });
+
+  const firstClaim = runtime.services.assistantRecords.claimDueReminders('weixin');
+  assert.equal(firstClaim.length, 1);
+  assert.equal(firstClaim[0]?.title.includes('给王总回电话'), true);
+
+  const secondClaim = runtime.services.assistantRecords.claimDueReminders('weixin');
+  assert.equal(secondClaim.length, 0);
+});
+
+test('/uploads plus assistant command archives attachments onto assistant records', async () => {
+  const defaultCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-assistant-upload-'));
+  const sourceFile = createTempAttachment('contract.pdf', 'pdf-data');
+  const { runtime, openai } = makeRuntime({ defaultCwd });
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-assistant-upload-1',
+    text: '/up',
+  });
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-assistant-upload-1',
+    text: '',
+    attachments: [
+      {
+        kind: 'file',
+        localPath: sourceFile,
+        fileName: 'contract.pdf',
+        mimeType: 'application/pdf',
+      },
+    ],
+  });
+
+  const saved = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-assistant-upload-1',
+    text: '/note 把这些资料记录为合同附件 #合同',
+  });
+  const savedText = saved.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(savedText, /助理记录已保存/);
+  assert.match(savedText, /附件：1 个/);
+  assert.equal(openai.startTurnCalls.length, 0);
+
+  const record = runtime.repositories.assistantRecords.list()[0];
+  assert.equal(record?.type, 'note');
+  assert.equal(record?.attachments.length, 1);
+  assert.match(record?.attachments[0]?.storagePath ?? '', /assistant[\\/]attachments[\\/]/);
+  assert.equal(fs.existsSync(record?.attachments[0]?.storagePath ?? ''), true);
+
+  const session = runtime.services.bridgeSessions.resolveScopeSession({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-assistant-upload-1',
+  });
+  const settings = runtime.services.bridgeSessions.getSessionSettings(session.id);
+  assert.equal((settings?.metadata?.uploads as any) ?? null, null);
 });
 
 test('/models lists available models for the current provider', async () => {
