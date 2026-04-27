@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WeixinAccountStore } from './platforms/weixin/account_store.js';
@@ -479,28 +479,53 @@ async function queueWeixinBridgeRestart({
   }
   const scriptPath = path.resolve(process.cwd(), 'scripts/service/restart-systemd-user.sh');
   const unitName = `codexbridge-weixin-restart-${Date.now()}`;
-  try {
-    const child = spawn('systemd-run', [
-      '--user',
-      '--unit', unitName,
-      '--collect',
-      '/bin/bash',
-      scriptPath,
-    ], {
-      detached: true,
-      stdio: 'ignore',
-      cwd: process.cwd(),
-    });
-    child.unref();
+  const cwd = process.cwd();
+  const systemdStarted = await spawnDetached('systemd-run', [
+    '--user',
+    '--unit', unitName,
+    '--collect',
+    '/bin/bash',
+    scriptPath,
+  ], { cwd });
+  if (systemdStarted) {
     return;
-  } catch {}
+  }
 
-  const fallback = spawn('/bin/bash', [scriptPath], {
-    detached: true,
-    stdio: 'ignore',
-    cwd: process.cwd(),
+  const fallbackStarted = await spawnDetached('/bin/bash', [scriptPath], { cwd });
+  if (!fallbackStarted) {
+    throw new Error(`Failed to schedule Weixin bridge restart with systemd-run or /bin/bash: ${scriptPath}`);
+  }
+}
+
+function spawnDetached(command: string, args: string[], { cwd }: { cwd: string }): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (started: boolean) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      resolve(started);
+    };
+    let child: ChildProcess;
+    try {
+      child = spawn(command, args, {
+        detached: true,
+        stdio: 'ignore',
+        cwd,
+      });
+    } catch {
+      settle(false);
+      return;
+    }
+    child.once('spawn', () => {
+      child.unref();
+      settle(true);
+    });
+    child.once('error', () => {
+      settle(false);
+    });
   });
-  fallback.unref();
 }
 
 async function flushPendingRestartNotifications({
