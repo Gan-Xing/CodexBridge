@@ -2321,6 +2321,72 @@ test('/log saves and lists assistant log records', async () => {
   assert.deepEqual(records[0]?.tags, ['CodexBridge']);
 });
 
+test('/as uses Codex classification for required same-day work instead of local keyword rules', async () => {
+  const defaultCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-assistant-work-todo-'));
+  const { runtime, openai } = makeRuntime({ defaultCwd });
+  const originalStartTurn = openai.startTurn.bind(openai);
+  openai.startTurn = async (args: any) => {
+    openai.startTurnCalls.push(args);
+    if (String(args.inputText ?? '').includes('助理记录路由器')) {
+      return {
+        outputText: JSON.stringify({
+          action: 'create',
+          targetRecordId: null,
+          targetIndex: null,
+          type: 'reminder',
+          reason: '用户描述的是邦杜库第四期签字版账单这个新提醒，不是已有的助理贝亚发票待办。',
+          confidence: 0.96,
+        }),
+        turnId: `${args.bridgeSession.codexThreadId}-turn-1`,
+        threadId: args.bridgeSession.codexThreadId,
+        title: args.bridgeSession.title,
+      };
+    }
+    if (String(args.inputText ?? '').includes('助理记录分类器')) {
+      return {
+        outputText: JSON.stringify({
+          type: 'todo',
+          title: '停机坪成本和报价测算',
+          content: '今天要做停机坪的测算，包括成本和报价测算。这项工作今天必须做完。',
+          priority: 'high',
+          dueAt: null,
+          remindAt: null,
+          recurrence: null,
+          project: null,
+          tags: [],
+          confidence: 0.94,
+        }),
+        turnId: `${args.bridgeSession.codexThreadId}-turn-1`,
+        threadId: args.bridgeSession.codexThreadId,
+        title: args.bridgeSession.title,
+      };
+    }
+    return originalStartTurn(args);
+  };
+
+  const saved = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-assistant-work-todo-1',
+    text: '/as 今天要做停机坪的一个测算，包括成本和报价测算。这项工作今天必须做完，请把它提成一个比较高的优先级，给我列出来。',
+  });
+
+  const savedText = saved.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(savedText, /助理记录待确认/);
+  assert.match(savedText, /类型：代办/);
+  assert.match(savedText, /标题：停机坪成本和报价测算/);
+
+  const record = runtime.repositories.assistantRecords.list()[0];
+  assert.equal(record?.type, 'todo');
+  assert.equal(record?.priority, 'high');
+  assert.equal(record?.status, 'pending');
+  assert.equal(record?.parsedJson?.normalizer, 'codex');
+  assert.match(record?.content ?? '', /停机坪的测算/);
+  assert.match(record?.content ?? '', /今天必须做完/);
+  assert.doesNotMatch(record?.content ?? '', /给我列出来/);
+  assert.doesNotMatch(record?.content ?? '', /高的优先级/);
+  assert.ok(openai.startTurnCalls.some((call: any) => String(call.inputText ?? '').includes('助理记录分类器')));
+});
+
 test('/as creates a pending reminder and confirms it', async () => {
   const defaultCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-assistant-remind-'));
   const { runtime } = makeRuntime({ defaultCwd });
@@ -2488,6 +2554,131 @@ test('/as natural language updates a matching assistant record after confirmatio
   assert.match(after?.content ?? '', /修马桶发票已经拿回来了/);
 });
 
+test('/as explicit create wording does not match an existing assistant record', async () => {
+  const defaultCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-assistant-explicit-create-'));
+  const { runtime } = makeRuntime({ defaultCwd });
+  const scopeId = 'wx-user-assistant-explicit-create-1';
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: scopeId,
+    text: '/todo 阿尼比莱克鲁第二期账单发票下午要做',
+  });
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: scopeId,
+    text: '/as 新增一个待办：阿尼比莱克鲁第二张单下午要做',
+  });
+
+  const text = result.messages.map((message) => message.text ?? '').join('\n');
+  assert.doesNotMatch(text, /找到可能相关的助理记录/);
+  assert.match(text, /助理记录待确认/);
+
+  const records = runtime.repositories.assistantRecords.list();
+  assert.equal(records.length, 2);
+  assert.equal(records[1]?.type, 'todo');
+  assert.match(records[1]?.content ?? '', /阿尼比莱克鲁第二张单下午要做/);
+});
+
+test('/as reminder wording creates a new reminder instead of merging into an unrelated invoice todo', async () => {
+  const defaultCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-assistant-reminder-create-'));
+  const { runtime, openai } = makeRuntime({ defaultCwd });
+  const scopeId = 'wx-user-assistant-reminder-create-1';
+  const originalStartTurn = openai.startTurn.bind(openai);
+  openai.startTurn = async (args: any) => {
+    openai.startTurnCalls.push(args);
+    if (String(args.inputText ?? '').includes('助理记录分类器')) {
+      return {
+        outputText: JSON.stringify({
+          type: 'reminder',
+          title: '提醒跟进邦杜库第四期签字版账单',
+          content: '邦杜库第四期账单和发票已经收到，但账单缺少签字；已发回给业主，等待对方重新发送签字版。收到签字版后才能开始做发票。',
+          priority: 'normal',
+          dueAt: null,
+          remindAt: '2026-04-28T11:00:00.000Z',
+          recurrence: null,
+          project: null,
+          tags: [],
+          confidence: 0.95,
+        }),
+        turnId: `${args.bridgeSession.codexThreadId}-turn-1`,
+        threadId: args.bridgeSession.codexThreadId,
+        title: args.bridgeSession.title,
+      };
+    }
+    return originalStartTurn(args);
+  };
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: scopeId,
+    text: '/todo 助理贝亚还有 2 张发票需要处理：墨盒发票和马桶发票',
+  });
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: scopeId,
+    text: [
+      '/as 邦杜库第四期的账单和发票已经发过来了，但账单上缺少签字。我已经给业主发回去了，目前还在等待他们再次发送过来。',
+      '我们需要等签字版发送过来之后，才能开始做发票。现在帮多库第四期就是这么一个情况。',
+      '所以说，这个事情现在把它设置为一个提醒（remind）吧，明天早上 11:00 提醒我一下，好吧。',
+    ].join('\n'),
+  });
+
+  const text = result.messages.map((message) => message.text ?? '').join('\n');
+  assert.doesNotMatch(text, /找到可能相关的助理记录/);
+  assert.match(text, /助理记录待确认/);
+  assert.match(text, /类型：提醒/);
+  assert.match(text, /提醒跟进邦杜库第四期签字版账单/);
+
+  const records = runtime.repositories.assistantRecords.list();
+  assert.equal(records.length, 2);
+  assert.equal(records[0]?.type, 'todo');
+  assert.equal(records[1]?.type, 'reminder');
+  assert.equal(records[1]?.status, 'pending');
+  assert.equal(records[1]?.parsedJson?.normalizer, 'codex');
+  assert.match(records[1]?.content ?? '', /邦杜库第四期/);
+  assert.doesNotMatch(records[1]?.content ?? '', /墨盒发票/);
+  assert.ok(openai.startTurnCalls.some((call: any) => String(call.inputText ?? '').includes('助理记录路由器')));
+});
+
+test('/as edit can abandon a wrong update draft and create a new reminder', async () => {
+  const defaultCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-assistant-edit-create-'));
+  const { runtime } = makeRuntime({ defaultCwd });
+  const scopeId = 'wx-user-assistant-edit-create-1';
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: scopeId,
+    text: '/todo 助理贝亚还有 2 张发票需要处理：墨盒发票和马桶发票',
+  });
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: scopeId,
+    text: '/as 修马桶发票已经拿回来了',
+  });
+
+  const fixed = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: scopeId,
+    text: '/as edit 我这是一个完全新的内容，跟那个todo完全没一点关系啊。我这是 remind 你，明天早上11点提醒我邦杜库第四期签字版账单。',
+  });
+
+  const text = fixed.messages.map((message) => message.text ?? '').join('\n');
+  assert.doesNotMatch(text, /找到可能相关的助理记录/);
+  assert.match(text, /助理记录待确认/);
+  assert.match(text, /类型：提醒/);
+
+  const records = runtime.repositories.assistantRecords.list();
+  assert.equal(records.length, 2);
+  assert.equal(records[0]?.type, 'todo');
+  assert.equal(records[1]?.type, 'reminder');
+  assert.equal(records[1]?.status, 'pending');
+  assert.match(records[1]?.content ?? '', /邦杜库第四期/);
+});
+
 test('/as uses Codex rewrite to merge natural-language edits into the matched assistant record', async () => {
   const defaultCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-assistant-codex-update-'));
   const { runtime, openai } = makeRuntime({ defaultCwd });
@@ -2495,6 +2686,21 @@ test('/as uses Codex rewrite to merge natural-language edits into the matched as
   const originalStartTurn = openai.startTurn.bind(openai);
   openai.startTurn = async (args: any) => {
     openai.startTurnCalls.push(args);
+    if (String(args.inputText ?? '').includes('助理记录路由器')) {
+      return {
+        outputText: JSON.stringify({
+          action: 'update',
+          targetRecordId: null,
+          targetIndex: 1,
+          type: 'todo',
+          reason: '用户明确要求把原记录里的第二张单修正为第二期账单。',
+          confidence: 0.94,
+        }),
+        turnId: `${args.bridgeSession.codexThreadId}-turn-1`,
+        threadId: args.bridgeSession.codexThreadId,
+        title: args.bridgeSession.title,
+      };
+    }
     if (String(args.inputText ?? '').includes('助理记录更新规范化器')) {
       return {
         outputText: JSON.stringify({

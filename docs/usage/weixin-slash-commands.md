@@ -244,14 +244,14 @@ CODEXBRIDGE_AGENT_API=chat_completions
 
 Save personal assistant records from WeChat.
 
-- `/as <text>` is the unified natural-language entry. It classifies the text as log, todo, reminder, or note.
+- `/as <text>` is the unified natural-language entry. Codex first decides whether the text is a new record or a management action on an existing record, then classifies new records as log, todo, reminder, or note.
 - `/log <text>` forces a log record.
 - `/todo <text>` forces a todo record. Use `/todo done 1` to complete it.
 - `/remind <text>` forces a reminder. Phrases such as `明天上午10点` and `每周一早上9点` are parsed locally.
 - `/note <text>` forces a note record.
 - Logs and notes are saved directly. `/as` todo/reminder drafts ask for confirmation with `/as ok`.
 - `/as edit <change instruction>` refines the pending draft by merging the new instruction back into the original matched record.
-- `/as <natural update>` can also update existing records. If the text looks like completion, cancellation, deletion, or progress update, the bridge searches matching records in the current WeChat chat, asks Codex to merge the original record with the new instruction, and asks for `/as ok` before writing.
+- `/as <natural update>` can also update existing records. The bridge asks Codex to route the message as create, update, complete, cancel, or archive. It only targets an existing record when the message clearly refers to the same concrete item; otherwise it creates a new record. Existing-record changes ask Codex to merge the original record with the new instruction and require `/as ok` before writing.
 - `/as search <keyword>` searches records in the current WeChat chat.
 - `/as show 1` shows full content and attachment paths.
 - `/as del 1` archives a record.

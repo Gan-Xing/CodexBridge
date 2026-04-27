@@ -606,6 +606,19 @@ function mergeTags(left: string[], right: string[]): string[] {
 
 function inferRecordType(text: string): AssistantRecordType {
   const value = text.toLowerCase();
+  const disavowsTodo = /(?:todo|待办).{0,16}(?:没.{0,6}关系|无关|不相关)|(?:没.{0,6}关系|无关|不相关).{0,16}(?:todo|待办)/u.test(value);
+  if (!disavowsTodo && /待办|todo|任务/u.test(value)) {
+    return 'todo';
+  }
+  if (/提醒|remind/u.test(value)) {
+    return 'reminder';
+  }
+  if (/日志|log/u.test(value)) {
+    return 'log';
+  }
+  if (/笔记|note/u.test(value)) {
+    return 'note';
+  }
   if (/提醒|叫我|到时候|remind|每(天|周|月)|早上|上午|下午|晚上|\d{1,2}点/u.test(value)) {
     return 'reminder';
   }

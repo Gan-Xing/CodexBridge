@@ -6,6 +6,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { formatPlatformScopeKey } from './contracts.js';
 import { parseSlashCommand } from './command_parser.js';
 import { NotFoundError } from './errors.js';
+import type { AssistantRecordDraft } from './assistant_record_service.js';
 import {
   createPendingTurnArtifactDeliveryState,
   createTurnArtifactContext,
@@ -165,6 +166,15 @@ type PendingAgentDraft = AgentDraftCandidate & {
 };
 
 type AssistantRecordUpdateAction = 'update' | 'complete' | 'cancel' | 'archive';
+type AssistantRecordRouteAction = 'create' | AssistantRecordUpdateAction | 'none';
+
+type AssistantRecordRouteDecision = {
+  action: AssistantRecordRouteAction;
+  targetRecordId: string | null;
+  confidence: number;
+  reason: string;
+  type: AssistantRecordType | null;
+};
 
 type PendingAssistantRecordUpdateDraft = {
   createdAt: number;
@@ -194,6 +204,8 @@ type AssistantRecordRewriteCandidate = {
   changeSummary: string;
   confidence: number;
 };
+
+type AssistantRecordDraftNormalizeSource = 'codex' | 'agents-sdk' | 'local';
 
 type AgentVerificationResult = {
   pass: boolean;
@@ -1428,7 +1440,8 @@ export class BridgeCoordinator {
         return messageResponse(this.renderAssistantUpdateDraftLines(updateDraft), this.buildScopedSessionMeta(event));
       }
     }
-    const draft = this.assistantRecords.parseDraft(rawInput, forcedType);
+    const localDraft = this.assistantRecords.parseDraft(rawInput, forcedType);
+    const draft = await this.normalizeAssistantRecordDraft(event, scopeRef, rawInput, forcedType, localDraft);
     const shouldConfirm = this.assistantRecords.shouldConfirmDraft(draft, forcedType);
     const record = await this.assistantRecords.createRecord({
       scopeRef,
@@ -1448,6 +1461,113 @@ export class BridgeCoordinator {
       return messageResponse(this.renderAssistantPendingLines(record, commandName), this.buildScopedSessionMeta(event));
     }
     return messageResponse(this.renderAssistantSavedLines(record, commandName), this.buildScopedSessionMeta(event));
+  }
+
+  async normalizeAssistantRecordDraft(
+    event,
+    scopeRef: PlatformScopeRef,
+    rawInput: string,
+    forcedType: AssistantRecordType | null,
+    localDraft: AssistantRecordDraft,
+  ): Promise<AssistantRecordDraft> {
+    if (forcedType) {
+      return {
+        ...localDraft,
+        parsedJson: {
+          ...(localDraft.parsedJson ?? {}),
+          normalizer: 'forced-local',
+        },
+      };
+    }
+    const codexDraft = await this.normalizeAssistantRecordDraftWithCodex(event, scopeRef, rawInput, forcedType, localDraft).catch(() => null);
+    if (codexDraft) {
+      return codexDraft;
+    }
+    const agentsDraft = await normalizeAssistantRecordDraftWithOpenAIAgents(
+      rawInput,
+      forcedType,
+      this.currentI18n.locale,
+      this.now(),
+      localDraft,
+    ).catch(() => null);
+    if (agentsDraft) {
+      return agentsDraft;
+    }
+    return {
+      ...localDraft,
+      parsedJson: {
+        ...(localDraft.parsedJson ?? {}),
+        normalizer: 'local',
+      },
+    };
+  }
+
+  async normalizeAssistantRecordDraftWithCodex(
+    event,
+    scopeRef: PlatformScopeRef,
+    rawInput: string,
+    forcedType: AssistantRecordType | null,
+    localDraft: AssistantRecordDraft,
+  ): Promise<AssistantRecordDraft | null> {
+    const boundSession = this.bridgeSessions.resolveScopeSession(scopeRef);
+    const providerProfile = boundSession
+      ? this.requireProviderProfile(boundSession.providerProfileId)
+      : this.resolveScopeProviderProfile(scopeRef);
+    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+    if (!providerPlugin || typeof providerPlugin.startThread !== 'function' || typeof providerPlugin.startTurn !== 'function') {
+      return null;
+    }
+    const inheritedSettings = boundSession
+      ? this.bridgeSessions.getSessionSettings(boundSession.id)
+      : null;
+    const locale = inheritedSettings?.locale ?? this.resolveScopeLocale(scopeRef, event);
+    const cwd = normalizeCwd(boundSession?.cwd) ?? this.resolveEventCwd(event) ?? null;
+    const thread = await providerPlugin.startThread({
+      providerProfile,
+      cwd,
+      title: 'Assistant Record Classifier',
+      metadata: {
+        sourcePlatform: event.platform,
+        source: 'assistant-record-classifier',
+      },
+    });
+    const parserSession = {
+      id: crypto.randomUUID(),
+      providerProfileId: providerProfile.id,
+      codexThreadId: thread.threadId,
+      cwd: thread.cwd ?? cwd,
+      title: thread.title ?? 'Assistant Record Classifier',
+      createdAt: this.now(),
+      updatedAt: this.now(),
+    };
+    const prompt = buildAssistantRecordDraftPrompt(rawInput, forcedType, locale, this.now());
+    const result = await providerPlugin.startTurn({
+      providerProfile,
+      bridgeSession: parserSession,
+      sessionSettings: {
+        bridgeSessionId: parserSession.id,
+        model: inheritedSettings?.model ?? null,
+        reasoningEffort: inheritedSettings?.reasoningEffort ?? null,
+        serviceTier: inheritedSettings?.serviceTier ?? null,
+        collaborationMode: null,
+        personality: null,
+        accessPreset: 'read-only',
+        approvalPolicy: 'never',
+        sandboxMode: 'read-only',
+        locale,
+        metadata: {},
+        updatedAt: this.now(),
+      },
+      event: {
+        ...event,
+        text: prompt,
+        cwd: parserSession.cwd ?? null,
+        locale,
+        attachments: [],
+      },
+      inputText: prompt,
+    });
+    return parseAssistantRecordDraftCandidate(result.outputText, rawInput, forcedType, localDraft, 'codex');
   }
 
   async handleAssistantShowCommand(event, args, typeFilter: AssistantRecordType | null) {
@@ -1558,6 +1678,10 @@ export class BridgeCoordinator {
     if (!forcedType) {
       const updateDraft = this.getPendingAssistantUpdateDraft(scopeRef);
       if (updateDraft) {
+        if (shouldCreateAssistantRecordInsteadOfUpdating(input)) {
+          this.clearPendingAssistantUpdateDraft(scopeRef);
+          return this.handleAssistantCommand(event, [input], null);
+        }
         const instructions = [...updateDraft.instructions, input];
         const baseRecord = this.assistantRecords.getById(updateDraft.targetRecordId) ?? updateDraft.matchedRecord;
         const updatedRecord = await this.previewAssistantRecordAction(event, scopeRef, baseRecord, instructions, updateDraft.action);
@@ -1583,11 +1707,45 @@ export class BridgeCoordinator {
   }
 
   async buildAssistantRecordUpdateDraft(event, scopeRef: PlatformScopeRef, rawInput: string): Promise<PendingAssistantRecordUpdateDraft | null> {
+    const records = this.assistantRecords.listForScope(scopeRef, null);
+    if (records.length === 0) {
+      return null;
+    }
+    const route = await this.resolveAssistantRecordRoute(event, scopeRef, rawInput, records).catch(() => null);
+    if (route) {
+      if (route.action === 'create' || route.action === 'none') {
+        return null;
+      }
+      const routedRecord = records.find((record) => record.id === route.targetRecordId);
+      if (!routedRecord) {
+        return null;
+      }
+      const resolvedAction = route.action === 'complete' && shouldTreatAssistantCompletionAsPartialUpdate(routedRecord, rawInput)
+        ? 'update'
+        : route.action;
+      const instructions = [rawInput];
+      const updatedRecord = await this.previewAssistantRecordAction(event, scopeRef, routedRecord, instructions, resolvedAction);
+      return {
+        createdAt: this.now(),
+        rawInput,
+        instructions,
+        targetRecordId: routedRecord.id,
+        matchedRecord: cloneAssistantRecord(routedRecord),
+        action: resolvedAction,
+        updatedRecord: updatedRecord.record,
+        matchedScore: Math.round(route.confidence * 100),
+        normalizedBy: updatedRecord.normalizedBy,
+        changeSummary: updatedRecord.changeSummary ?? route.reason,
+      };
+    }
+    if (shouldCreateAssistantRecordInsteadOfUpdating(rawInput)) {
+      return null;
+    }
     const action = inferAssistantRecordNaturalAction(rawInput);
     if (!action) {
       return null;
     }
-    const match = findBestAssistantRecordMatch(this.assistantRecords.listForScope(scopeRef, null), rawInput);
+    const match = findBestAssistantRecordMatch(records, rawInput);
     if (!match) {
       return null;
     }
@@ -1608,6 +1766,98 @@ export class BridgeCoordinator {
       normalizedBy: updatedRecord.normalizedBy,
       changeSummary: updatedRecord.changeSummary,
     };
+  }
+
+  async resolveAssistantRecordRoute(
+    event,
+    scopeRef: PlatformScopeRef,
+    rawInput: string,
+    records: AssistantRecord[],
+  ): Promise<AssistantRecordRouteDecision | null> {
+    const candidates = records
+      .filter((record) => record.status !== 'archived')
+      .slice(0, 12);
+    if (candidates.length === 0) {
+      return null;
+    }
+    const codexRoute = await this.resolveAssistantRecordRouteWithCodex(event, scopeRef, rawInput, candidates).catch(() => null);
+    if (codexRoute) {
+      return codexRoute;
+    }
+    const agentsRoute = await resolveAssistantRecordRouteWithOpenAIAgents(
+      rawInput,
+      candidates,
+      this.currentI18n.locale,
+      this.now(),
+    ).catch(() => null);
+    return agentsRoute;
+  }
+
+  async resolveAssistantRecordRouteWithCodex(
+    event,
+    scopeRef: PlatformScopeRef,
+    rawInput: string,
+    records: AssistantRecord[],
+  ): Promise<AssistantRecordRouteDecision | null> {
+    const boundSession = this.bridgeSessions.resolveScopeSession(scopeRef);
+    const providerProfile = boundSession
+      ? this.requireProviderProfile(boundSession.providerProfileId)
+      : this.resolveScopeProviderProfile(scopeRef);
+    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+    if (!providerPlugin || typeof providerPlugin.startThread !== 'function' || typeof providerPlugin.startTurn !== 'function') {
+      return null;
+    }
+    const inheritedSettings = boundSession
+      ? this.bridgeSessions.getSessionSettings(boundSession.id)
+      : null;
+    const locale = inheritedSettings?.locale ?? this.resolveScopeLocale(scopeRef, event);
+    const cwd = normalizeCwd(boundSession?.cwd) ?? this.resolveEventCwd(event) ?? null;
+    const thread = await providerPlugin.startThread({
+      providerProfile,
+      cwd,
+      title: 'Assistant Record Router',
+      metadata: {
+        sourcePlatform: event.platform,
+        source: 'assistant-record-router',
+      },
+    });
+    const routerSession = {
+      id: crypto.randomUUID(),
+      providerProfileId: providerProfile.id,
+      codexThreadId: thread.threadId,
+      cwd: thread.cwd ?? cwd,
+      title: thread.title ?? 'Assistant Record Router',
+      createdAt: this.now(),
+      updatedAt: this.now(),
+    };
+    const prompt = buildAssistantRecordRoutePrompt(rawInput, records, locale, this.now());
+    const result = await providerPlugin.startTurn({
+      providerProfile,
+      bridgeSession: routerSession,
+      sessionSettings: {
+        bridgeSessionId: routerSession.id,
+        model: inheritedSettings?.model ?? null,
+        reasoningEffort: inheritedSettings?.reasoningEffort ?? null,
+        serviceTier: inheritedSettings?.serviceTier ?? null,
+        collaborationMode: null,
+        personality: null,
+        accessPreset: 'read-only',
+        approvalPolicy: 'never',
+        sandboxMode: 'read-only',
+        locale,
+        metadata: {},
+        updatedAt: this.now(),
+      },
+      event: {
+        ...event,
+        text: prompt,
+        cwd: routerSession.cwd ?? null,
+        locale,
+        attachments: [],
+      },
+      inputText: prompt,
+    });
+    return parseAssistantRecordRouteDecision(result.outputText, records);
   }
 
   async previewAssistantRecordAction(
@@ -7985,6 +8235,24 @@ async function verifyAgentResultWithOpenAIAgents(job: AgentJob, result, locale: 
   return parseAgentVerificationResult(output);
 }
 
+async function normalizeAssistantRecordDraftWithOpenAIAgents(
+  rawInput: string,
+  forcedType: AssistantRecordType | null,
+  locale: string | null,
+  now: number,
+  fallbackDraft: AssistantRecordDraft,
+): Promise<AssistantRecordDraft | null> {
+  if (!resolveOpenAIAgentRuntimeConfig().apiKey) {
+    return null;
+  }
+  const output = await runOpenAIAgentJson({
+    name: 'CodexBridge Assistant Record Classifier',
+    instructions: 'Classify assistant records as strict JSON only. Do not use markdown.',
+    input: buildAssistantRecordDraftPrompt(rawInput, forcedType, locale, now),
+  });
+  return parseAssistantRecordDraftCandidate(output, rawInput, forcedType, fallbackDraft, 'agents-sdk');
+}
+
 async function normalizeAssistantRecordUpdateWithOpenAIAgents(
   record: AssistantRecord,
   instructions: string[],
@@ -8012,6 +8280,23 @@ async function normalizeAssistantRecordUpdateWithOpenAIAgents(
     normalizedBy: 'agents-sdk',
     changeSummary: candidate.changeSummary || null,
   };
+}
+
+async function resolveAssistantRecordRouteWithOpenAIAgents(
+  rawInput: string,
+  records: AssistantRecord[],
+  locale: string | null,
+  now: number,
+): Promise<AssistantRecordRouteDecision | null> {
+  if (!resolveOpenAIAgentRuntimeConfig().apiKey) {
+    return null;
+  }
+  const output = await runOpenAIAgentJson({
+    name: 'CodexBridge Assistant Record Router',
+    instructions: 'Route assistant record requests as strict JSON only. Do not use markdown.',
+    input: buildAssistantRecordRoutePrompt(rawInput, records, locale, now),
+  });
+  return parseAssistantRecordRouteDecision(output, records);
 }
 
 async function runOpenAIAgentJson({ name, instructions, input }: {
@@ -8223,6 +8508,92 @@ function parseAgentVerificationResult(value: unknown): AgentVerificationResult |
   };
 }
 
+function buildAssistantRecordRoutePrompt(
+  rawInput: string,
+  records: AssistantRecord[],
+  locale: string | null,
+  now: number,
+): string {
+  const language = normalizeLocale(locale) === 'zh-CN' ? '中文' : 'English';
+  const candidates = records.map((record, index) => ({
+    index: index + 1,
+    id: record.id,
+    type: record.type,
+    title: record.title,
+    content: truncateText(record.content, 700),
+    status: record.status,
+    priority: record.priority,
+    dueAt: record.dueAt,
+    remindAt: record.remindAt,
+    recurrence: record.recurrence,
+    tags: record.tags,
+    updatedAt: record.updatedAt,
+  }));
+  return [
+    `你是 CodexBridge 助理记录路由器。请用${language}判断这条 /as 自然语言输入是在“新建一条记录”，还是在“管理已有记录”。`,
+    '只返回严格 JSON，不要 Markdown，不要解释。',
+    '',
+    'Schema:',
+    '{"action":"create|update|complete|cancel|archive|none","targetRecordId":null,"targetIndex":null,"type":"log|todo|reminder|note|uncategorized|null","reason":"简短判断理由","confidence":0.0}',
+    '',
+    '核心原则：',
+    '- /as 是统一助理入口，用户不需要自己选择分类。你要按语义管理 log、todo、reminder、note 四类内容。',
+    '- 如果用户是在描述一件新的事情要记录、提醒、待办或保存，action 必须是 create。',
+    '- 只有用户明确在说已有记录的进展、完成、取消、删除、修正，且能和候选记录里的具体事项唯一对应时，才选择 update/complete/cancel/archive。',
+    '- 不能因为“发票、账单、项目、今天、明天”等通用词相同就匹配旧记录。',
+    '- 如果候选记录和用户输入只是同一大类但不是同一件事，必须 create。',
+    '- 如果用户说“设置为提醒、remind、提醒我、给我发消息提醒”，且没有明确指向某条已有记录，必须 create，type 用 reminder。',
+    '- 如果用户说“已经完成/做完/处理完”并明确指向候选记录，action 用 complete。',
+    '- 如果用户说“不用了/取消/作废”并明确指向候选记录，action 用 cancel。',
+    '- 如果用户说“删除/删掉/归档”并明确指向候选记录，action 用 archive。',
+    '- 不确定时宁可 create，不要错误合并到旧记录。',
+    '',
+    `当前时间：${new Date(now).toISOString()}`,
+    '',
+    '候选已有记录 JSON：',
+    JSON.stringify(candidates, null, 2),
+    '',
+    '用户输入：',
+    rawInput,
+  ].join('\n');
+}
+
+function parseAssistantRecordRouteDecision(value: unknown, records: AssistantRecord[]): AssistantRecordRouteDecision | null {
+  const parsed = parseJsonObject(value);
+  if (!parsed) {
+    return null;
+  }
+  const action = normalizeAssistantRecordRouteAction(parsed.action);
+  if (!action) {
+    return null;
+  }
+  const confidence = clampAssistantConfidence(Number(parsed.confidence ?? 0.8));
+  const targetRecordId = resolveAssistantRouteTargetRecordId(parsed, records);
+  if (['update', 'complete', 'cancel', 'archive'].includes(action) && !targetRecordId) {
+    return null;
+  }
+  return {
+    action,
+    targetRecordId: action === 'create' || action === 'none' ? null : targetRecordId,
+    confidence,
+    reason: truncateText(compactWhitespace(parsed.reason ?? ''), 120),
+    type: normalizeAssistantRecordType(parsed.type),
+  };
+}
+
+function resolveAssistantRouteTargetRecordId(parsed: Record<string, unknown>, records: AssistantRecord[]): string | null {
+  const recordIds = new Set(records.map((record) => record.id));
+  const targetId = compactWhitespace(parsed.targetRecordId ?? parsed.target_record_id ?? parsed.recordId ?? parsed.record_id ?? '');
+  if (targetId && recordIds.has(targetId)) {
+    return targetId;
+  }
+  const rawIndex = Number(parsed.targetIndex ?? parsed.target_index ?? parsed.index);
+  if (Number.isInteger(rawIndex) && rawIndex > 0) {
+    return records[rawIndex - 1]?.id ?? null;
+  }
+  return null;
+}
+
 function buildAssistantRecordRewritePrompt(
   record: AssistantRecord,
   instructions: string[],
@@ -8373,6 +8744,21 @@ function isAssistantRecordRewriteSchemaPlaceholder(content: string): boolean {
 function normalizeAssistantRecordUpdateAction(value: unknown): AssistantRecordUpdateAction | null {
   const normalized = compactWhitespace(value).toLowerCase();
   if (normalized === 'update' || normalized === 'complete' || normalized === 'cancel' || normalized === 'archive') {
+    return normalized;
+  }
+  return null;
+}
+
+function normalizeAssistantRecordRouteAction(value: unknown): AssistantRecordRouteAction | null {
+  const normalized = compactWhitespace(value).toLowerCase();
+  if (
+    normalized === 'create'
+    || normalized === 'update'
+    || normalized === 'complete'
+    || normalized === 'cancel'
+    || normalized === 'archive'
+    || normalized === 'none'
+  ) {
     return normalized;
   }
   return null;
@@ -9110,6 +9496,101 @@ function buildAutomationDraftKey(scopeRef: PlatformScopeRef): string {
 
 function buildAssistantUpdateDraftKey(scopeRef: PlatformScopeRef): string {
   return formatPlatformScopeKey(scopeRef.platform, scopeRef.externalScopeId);
+}
+
+function buildAssistantRecordDraftPrompt(
+  rawInput: string,
+  forcedType: AssistantRecordType | null,
+  locale: string | null,
+  now: number,
+): string {
+  const language = normalizeLocale(locale) === 'zh-CN' ? '中文' : 'English';
+  const forcedTypeLine = forcedType
+    ? `- 用户使用了强制分类命令，type 必须是 "${forcedType}"。`
+    : '- 请根据语义自行选择 type。';
+  return [
+    `你是 CodexBridge 助理记录分类器。请用${language}把用户输入转换成一条结构化助理记录。`,
+    '只返回严格 JSON，不要 Markdown，不要解释。',
+    '',
+    'Schema:',
+    '{"type":"log|todo|reminder|note|uncategorized","title":"短标题","content":"保存给用户看的完整内容","priority":"low|normal|high","dueAt":null,"remindAt":null,"recurrence":null,"project":null,"tags":[],"confidence":0.0}',
+    '',
+    '分类规则：',
+    '- todo：用户要做、需要做、必须完成、要跟进、要处理、要测算/核算/报价/整理/提交的事情。',
+    '- reminder：用户明确要求到某个时间提醒、叫他、通知他；有周期提醒时填写 recurrence。',
+    '- log：已经发生的事实、当天记录、复盘、测试结果、完成记录。',
+    '- note：长期保存的资料、想法、参考信息，不要求行动。',
+    '- uncategorized：无法可靠判断。',
+    forcedTypeLine,
+    '',
+    '内容规则：',
+    '- content 要保留事实和要求，但删除“帮我记录/整理/列出来/放哪里合适/这个东西要记一下”等对 AI 的元指令。',
+    '- “今天”本身不是 log 证据；如果用户说今天要做/必须做完，应归为 todo。',
+    '- 用户说高优先级、重要、必须今天完成、紧急时 priority 用 high。',
+    '- title 要短，不能直接复制一整段长文本。',
+    '- tags 保留 #标签，但不要带 # 前缀。',
+    '- dueAt/remindAt 可返回 ISO 时间字符串或 null；没有明确时间就用 null，不要编造。',
+    '- recurrence 可用简短自然语言或 null。',
+    '- confidence 表示你对结构化结果的置信度，0 到 1。',
+    '',
+    `当前时间：${new Date(now).toISOString()}`,
+    '',
+    '用户输入：',
+    rawInput,
+  ].join('\n');
+}
+
+function parseAssistantRecordDraftCandidate(
+  value: unknown,
+  rawInput: string,
+  forcedType: AssistantRecordType | null,
+  fallbackDraft: AssistantRecordDraft,
+  source: AssistantRecordDraftNormalizeSource,
+): AssistantRecordDraft | null {
+  const parsed = parseJsonObject(value);
+  if (!parsed) {
+    return null;
+  }
+  const content = normalizeMultilineText(parsed.content ?? parsed.text ?? parsed.body);
+  if (!content || isAssistantRecordDraftSchemaPlaceholder(content)) {
+    return null;
+  }
+  const parsedType = normalizeAssistantRecordType(parsed.type);
+  const type = forcedType ?? parsedType ?? fallbackDraft.type;
+  const title = truncateText(compactWhitespace(parsed.title ?? '') || compactWhitespace(content), 80) || fallbackDraft.title;
+  const priority = normalizeAssistantRecordPriority(parsed.priority) ?? fallbackDraft.priority;
+  const confidence = clampAssistantConfidence(Number(parsed.confidence ?? fallbackDraft.confidence ?? 0.8));
+  return {
+    type,
+    title,
+    content,
+    originalText: rawInput,
+    priority,
+    project: readAssistantNullableStringField(parsed, ['project'], fallbackDraft.project),
+    tags: readAssistantStringArrayField(parsed, ['tags'], fallbackDraft.tags),
+    dueAt: type === 'todo'
+      ? readAssistantTimestampField(parsed, ['dueAt', 'due_at'], fallbackDraft.dueAt)
+      : null,
+    remindAt: type === 'reminder'
+      ? readAssistantTimestampField(parsed, ['remindAt', 'remind_at'], fallbackDraft.remindAt)
+      : null,
+    recurrence: type === 'reminder'
+      ? readAssistantNullableStringField(parsed, ['recurrence'], fallbackDraft.recurrence)
+      : null,
+    confidence,
+    parsedJson: {
+      ...(fallbackDraft.parsedJson ?? {}),
+      normalizer: source,
+      modelConfidence: confidence,
+      modelType: parsedType,
+    },
+  };
+}
+
+function isAssistantRecordDraftSchemaPlaceholder(content: string): boolean {
+  const normalized = compactWhitespace(content).toLowerCase();
+  return normalized === '保存给用户看的完整内容'
+    || normalized === 'complete content to save for the user';
 }
 
 function buildAutomationDraftPrompt(rawInput: string, locale: SupportedLocale): string {
@@ -9873,6 +10354,47 @@ function inferAssistantRecordNaturalAction(input: string): AssistantRecordUpdate
     return 'update';
   }
   return null;
+}
+
+function isExplicitAssistantCreateRequest(input: string): boolean {
+  const value = compactWhitespace(input);
+  if (!value) {
+    return false;
+  }
+  return /(?:^|[，,。；;\s])(?:新增|新建|添加|增加|记一条新的|记一个新的|新记一条|再记一条|再加一条|另记一条|另加一条).{0,24}(?:待办|todo|提醒|reminder|日志|log|笔记|note|事项|任务)/u.test(value)
+    || /^(?:新增|新建|添加|增加)(?:一个|一条)?(?:待办|todo|提醒|reminder|日志|log|笔记|note)/u.test(value);
+}
+
+function shouldCreateAssistantRecordInsteadOfUpdating(input: string): boolean {
+  const value = compactWhitespace(input);
+  if (!value) {
+    return false;
+  }
+  if (isExplicitAssistantCreateRequest(value)) {
+    return true;
+  }
+  if (isDisavowingExistingAssistantMatch(value)) {
+    return true;
+  }
+  if (hasAssistantRecordTypeCreateIntent(value) && !hasExplicitExistingAssistantRecordReference(value)) {
+    return true;
+  }
+  return false;
+}
+
+function isDisavowingExistingAssistantMatch(input: string): boolean {
+  return /(?:完全新的|全新的|新的内容|另一件事|另一个事项|跟.+?(?:没关系|无关|不相关)|不是(?:这个|那个|原来|之前|已有).{0,12}(?:todo|待办|记录|提醒|事项))/iu.test(input);
+}
+
+function hasAssistantRecordTypeCreateIntent(input: string): boolean {
+  return /(?:设为|设置为|标记为|作为|做成|归为|类型(?:是|为)|这是(?:一个)?|这个是|我这是).{0,24}(?:提醒|remind|代办|todo|日志|log|笔记|note)/iu.test(input)
+    || /(?:提醒我|给我.{0,16}提醒|发.{0,12}消息.{0,12}提醒|remind\s+me)/iu.test(input);
+}
+
+function hasExplicitExistingAssistantRecordReference(input: string): boolean {
+  return /(?:记录|条目|事项)\s*#?\d+/iu.test(input)
+    || /(?:第|#)\s*\d+\s*(?:条|个|项)?/iu.test(input)
+    || /(?:刚才|上面|上一条|当前|这个|这条|该|原来|之前|已有).{0,10}(?:记录|条|事项|todo|待办|提醒|日志|笔记)/iu.test(input);
 }
 
 function findBestAssistantRecordMatch(records: AssistantRecord[], input: string): { record: AssistantRecord; score: number } | null {

@@ -179,7 +179,7 @@ Examples:
 
 ### `/as`, `/log`, `/todo`, `/remind`, and `/note`
 
-Personal assistant records for WeChat. `/as` is the natural-language entry; `/log`, `/todo`, `/remind`, and `/note` force the category.
+Personal assistant records for WeChat. `/as` is the natural-language entry for logs, todos, reminders, and notes. It asks Codex to decide whether the message is a new record or a management action on an existing record; local keyword rules are only a conservative fallback when the provider is unavailable. `/log`, `/todo`, `/remind`, and `/note` remain shortcuts when you want to force a category.
 
 Examples:
 
@@ -199,7 +199,7 @@ Examples:
 /note Notion 适合结构化日志，Google Drive 适合导出归档
 ```
 
-`/as` also manages existing records with natural language. If the message looks like an update, completion, cancellation, or deletion, the bridge searches records in the current WeChat chat, shows a pending update draft, and only writes it after `/as ok`. Use `/as edit <change instruction>` to refine that pending update draft, or `/as cancel` to discard it.
+`/as` also manages existing records with natural language. Codex first routes the message as create, update, complete, cancel, or archive. It only targets an existing record when the message clearly refers to the same concrete item; otherwise it creates a new log/todo/reminder/note. Existing-record changes are shown as a pending draft and are only written after `/as ok`. Use `/as edit <change instruction>` to refine that pending update draft, or `/as cancel` to discard it.
 
 For natural-language updates, the bridge prefers a short-lived Codex app-server rewrite thread, so the host Codex subscription handles the “original record + modification instruction” merge. API-key based Agents SDK normalization is only a fallback when Codex normalization is unavailable; local rules are the final fallback.
 
