@@ -250,6 +250,7 @@ interface PendingRequest {
 
 interface PendingApproval {
   rpcId: string;
+  rpcResponseId: string | number;
   transportKind: 'v2_command' | 'v2_file_change' | 'v2_permissions' | 'legacy_exec' | 'legacy_apply_patch';
   request: ProviderApprovalRequest;
 }
@@ -678,7 +679,7 @@ export class CodexAppClient extends EventEmitter {
     try {
       this.send({
         jsonrpc: '2.0',
-        id: pending.rpcId,
+        id: pending.rpcResponseId,
         result,
       });
     } catch (error) {
@@ -1839,34 +1840,40 @@ function mapPendingApproval(message: any): PendingApproval | null {
   if (!rpcId || !method) {
     return null;
   }
+  const rpcResponseId = typeof message?.id === 'number' ? message.id : rpcId;
   switch (method) {
     case 'item/commandExecution/requestApproval':
       return {
         rpcId,
+        rpcResponseId,
         transportKind: 'v2_command',
         request: mapCommandExecutionApprovalRequest(rpcId, message.params),
       };
     case 'item/fileChange/requestApproval':
       return {
         rpcId,
+        rpcResponseId,
         transportKind: 'v2_file_change',
         request: mapFileChangeApprovalRequest(rpcId, message.params),
       };
     case 'item/permissions/requestApproval':
       return {
         rpcId,
+        rpcResponseId,
         transportKind: 'v2_permissions',
         request: mapPermissionsApprovalRequest(rpcId, message.params),
       };
     case 'execCommandApproval':
       return {
         rpcId,
+        rpcResponseId,
         transportKind: 'legacy_exec',
         request: mapLegacyExecApprovalRequest(rpcId, message.params),
       };
     case 'applyPatchApproval':
       return {
         rpcId,
+        rpcResponseId,
         transportKind: 'legacy_apply_patch',
         request: mapLegacyApplyPatchApprovalRequest(rpcId, message.params),
       };
@@ -2103,13 +2110,17 @@ function classifyApprovedExecutionSignal(method: unknown): string | null {
       return 'turn_started';
     case 'turncompleted':
       return 'turn_completed';
+    case 'serverrequestresolved':
+      return 'server_request_resolved';
     default:
       return isAgentDeltaNotificationMethod(normalized) ? 'assistant_delta' : null;
   }
 }
 
 function isThreadLevelApprovedExecutionSignal(signalKind: string): boolean {
-  return signalKind === 'thread_status_changed' || signalKind === 'turn_completed';
+  return signalKind === 'thread_status_changed'
+    || signalKind === 'turn_completed'
+    || signalKind === 'server_request_resolved';
 }
 
 function summarizeApprovedExecution(entry: ApprovedExecution) {
@@ -2318,7 +2329,7 @@ function summarizeNotificationMessage(message: any) {
     id: 'id' in (message ?? {}) ? String(message.id ?? '') : null,
     threadId: extractThreadIdFromNotification(message),
     turnId: extractNotificationTurnId(message?.params ?? null),
-    itemId: typeof message?.params?.item?.id === 'string' ? message.params.item.id : null,
+    itemId: extractItemId(message?.params ?? null),
     outputKind: typeof message?.params?.item?.output_kind === 'string'
       ? message.params.item.output_kind
       : null,

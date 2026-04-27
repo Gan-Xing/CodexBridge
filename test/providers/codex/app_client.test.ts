@@ -680,6 +680,44 @@ test('CodexAppClient responds to remembered command approvals with acceptForSess
   }]);
 });
 
+test('CodexAppClient preserves numeric JSON-RPC ids when responding to approvals', async () => {
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+  });
+  const sent: any[] = [];
+  client.send = (payload: any) => {
+    sent.push(payload);
+  };
+
+  client.handleMessage(JSON.stringify({
+    jsonrpc: '2.0',
+    id: 0,
+    method: 'item/commandExecution/requestApproval',
+    params: {
+      threadId: 'thread-numeric',
+      turnId: 'turn-numeric',
+      itemId: 'item-numeric',
+      reason: 'command failed; retry without sandbox?',
+      command: 'python3 update-record.py',
+      cwd: '/home/ubuntu/dev/CodexBridge',
+      availableDecisions: ['accept', 'decline'],
+    },
+  }));
+
+  await client.respondToApproval({
+    requestId: '0',
+    option: 1,
+  });
+
+  assert.deepEqual(sent, [{
+    jsonrpc: '2.0',
+    id: 0,
+    result: {
+      decision: 'accept',
+    },
+  }]);
+});
+
 test('CodexAppClient keeps waiting past the nominal timeout while an approval request is pending', async () => {
   let now = 0;
   let approvalSent = false;
