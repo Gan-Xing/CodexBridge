@@ -7123,6 +7123,75 @@ test('/auto add natural language can create multiple daily schedules from one re
   assert.match(listText, /待办事项整理 \(daily 17:30 UTC\)/);
 });
 
+test('/auto edit updates the pending automation draft instead of replacing it', async () => {
+  const { runtime, openai } = makeRuntime({
+    defaultCwd: '/tmp/codexbridge-auto-edit-natural',
+  });
+  const originalStartTurn = openai.startTurn.bind(openai);
+  openai.startTurn = async (params: any) => {
+    const parserInput = String(params?.inputText ?? '');
+    if (parserInput.includes('automation 草案规范化器')) {
+      return {
+        outputText: JSON.stringify({
+          valid: true,
+          title: '待办事项整理',
+          mode: 'standalone',
+          schedules: [
+            { kind: 'daily', hour: 8, minute: 0 },
+            { kind: 'daily', hour: 13, minute: 0 },
+            { kind: 'daily', hour: 17, minute: 30 },
+          ],
+          task: '把待办事项整理以后发送到我的微信上',
+        }),
+      };
+    }
+    if (parserInput.includes('automation 草案编辑器')) {
+      assert.match(parserInput, /当前草案 JSON/);
+      assert.match(parserInput, /把待办事项整理以后发送到我的微信上/);
+      assert.match(parserInput, /只把时间改成每天早上9点，任务内容不变/);
+      return {
+        outputText: JSON.stringify({
+          valid: true,
+          title: '待办事项整理',
+          mode: 'standalone',
+          schedules: [
+            { kind: 'daily', hour: 9, minute: 0 },
+          ],
+          task: '把待办事项整理以后发送到我的微信上',
+        }),
+      };
+    }
+    return originalStartTurn(params);
+  };
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-edit-natural-1',
+    text: '/auto add 每天早上 8:00、中午 13:00 以及下午 17:30，都把待办事项整理以后，发到我的微信上',
+  });
+
+  const edited = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-edit-natural-1',
+    text: '/auto edit 只把时间改成每天早上9点，任务内容不变',
+  });
+
+  const editText = edited.messages.map((entry: any) => entry.text ?? '').join('\n');
+  assert.match(editText, /自动化草案 \| 待办事项整理/);
+  assert.match(editText, /计划：daily 09:00 UTC/);
+  assert.doesNotMatch(editText, /daily 08:00 UTC/);
+  assert.match(editText, /任务：把待办事项整理以后发送到我的微信上/);
+
+  const confirmed = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-edit-natural-1',
+    text: '/auto confirm',
+  });
+  const confirmText = confirmed.messages.map((entry: any) => entry.text ?? '').join('\n');
+  assert.match(confirmText, /自动化任务已创建/);
+  assert.match(confirmText, /计划：daily 09:00 UTC/);
+});
+
 test('/auto rename and /auto del update and remove automation jobs', async () => {
   const { runtime } = makeRuntime({
     defaultCwd: '/tmp/codexbridge-auto-rename',

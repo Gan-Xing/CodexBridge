@@ -6505,14 +6505,30 @@ export class BridgeCoordinator {
     if (activeResponse) {
       return activeResponse;
     }
-    const replacement = extractAutomationEditBody(event.text);
-    if (!replacement) {
+    const instruction = extractAutomationEditBody(event.text);
+    if (!instruction) {
       return this.handleHelpsCommand(event, ['automation']);
     }
-    return this.handleAutomationAddCommand({
-      ...event,
-      text: `/auto add ${replacement}`,
-    });
+    const scopeRef = toScopeRef(event);
+    const draft = this.getPendingAutomationDraft(scopeRef);
+    if (!draft) {
+      return messageResponse([
+        this.t('coordinator.auto.noDraft'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const updatedDraft = await this.normalizeAutomationDraftEdit(event, scopeRef, draft, instruction);
+    if (updatedDraft?.mode === 'thread' && !updatedDraft.threadBridgeSessionId) {
+      return messageResponse([
+        this.t('coordinator.auto.threadModeNeedsSession'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    if (!updatedDraft) {
+      return messageResponse([
+        this.t('coordinator.auto.parseFailed'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    this.setPendingAutomationDraft(scopeRef, updatedDraft);
+    return this.renderAutomationDraftResponse(event, updatedDraft);
   }
 
   handleAutomationCancelCommand(event) {
@@ -6655,6 +6671,94 @@ export class BridgeCoordinator {
     }
     const agentsCandidate = await normalizeAutomationDraftWithOpenAIAgents(rawInput, locale).catch(() => null);
     return agentsCandidate ? this.buildPendingAutomationDraft(event, scopeRef, agentsCandidate, rawInput, 'agents-sdk') : null;
+  }
+
+  async normalizeAutomationDraftEdit(
+    event,
+    scopeRef: PlatformScopeRef,
+    draft: PendingAutomationDraft,
+    instruction: string,
+  ): Promise<PendingAutomationDraft | null> {
+    const locale = draft.locale ?? this.resolveScopeLocale(scopeRef, event);
+    const providerProfile = this.requireProviderProfile(draft.providerProfileId);
+    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+    const prompt = buildAutomationDraftEditPrompt(draft, instruction, normalizeLocale(locale) ?? 'zh-CN');
+    if (providerPlugin && typeof providerPlugin.startThread === 'function' && typeof providerPlugin.startTurn === 'function') {
+      const thread = await providerPlugin.startThread({
+        providerProfile,
+        cwd: draft.cwd,
+        title: 'Automation Draft Editor',
+        metadata: {
+          sourcePlatform: event.platform,
+          source: 'automation-draft-editor',
+        },
+      });
+      const parserSession = {
+        id: crypto.randomUUID(),
+        providerProfileId: providerProfile.id,
+        codexThreadId: thread.threadId,
+        cwd: thread.cwd ?? draft.cwd,
+        title: thread.title ?? 'Automation Draft Editor',
+        createdAt: this.now(),
+        updatedAt: this.now(),
+      };
+      const result = await providerPlugin.startTurn({
+        providerProfile,
+        bridgeSession: parserSession,
+        sessionSettings: {
+          bridgeSessionId: parserSession.id,
+          model: draft.initialSettings.model ?? null,
+          reasoningEffort: draft.initialSettings.reasoningEffort ?? null,
+          serviceTier: draft.initialSettings.serviceTier ?? null,
+          collaborationMode: null,
+          personality: null,
+          accessPreset: 'read-only',
+          approvalPolicy: 'never',
+          sandboxMode: 'read-only',
+          locale,
+          metadata: {},
+          updatedAt: this.now(),
+        },
+        event: {
+          ...event,
+          text: prompt,
+          cwd: parserSession.cwd ?? null,
+          locale,
+          attachments: [],
+        },
+        inputText: prompt,
+      });
+      const candidate = parseAutomationDraftCandidate(result.outputText);
+      if (candidate) {
+        return this.buildEditedPendingAutomationDraft(draft, instruction, candidate, 'codex');
+      }
+    }
+    const agentsCandidate = await normalizeAutomationDraftEditWithOpenAIAgents(draft, instruction, locale).catch(() => null);
+    return agentsCandidate ? this.buildEditedPendingAutomationDraft(draft, instruction, agentsCandidate, 'agents-sdk') : null;
+  }
+
+  buildEditedPendingAutomationDraft(
+    draft: PendingAutomationDraft,
+    instruction: string,
+    candidate: AutomationDraftCandidate,
+    normalizedBy: 'codex' | 'agents-sdk',
+  ): PendingAutomationDraft | null {
+    const schedules = getAutomationCandidateSchedules(candidate);
+    if (schedules.length === 0) {
+      return null;
+    }
+    return {
+      ...draft,
+      createdAt: this.now(),
+      rawInput: appendAutomationDraftEditInput(draft.rawInput, instruction),
+      normalizedBy,
+      title: candidate.title,
+      mode: candidate.mode,
+      schedule: cloneAutomationSchedule(schedules[0]),
+      schedules: schedules.map((schedule) => cloneAutomationSchedule(schedule)),
+      prompt: candidate.prompt,
+      threadBridgeSessionId: candidate.mode === 'thread' ? draft.threadBridgeSessionId : null,
+    };
   }
 
   resolveAutomationJobForScope(event, token) {
@@ -8288,6 +8392,23 @@ async function normalizeAutomationDraftWithOpenAIAgents(
   return parseAutomationDraftCandidate(output ?? '');
 }
 
+async function normalizeAutomationDraftEditWithOpenAIAgents(
+  draft: PendingAutomationDraft,
+  instruction: string,
+  locale: string | null,
+): Promise<AutomationDraftCandidate | null> {
+  if (!resolveOpenAIAgentRuntimeConfig().apiKey) {
+    return null;
+  }
+  const normalizedLocale = normalizeLocale(locale) ?? 'zh-CN';
+  const output = await runOpenAIAgentJson({
+    name: 'CodexBridge Automation Draft Editor',
+    instructions: 'Merge automation draft edit instructions into the existing draft as strict JSON only. Do not use markdown.',
+    input: buildAutomationDraftEditPrompt(draft, instruction, normalizedLocale),
+  });
+  return parseAutomationDraftCandidate(output ?? '');
+}
+
 async function normalizeAssistantRecordUpdateWithOpenAIAgents(
   record: AssistantRecord,
   instructions: string[],
@@ -9778,6 +9899,85 @@ ${rawInput}`;
   return localizedInstruction.trim();
 }
 
+function buildAutomationDraftEditPrompt(draft: PendingAutomationDraft, instruction: string, locale: SupportedLocale): string {
+  const currentDraft = {
+    title: draft.title,
+    mode: draft.mode,
+    schedules: getAutomationDraftSchedules(draft).map((schedule) => automationScheduleToModelJson(schedule)),
+    task: draft.prompt,
+  };
+  const localizedInstruction = locale === 'zh-CN'
+    ? `你是 CodexBridge 的 automation 草案编辑器。请把用户的“修改意见”合并到“当前草案”里，输出更新后的完整 automation 草案 JSON。
+只返回 JSON，不要 Markdown，不要解释。
+
+这是编辑已有草案，不是重新新建草案。
+
+返回格式：
+{
+  "valid": true,
+  "title": "简短标题",
+  "mode": "standalone" | "thread",
+  "schedules": [
+    {
+      "kind": "daily",
+      "hour": 8,
+      "minute": 0
+    }
+  ],
+  "task": "每次到点真正要发送给 Codex 执行的完整任务文本"
+}
+
+编辑规则：
+- 修改意见只覆盖它明确提到的字段；没有提到的 title / mode / schedules / task 必须从当前草案保留。
+- 如果用户说“任务不变/内容不变/只改时间”，必须保留当前 task。
+- 如果用户只改任务内容，必须保留当前 schedules。
+- 如果用户给出多个独立时间点，例如“每天 8:00、13:00、17:30”，输出多个 schedules。
+- task 不要包含调度说明；它只描述每次执行时要做什么。
+- 不要把当前草案丢掉后仅按修改意见重新生成。
+- 如果无法可靠合并，返回 {"valid": false, "reason": "简短原因"}。
+
+当前草案 JSON：
+${JSON.stringify(currentDraft, null, 2)}
+
+修改意见：
+${instruction}`
+    : `You are the CodexBridge automation draft editor. Merge the user's edit instruction into the current draft and output the updated full automation draft JSON.
+Return JSON only. Do not use markdown or explanations.
+
+This edits an existing draft. It is not a new draft.
+
+Return format:
+{
+  "valid": true,
+  "title": "short title",
+  "mode": "standalone" | "thread",
+  "schedules": [
+    {
+      "kind": "daily",
+      "hour": 8,
+      "minute": 0
+    }
+  ],
+  "task": "complete task text to send to Codex each time"
+}
+
+Edit rules:
+- Only override fields explicitly mentioned by the edit instruction. Preserve title / mode / schedules / task from the current draft when not mentioned.
+- If the user says the task/content should stay unchanged, preserve the current task.
+- If the user only changes the task, preserve the current schedules.
+- If the user gives multiple independent times, such as "daily at 8:00, 13:00, and 17:30", return multiple schedules.
+- The task must not include schedule wording. It should only describe what to do on each run.
+- Do not discard the current draft and regenerate only from the edit instruction.
+- If the edit cannot be merged reliably, return {"valid": false, "reason": "short reason"}.
+
+Current draft JSON:
+${JSON.stringify(currentDraft, null, 2)}
+
+Edit instruction:
+${instruction}`;
+  return localizedInstruction.trim();
+}
+
 function parseAutomationDraftCandidate(text: string): AutomationDraftCandidate | null {
   const payload = extractFirstJsonObject(text);
   if (!payload) {
@@ -9904,6 +10104,26 @@ function cloneAutomationSchedule(schedule: AutomationSchedule): AutomationSchedu
   };
 }
 
+function automationScheduleToModelJson(schedule: AutomationSchedule): Record<string, unknown> {
+  if (schedule.kind === 'interval') {
+    return {
+      kind: 'interval',
+      everySeconds: schedule.everySeconds,
+    };
+  }
+  if (schedule.kind === 'daily') {
+    return {
+      kind: 'daily',
+      hour: schedule.hour,
+      minute: schedule.minute,
+    };
+  }
+  return {
+    kind: 'cron',
+    expression: schedule.expression,
+  };
+}
+
 function getAutomationCandidateSchedules(candidate: AutomationDraftCandidate): AutomationSchedule[] {
   const schedules = Array.isArray(candidate.schedules) && candidate.schedules.length > 0
     ? candidate.schedules
@@ -9923,6 +10143,15 @@ function formatAutomationDraftSchedules(draft: PendingAutomationDraft): string {
   return getAutomationDraftSchedules(draft)
     .map((schedule) => schedule.label)
     .join('；');
+}
+
+function appendAutomationDraftEditInput(rawInput: string, instruction: string): string {
+  const base = String(rawInput ?? '').trim();
+  const edit = compactWhitespace(instruction);
+  if (!base) {
+    return edit;
+  }
+  return `${base}\nEdit: ${edit}`;
 }
 
 function extractFirstJsonObject(text: string): string | null {
@@ -11040,7 +11269,7 @@ function getCommandHelpSpecs(i18n: Translator) {
       '/auto add 工作日晚上6点检查部署状态，异常时通知我',
       '/auto add 每天早上8点、中午13点、下午17点半，把待办事项整理后发到微信',
       '/auto confirm',
-      '/auto edit 每小时检查一次部署状态，有变化发送给我',
+      '/auto edit 只把时间改成每小时，任务内容不变',
       '/auto cancel',
       '/auto list',
       '/auto show <index>',

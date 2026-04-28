@@ -162,7 +162,7 @@ Examples:
 /auto add 工作日晚上6点检查部署状态，异常时通知我
 /auto add 每天早上8点、中午13点、下午17点半，把待办事项整理后发到微信
 /auto confirm
-/auto edit 每小时检查一次部署状态，有变化发送给我
+/auto edit 只把时间改成每小时，任务内容不变
 /auto cancel
 /weibo
 /weibo top 10
