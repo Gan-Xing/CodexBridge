@@ -378,9 +378,9 @@ Examples:
 
 Create and manage scheduled background jobs. Results are always delivered back to the same WeChat chat.
 
-- `/auto add ...` now uses a two-phase flow:
-  - first it creates a draft
-  - then `/auto confirm` persists the job
+- `/auto add ...` uses natural language first:
+  - Codex turns the request into one or more schedule drafts
+  - `/auto confirm` persists the job or jobs
 - default mode is `standalone`
 - `thread` mode reuses the current bound session and requires an existing scope session
 - `daily` and `cron` schedules are interpreted in `UTC`
@@ -392,11 +392,10 @@ Examples:
 /auto add 每30分钟检查一次系统状态，有变化发送给我
 /auto add 每天早上7点调用 news skill 给我发送到微信
 /auto add 工作日晚上6点检查部署状态，异常时通知我
+/auto add 每天早上8点、中午13点、下午17点半，把待办事项整理后发到微信
 /auto confirm
 /auto edit 每小时检查一次部署状态，有变化发送给我
 /auto cancel
-/auto add every 30m | 检查部署状态，有变化再告诉我
-/auto add thread every 10m | 继续跟进当前线程里的部署情况
 /auto list
 /auto show 1
 /auto pause 1

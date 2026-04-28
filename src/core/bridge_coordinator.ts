@@ -126,17 +126,19 @@ type RetryableRequestSnapshot = {
 type AutomationDraftCandidate = {
   title: string;
   mode: AutomationMode;
-  schedule: AutomationSchedule;
+  schedule?: AutomationSchedule;
+  schedules?: AutomationSchedule[];
   prompt: string;
 };
 
 type PendingAutomationDraft = {
   createdAt: number;
   rawInput: string;
-  normalizedBy: 'explicit' | 'codex';
+  normalizedBy: 'explicit' | 'codex' | 'agents-sdk';
   title: string;
   mode: AutomationMode;
   schedule: AutomationSchedule;
+  schedules: AutomationSchedule[];
   prompt: string;
   providerProfileId: string;
   locale: string | null;
@@ -6405,22 +6407,19 @@ export class BridgeCoordinator {
     if (!rawInput) {
       return this.handleHelpsCommand(event, ['automation']);
     }
-    const parsed = parseAutomationAddSpec(event.text);
-    if (parsed?.mode === 'thread' && !this.bridgeSessions.resolveScopeSession(scopeRef)) {
+    let draft = await this.normalizeAutomationDraftFromNaturalLanguage(event, scopeRef, rawInput);
+    if (!draft) {
+      const parsed = parseAutomationAddSpec(event.text);
+      draft = parsed ? this.buildPendingAutomationDraft(event, scopeRef, parsed, rawInput, 'explicit') : null;
+    }
+    if (draft?.mode === 'thread' && !this.bridgeSessions.resolveScopeSession(scopeRef)) {
       return messageResponse([
         this.t('coordinator.auto.threadModeNeedsSession'),
       ], this.buildScopedSessionMeta(event));
     }
-    let draft = null;
-    if (parsed) {
-      draft = this.buildPendingAutomationDraft(event, scopeRef, parsed, rawInput, 'explicit');
-    } else {
-      draft = await this.normalizeAutomationDraftFromNaturalLanguage(event, scopeRef, rawInput);
-    }
     if (!draft) {
       return messageResponse([
         this.t('coordinator.auto.parseFailed'),
-        this.t('coordinator.auto.emptyHint'),
       ], this.buildScopedSessionMeta(event));
     }
     this.setPendingAutomationDraft(scopeRef, draft);
@@ -6439,50 +6438,63 @@ export class BridgeCoordinator {
         this.t('coordinator.auto.noDraft'),
       ], this.buildScopedSessionMeta(event));
     }
-    let targetSession = null;
+    let threadTargetSession = null;
     if (draft.mode === 'thread') {
-      targetSession = draft.threadBridgeSessionId
+      threadTargetSession = draft.threadBridgeSessionId
         ? this.bridgeSessions.getSessionById?.(draft.threadBridgeSessionId) ?? null
         : null;
-      if (!targetSession) {
+      if (!threadTargetSession) {
         this.clearPendingAutomationDraft(scopeRef);
         return messageResponse([
           this.t('coordinator.auto.threadModeNeedsSession'),
         ], this.buildScopedSessionMeta(event));
       }
-    } else {
-      targetSession = await this.bridgeSessions.createDetachedSession({
-        providerProfileId: draft.providerProfileId,
-        cwd: draft.cwd,
-        title: `Automation | ${draft.title}`,
-        initialSettings: {
-          ...draft.initialSettings,
-        },
-        providerStartOptions: {
-          sourcePlatform: event.platform,
-          source: 'automation',
-        },
-      });
     }
-    const job = this.automationJobs.createJob({
-      scopeRef,
-      title: draft.title,
-      mode: draft.mode,
-      providerProfileId: draft.providerProfileId,
-      bridgeSessionId: targetSession.id,
-      cwd: draft.cwd,
-      prompt: draft.prompt,
-      locale: draft.locale,
-      schedule: draft.schedule,
-    });
+    const schedules = getAutomationDraftSchedules(draft);
+    const jobs = [];
+    for (const schedule of schedules) {
+      const targetSession = draft.mode === 'thread'
+        ? threadTargetSession
+        : await this.bridgeSessions.createDetachedSession({
+          providerProfileId: draft.providerProfileId,
+          cwd: draft.cwd,
+          title: schedules.length > 1
+            ? `Automation | ${draft.title} | ${schedule.label}`
+            : `Automation | ${draft.title}`,
+          initialSettings: {
+            ...draft.initialSettings,
+          },
+          providerStartOptions: {
+            sourcePlatform: event.platform,
+            source: 'automation',
+          },
+        });
+      const jobTitle = schedules.length > 1
+        ? `${draft.title} (${schedule.label})`
+        : draft.title;
+      jobs.push(this.automationJobs.createJob({
+        scopeRef,
+        title: jobTitle,
+        mode: draft.mode,
+        providerProfileId: draft.providerProfileId,
+        bridgeSessionId: targetSession.id,
+        cwd: draft.cwd,
+        prompt: draft.prompt,
+        locale: draft.locale,
+        schedule,
+      }));
+    }
     this.clearPendingAutomationDraft(scopeRef);
+    const firstJob = jobs[0];
     return messageResponse([
-      this.t('coordinator.auto.added'),
-      this.t('coordinator.auto.title', { value: job.title }),
-      this.t('coordinator.auto.mode', { value: formatAutomationMode(job.mode, this.currentI18n) }),
-      this.t('coordinator.auto.schedule', { value: job.schedule.label }),
+      jobs.length > 1
+        ? this.t('coordinator.auto.addedMultiple', { count: jobs.length })
+        : this.t('coordinator.auto.added'),
+      this.t('coordinator.auto.title', { value: draft.title }),
+      this.t('coordinator.auto.mode', { value: formatAutomationMode(draft.mode, this.currentI18n) }),
+      this.t('coordinator.auto.schedule', { value: formatAutomationDraftSchedules(draft) }),
       this.t('coordinator.auto.nextRun', {
-        value: formatRelativeTimeLocalized(job.nextRunAt, this.currentI18n.locale, this.now()),
+        value: firstJob ? formatRelativeTimeLocalized(firstJob.nextRunAt, this.currentI18n.locale, this.now()) : this.t('common.none'),
       }),
       this.t('coordinator.auto.deliveryTarget'),
     ], this.buildScopedSessionMeta(event));
@@ -6521,7 +6533,7 @@ export class BridgeCoordinator {
     return messageResponse([
       this.t('coordinator.auto.draftTitle', { title: draft.title }),
       this.t('coordinator.auto.mode', { value: formatAutomationMode(draft.mode, this.currentI18n) }),
-      this.t('coordinator.auto.schedule', { value: draft.schedule.label }),
+      this.t('coordinator.auto.schedule', { value: formatAutomationDraftSchedules(draft) }),
       this.t('coordinator.auto.prompt', { value: draft.prompt }),
       this.t('coordinator.auto.deliveryTarget'),
       this.t('coordinator.auto.draftNotice'),
@@ -6536,13 +6548,14 @@ export class BridgeCoordinator {
     scopeRef: PlatformScopeRef,
     candidate: AutomationDraftCandidate,
     rawInput: string,
-    normalizedBy: 'explicit' | 'codex',
+    normalizedBy: 'explicit' | 'codex' | 'agents-sdk',
   ): PendingAutomationDraft | null {
     const boundSession = this.bridgeSessions.resolveScopeSession(scopeRef);
     const providerProfile = boundSession
       ? this.requireProviderProfile(boundSession.providerProfileId)
       : this.resolveScopeProviderProfile(scopeRef);
-    if (candidate.mode === 'thread' && !boundSession) {
+    const schedules = getAutomationCandidateSchedules(candidate);
+    if (schedules.length === 0) {
       return null;
     }
     const inheritedSettings = boundSession
@@ -6556,7 +6569,8 @@ export class BridgeCoordinator {
       normalizedBy,
       title: candidate.title,
       mode: candidate.mode,
-      schedule: cloneAutomationSchedule(candidate.schedule),
+      schedule: cloneAutomationSchedule(schedules[0]),
+      schedules: schedules.map((schedule) => cloneAutomationSchedule(schedule)),
       prompt: candidate.prompt,
       providerProfileId: providerProfile.id,
       locale,
@@ -6581,6 +6595,10 @@ export class BridgeCoordinator {
       ? this.requireProviderProfile(boundSession.providerProfileId)
       : this.resolveScopeProviderProfile(scopeRef);
     const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+    if (!providerPlugin || typeof providerPlugin.startThread !== 'function' || typeof providerPlugin.startTurn !== 'function') {
+      const agentsCandidate = await normalizeAutomationDraftWithOpenAIAgents(rawInput, this.resolveScopeLocale(scopeRef, event)).catch(() => null);
+      return agentsCandidate ? this.buildPendingAutomationDraft(event, scopeRef, agentsCandidate, rawInput, 'agents-sdk') : null;
+    }
     const inheritedSettings = boundSession
       ? this.bridgeSessions.getSessionSettings(boundSession.id)
       : null;
@@ -6632,10 +6650,11 @@ export class BridgeCoordinator {
       inputText: parserPrompt,
     });
     const candidate = parseAutomationDraftCandidate(result.outputText);
-    if (!candidate) {
-      return null;
+    if (candidate) {
+      return this.buildPendingAutomationDraft(event, scopeRef, candidate, rawInput, 'codex');
     }
-    return this.buildPendingAutomationDraft(event, scopeRef, candidate, rawInput, 'codex');
+    const agentsCandidate = await normalizeAutomationDraftWithOpenAIAgents(rawInput, locale).catch(() => null);
+    return agentsCandidate ? this.buildPendingAutomationDraft(event, scopeRef, agentsCandidate, rawInput, 'agents-sdk') : null;
   }
 
   resolveAutomationJobForScope(event, token) {
@@ -8253,6 +8272,22 @@ async function normalizeAssistantRecordDraftWithOpenAIAgents(
   return parseAssistantRecordDraftCandidate(output, rawInput, forcedType, fallbackDraft, 'agents-sdk');
 }
 
+async function normalizeAutomationDraftWithOpenAIAgents(
+  rawInput: string,
+  locale: string | null,
+): Promise<AutomationDraftCandidate | null> {
+  if (!resolveOpenAIAgentRuntimeConfig().apiKey) {
+    return null;
+  }
+  const normalizedLocale = normalizeLocale(locale) ?? 'zh-CN';
+  const output = await runOpenAIAgentJson({
+    name: 'CodexBridge Automation Draft Normalizer',
+    instructions: 'Normalize automation requests as strict JSON only. Do not use markdown.',
+    input: buildAutomationDraftPrompt(rawInput, normalizedLocale),
+  });
+  return parseAutomationDraftCandidate(output ?? '');
+}
+
 async function normalizeAssistantRecordUpdateWithOpenAIAgents(
   record: AssistantRecord,
   instructions: string[],
@@ -9598,102 +9633,143 @@ function buildAutomationDraftPrompt(rawInput: string, locale: SupportedLocale): 
     ? '默认 mode 是 standalone；只有用户明确说“继续当前线程/当前对话/沿用当前上下文”时才用 thread。'
     : 'Default mode is standalone. Use thread only when the user explicitly asks to continue the current thread or reuse the current conversation context.';
   const localizedInstruction = locale === 'zh-CN'
-    ? `你是 CodexBridge 的 automation 草案规范化器。请把用户的自然语言请求转换成 JSON，仅返回 JSON，不要加解释。
+    ? `你是 CodexBridge 的 automation 草案规范化器。请理解用户的自然语言意图，并转换成 JSON，仅返回 JSON，不要加解释。
 
 支持的结果格式：
 {
   "valid": true,
   "title": "简短标题",
   "mode": "standalone" | "thread",
+  "schedules": [
+    {
+      "kind": "interval",
+      "everySeconds": 1800
+    }
+  ],
+  "task": "真正执行时要发送给 Codex 的任务文本"
+}
+或
+{
+  "valid": true,
+  "title": "简短标题",
+  "mode": "standalone" | "thread",
+  "schedules": [
+    {
+      "kind": "daily",
+      "hour": 7,
+      "minute": 0
+    }
+  ],
+  "task": "真正执行时要发送给 Codex 的任务文本"
+}
+或
+{
+  "valid": true,
+  "title": "简短标题",
+  "mode": "standalone" | "thread",
+  "schedules": [
+    {
+      "kind": "cron",
+      "expression": "0 18 * * 1-5"
+    }
+  ],
+  "task": "真正执行时要发送给 Codex 的任务文本"
+}
+也兼容单个 schedule：
+{
+  "valid": true,
+  "title": "简短标题",
+  "mode": "standalone" | "thread",
   "schedule": {
     "kind": "interval",
     "everySeconds": 1800
-  }
-}
-或
-{
-  "valid": true,
-  "title": "简短标题",
-  "mode": "standalone" | "thread",
-  "schedule": {
-    "kind": "daily",
-    "hour": 7,
-    "minute": 0
-  }
-}
-或
-{
-  "valid": true,
-  "title": "简短标题",
-  "mode": "standalone" | "thread",
-  "schedule": {
-    "kind": "cron",
-    "expression": "0 18 * * 1-5"
-  }
-}
-并且总是附带：
-{
+  },
   "task": "真正执行时要发送给 Codex 的任务文本"
 }
 
-规则：
-- 只允许三种 schedule.kind：interval / daily / cron
-- interval 必须给 everySeconds，单位秒，且至少 60
-- daily 和 cron 按 UTC 理解
-- 用户提到“工作日/周一到周五”等规则时，优先输出 cron
+理解要求：
+- 用户可以完全用自然语言描述时间和任务，不需要写 every/daily/cron。
+- 只允许三种 schedule.kind：interval / daily / cron。
+- interval 必须给 everySeconds，单位秒，且至少 60。
+- daily 和 cron 按 UTC 理解。
+- 如果用户给出多个独立时间点，例如“每天 8:00、13:00、17:30”，输出多个 schedules，不要返回 invalid。
+- 多个每日时间点优先输出多个 daily schedule；多个工作日时间点优先输出多个 cron schedule。
+- 用户提到“工作日/周一到周五”等规则时，优先输出 cron。
 - ${localizedModeHint}
-- 保留用户提到的 skill 名称到 task 里
-- 不要把“发送到微信/通知我/发给我”删掉，但 delivery 本身由桥接处理
+- 保留用户提到的 skill 名称到 task 里。
+- 不要把“发送到微信/通知我/发给我”删掉，但 delivery 本身由桥接处理。
+- task 应该是每次到点真正要发给 Codex 执行的完整任务，不要包含调度说明。
 - 如果无法可靠解析，返回：
   {"valid": false, "reason": "简短原因"}
 
 用户请求：
 ${rawInput}`
-    : `You are the CodexBridge automation-draft normalizer. Convert the user's natural-language request into JSON and return JSON only with no explanation.
+    : `You are the CodexBridge automation-draft normalizer. Understand the user's natural-language intent and convert it into JSON. Return JSON only with no explanation.
 
 Supported result formats:
 {
   "valid": true,
   "title": "short title",
   "mode": "standalone" | "thread",
+  "schedules": [
+    {
+      "kind": "interval",
+      "everySeconds": 1800
+    }
+  ],
+  "task": "task text to run later"
+}
+or
+{
+  "valid": true,
+  "title": "short title",
+  "mode": "standalone" | "thread",
+  "schedules": [
+    {
+      "kind": "daily",
+      "hour": 7,
+      "minute": 0
+    }
+  ],
+  "task": "task text to run later"
+}
+or
+{
+  "valid": true,
+  "title": "short title",
+  "mode": "standalone" | "thread",
+  "schedules": [
+    {
+      "kind": "cron",
+      "expression": "0 18 * * 1-5"
+    }
+  ],
+  "task": "task text to run later"
+}
+Single schedule is also accepted:
+{
+  "valid": true,
+  "title": "short title",
+  "mode": "standalone" | "thread",
   "schedule": {
     "kind": "interval",
     "everySeconds": 1800
   },
   "task": "task text to run later"
 }
-or
-{
-  "valid": true,
-  "title": "short title",
-  "mode": "standalone" | "thread",
-  "schedule": {
-    "kind": "daily",
-    "hour": 7,
-    "minute": 0
-  },
-  "task": "task text to run later"
-}
-or
-{
-  "valid": true,
-  "title": "short title",
-  "mode": "standalone" | "thread",
-  "schedule": {
-    "kind": "cron",
-    "expression": "0 18 * * 1-5"
-  },
-  "task": "task text to run later"
-}
 
-Rules:
-- Only use interval / daily / cron
-- interval requires everySeconds in seconds and must be at least 60
-- daily and cron are interpreted in UTC
-- Prefer cron when the user says weekdays / workdays / Monday-Friday
+Requirements:
+- The user may describe schedule and task entirely in natural language. They do not need to write every/daily/cron.
+- Only use interval / daily / cron.
+- interval requires everySeconds in seconds and must be at least 60.
+- daily and cron are interpreted in UTC.
+- If the user gives multiple independent times, such as "daily at 8:00, 13:00, and 17:30", return multiple schedules instead of invalid.
+- Prefer multiple daily schedules for multiple daily times. Prefer multiple cron schedules for multiple weekday/workday times.
+- Prefer cron when the user says weekdays / workdays / Monday-Friday.
 - ${localizedModeHint}
-- Preserve skill names in the task text
-- Do not remove "send to WeChat / notify me / send me" intent from the task text
+- Preserve skill names in the task text.
+- Do not remove "send to WeChat / notify me / send me" intent from the task text.
+- The task should be the complete prompt to run at each scheduled time. Do not include schedule wording inside task.
 - If the request cannot be parsed reliably, return:
   {"valid": false, "reason": "short reason"}
 
@@ -9723,16 +9799,39 @@ function parseAutomationDraftCandidate(text: string): AutomationDraftCandidate |
   const title = compactWhitespace(String(parsed.title ?? '')) || deriveAutomationTitle(prompt);
   const modeValue = String(parsed.mode ?? 'standalone').trim().toLowerCase();
   const mode: AutomationMode = modeValue === 'thread' ? 'thread' : 'standalone';
-  const schedule = normalizeAutomationSchedule(parsed.schedule ?? null);
-  if (!schedule) {
+  const schedules = normalizeAutomationSchedules(parsed);
+  if (schedules.length === 0) {
     return null;
   }
   return {
     title,
     mode,
-    schedule,
+    schedule: schedules[0],
+    schedules,
     prompt,
   };
+}
+
+function normalizeAutomationSchedules(parsed: Record<string, any>): AutomationSchedule[] {
+  const candidates = Array.isArray(parsed.schedules)
+    ? parsed.schedules
+    : Array.isArray(parsed.schedule)
+      ? parsed.schedule
+      : [parsed.schedule ?? null];
+  const schedules = candidates
+    .map((value) => normalizeAutomationSchedule(value))
+    .filter((schedule): schedule is AutomationSchedule => Boolean(schedule));
+  const seen = new Set<string>();
+  const unique = [];
+  for (const schedule of schedules) {
+    const key = JSON.stringify(schedule);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    unique.push(schedule);
+  }
+  return unique.slice(0, 12);
 }
 
 function normalizeAutomationSchedule(value: any): AutomationSchedule | null {
@@ -9803,6 +9902,27 @@ function cloneAutomationSchedule(schedule: AutomationSchedule): AutomationSchedu
     timeZone: schedule.timeZone,
     label: schedule.label,
   };
+}
+
+function getAutomationCandidateSchedules(candidate: AutomationDraftCandidate): AutomationSchedule[] {
+  const schedules = Array.isArray(candidate.schedules) && candidate.schedules.length > 0
+    ? candidate.schedules
+    : candidate.schedule
+      ? [candidate.schedule]
+      : [];
+  return schedules.filter(Boolean).slice(0, 12);
+}
+
+function getAutomationDraftSchedules(draft: PendingAutomationDraft): AutomationSchedule[] {
+  return Array.isArray(draft.schedules) && draft.schedules.length > 0
+    ? draft.schedules
+    : [draft.schedule];
+}
+
+function formatAutomationDraftSchedules(draft: PendingAutomationDraft): string {
+  return getAutomationDraftSchedules(draft)
+    .map((schedule) => schedule.label)
+    .join('；');
 }
 
 function extractFirstJsonObject(text: string): string | null {
@@ -10918,6 +11038,7 @@ function getCommandHelpSpecs(i18n: Translator) {
       '/auto add 每30分钟检查一次系统状态，有变化发送给我',
       '/auto add 每天早上7点调用 news skill 给我发送到微信',
       '/auto add 工作日晚上6点检查部署状态，异常时通知我',
+      '/auto add 每天早上8点、中午13点、下午17点半，把待办事项整理后发到微信',
       '/auto confirm',
       '/auto edit 每小时检查一次部署状态，有变化发送给我',
       '/auto cancel',
@@ -10932,8 +11053,8 @@ function getCommandHelpSpecs(i18n: Translator) {
     ],
     examples: [
       '/auto add 每30分钟检查一次系统状态，有变化发送给我',
+      '/auto add 每天早上8点、中午13点、下午17点半，把待办事项整理后发到微信',
       '/auto confirm',
-      '/auto add thread every 15m | 继续跟进当前线程里的排障进展',
       '/auto list',
       '/auto rename 1 晚间部署巡检',
       '/auto del 1',
@@ -10955,7 +11076,7 @@ function getCommandHelpSpecs(i18n: Translator) {
     examples: [
       '/weibo',
       '/weibo top 10',
-      '/auto add every 5m | /weibo top 10',
+      '/auto add 每5分钟把微博热搜前10条发给我',
       '/auto confirm',
     ],
     notes: [

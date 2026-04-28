@@ -6989,7 +6989,7 @@ test('/auto add creates a draft first and /auto confirm persists the standalone 
     text: '/auto add every 30m | 检查部署状态，有变化再告诉我',
   });
 
-  assert.equal(openai.startThreadCalls.length, 0);
+  assert.equal(openai.startThreadCalls.length, 1);
   assert.match(drafted.messages[0]?.text ?? '', /自动化草案 \| 检查部署状态，有变化再告诉我/);
   assert.match(drafted.messages[1]?.text ?? '', /模式：独立执行/);
   assert.match(drafted.messages[2]?.text ?? '', /计划：every 30m/);
@@ -7001,7 +7001,7 @@ test('/auto add creates a draft first and /auto confirm persists the standalone 
     text: '/auto confirm',
   });
 
-  assert.equal(openai.startThreadCalls.length, 1);
+  assert.equal(openai.startThreadCalls.length, 2);
   assert.match(added.messages[0]?.text ?? '', /自动化任务已创建/);
   assert.match(added.messages[1]?.text ?? '', /标题：检查部署状态，有变化再告诉我/);
 
@@ -7064,6 +7064,63 @@ test('/auto add natural language produces a draft through provider normalization
   assert.match(confirmText, /自动化任务已创建/);
   assert.match(confirmText, /标题：news 早报/);
   assert.equal(openai.startThreadCalls.length, 2);
+});
+
+test('/auto add natural language can create multiple daily schedules from one request', async () => {
+  const { runtime, openai } = makeRuntime({
+    defaultCwd: '/tmp/codexbridge-auto-multi-natural',
+  });
+  const originalStartTurn = openai.startTurn.bind(openai);
+  openai.startTurn = async (params: any) => {
+    const parserInput = String(params?.inputText ?? '');
+    if (parserInput.includes('automation-draft normalizer') || parserInput.includes('automation 草案规范化器')) {
+      return {
+        outputText: JSON.stringify({
+          valid: true,
+          title: '待办事项整理',
+          mode: 'standalone',
+          schedules: [
+            { kind: 'daily', hour: 8, minute: 0 },
+            { kind: 'daily', hour: 13, minute: 0 },
+            { kind: 'daily', hour: 17, minute: 30 },
+          ],
+          task: '把待办事项整理以后发送到我的微信上',
+        }),
+      };
+    }
+    return originalStartTurn(params);
+  };
+
+  const drafted = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-multi-natural-1',
+    text: '/auto add 每天早上 8:00、中午 13:00 以及下午 17:30，都把待办事项整理以后，发到我的微信上',
+  });
+
+  const draftText = drafted.messages.map((entry: any) => entry.text ?? '').join('\n');
+  assert.match(draftText, /自动化草案 \| 待办事项整理/);
+  assert.match(draftText, /计划：daily 08:00 UTC；daily 13:00 UTC；daily 17:30 UTC/);
+  assert.match(draftText, /任务：把待办事项整理以后发送到我的微信上/);
+
+  const confirmed = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-multi-natural-1',
+    text: '/auto confirm',
+  });
+  const confirmText = confirmed.messages.map((entry: any) => entry.text ?? '').join('\n');
+  assert.match(confirmText, /自动化任务已创建：3 项/);
+  assert.match(confirmText, /计划：daily 08:00 UTC；daily 13:00 UTC；daily 17:30 UTC/);
+
+  const listed = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-multi-natural-1',
+    text: '/auto list',
+  });
+  const listText = listed.messages.map((entry: any) => entry.text ?? '').join('\n');
+  assert.match(listText, /自动化任务 \| 3 项/);
+  assert.match(listText, /待办事项整理 \(daily 08:00 UTC\)/);
+  assert.match(listText, /待办事项整理 \(daily 13:00 UTC\)/);
+  assert.match(listText, /待办事项整理 \(daily 17:30 UTC\)/);
 });
 
 test('/auto rename and /auto del update and remove automation jobs', async () => {
