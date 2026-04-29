@@ -6,7 +6,11 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { formatPlatformScopeKey } from './contracts.js';
 import { parseSlashCommand } from './command_parser.js';
 import { NotFoundError } from './errors.js';
-import type { AssistantRecordDraft } from './assistant_record_service.js';
+import {
+  normalizeAssistantDraftForStorage,
+  normalizeAssistantRecordForStorage,
+  type AssistantRecordDraft,
+} from './assistant_record_service.js';
 import {
   createPendingTurnArtifactDeliveryState,
   createTurnArtifactContext,
@@ -1441,18 +1445,13 @@ export class BridgeCoordinator {
     forcedType: AssistantRecordType | null,
     localDraft: AssistantRecordDraft,
   ): Promise<AssistantRecordDraft> {
-    if (forcedType) {
-      return {
-        ...localDraft,
-        parsedJson: {
-          ...(localDraft.parsedJson ?? {}),
-          normalizer: 'forced-local',
-        },
-      };
-    }
-    const codexDraft = await this.normalizeAssistantRecordDraftWithCodex(event, scopeRef, rawInput, forcedType, localDraft).catch(() => null);
+    const timezone = extractEventTimezone(event);
+    const codexDraft = await this.normalizeAssistantRecordDraftWithCodex(event, scopeRef, rawInput, forcedType, localDraft, timezone).catch(() => null);
     if (codexDraft) {
-      return codexDraft;
+      return normalizeAssistantDraftForStorage(codexDraft, {
+        timezone,
+        now: this.now(),
+      });
     }
     const agentsDraft = await normalizeAssistantRecordDraftWithOpenAIAgents(
       rawInput,
@@ -1460,17 +1459,24 @@ export class BridgeCoordinator {
       this.currentI18n.locale,
       this.now(),
       localDraft,
+      timezone,
     ).catch(() => null);
     if (agentsDraft) {
-      return agentsDraft;
+      return normalizeAssistantDraftForStorage(agentsDraft, {
+        timezone,
+        now: this.now(),
+      });
     }
-    return {
+    return normalizeAssistantDraftForStorage({
       ...localDraft,
       parsedJson: {
         ...(localDraft.parsedJson ?? {}),
         normalizer: 'local',
       },
-    };
+    }, {
+      timezone,
+      now: this.now(),
+    });
   }
 
   async normalizeAssistantRecordDraftWithCodex(
@@ -1479,6 +1485,7 @@ export class BridgeCoordinator {
     rawInput: string,
     forcedType: AssistantRecordType | null,
     localDraft: AssistantRecordDraft,
+    timezone: string | null,
   ): Promise<AssistantRecordDraft | null> {
     const boundSession = this.bridgeSessions.resolveScopeSession(scopeRef);
     const providerProfile = boundSession
@@ -1511,7 +1518,7 @@ export class BridgeCoordinator {
       createdAt: this.now(),
       updatedAt: this.now(),
     };
-    const prompt = buildAssistantRecordDraftPrompt(rawInput, forcedType, locale, this.now());
+    const prompt = buildAssistantRecordDraftPrompt(rawInput, forcedType, locale, this.now(), timezone);
     const result = await providerPlugin.startTurn({
       providerProfile,
       bridgeSession: parserSession,
@@ -1844,7 +1851,13 @@ export class BridgeCoordinator {
       if (codexRecord) {
         return codexRecord;
       }
-      const agentsRecord = await normalizeAssistantRecordUpdateWithOpenAIAgents(record, instructions, this.currentI18n.locale, this.now()).catch(() => null);
+      const agentsRecord = await normalizeAssistantRecordUpdateWithOpenAIAgents(
+        record,
+        instructions,
+        this.currentI18n.locale,
+        this.now(),
+        record.timezone,
+      ).catch(() => null);
       if (agentsRecord) {
         return agentsRecord;
       }
@@ -1942,7 +1955,7 @@ export class BridgeCoordinator {
       createdAt: this.now(),
       updatedAt: this.now(),
     };
-    const prompt = buildAssistantRecordRewritePrompt(record, instructions, locale, this.now());
+    const prompt = buildAssistantRecordRewritePrompt(record, instructions, locale, this.now(), extractEventTimezone(event) ?? record.timezone);
     const result = await providerPlugin.startTurn({
       providerProfile,
       bridgeSession: parserSession,
@@ -8324,6 +8337,7 @@ async function normalizeAssistantRecordDraftWithOpenAIAgents(
   locale: string | null,
   now: number,
   fallbackDraft: AssistantRecordDraft,
+  timezone: string | null,
 ): Promise<AssistantRecordDraft | null> {
   if (!resolveOpenAIAgentRuntimeConfig().apiKey) {
     return null;
@@ -8331,7 +8345,7 @@ async function normalizeAssistantRecordDraftWithOpenAIAgents(
   const output = await runOpenAIAgentJson({
     name: 'CodexBridge Assistant Record Classifier',
     instructions: 'Classify assistant records as strict JSON only. Do not use markdown.',
-    input: buildAssistantRecordDraftPrompt(rawInput, forcedType, locale, now),
+    input: buildAssistantRecordDraftPrompt(rawInput, forcedType, locale, now, timezone),
   });
   return parseAssistantRecordDraftCandidate(output, rawInput, forcedType, fallbackDraft, 'agents-sdk');
 }
@@ -8374,6 +8388,7 @@ async function normalizeAssistantRecordUpdateWithOpenAIAgents(
   instructions: string[],
   locale: string | null,
   now: number,
+  timezone: string | null,
 ): Promise<{ record: AssistantRecord; normalizedBy: 'agents-sdk'; changeSummary: string | null } | null> {
   if (!resolveOpenAIAgentRuntimeConfig().apiKey) {
     return null;
@@ -8381,7 +8396,7 @@ async function normalizeAssistantRecordUpdateWithOpenAIAgents(
   const output = await runOpenAIAgentJson({
     name: 'CodexBridge Assistant Record Rewriter',
     instructions: 'Rewrite assistant records as strict JSON only. Do not use markdown.',
-    input: buildAssistantRecordRewritePrompt(record, instructions, locale, now),
+    input: buildAssistantRecordRewritePrompt(record, instructions, locale, now, timezone ?? record.timezone),
   });
   const candidate = parseAssistantRecordRewriteCandidate(output, record);
   if (!candidate) {
@@ -8715,6 +8730,7 @@ function buildAssistantRecordRewritePrompt(
   instructions: string[],
   locale: string | null,
   now: number,
+  timezone: string | null,
 ): string {
   const language = normalizeLocale(locale) === 'zh-CN' ? '中文' : 'English';
   const sourceRecord = {
@@ -8741,12 +8757,15 @@ function buildAssistantRecordRewritePrompt(
     '- 如果用户说“不是 A，是 B”，必须把 A 修正为 B。',
     '- 删除“帮我记一下、这个东西要记一下、帮我整理、之后还得记一下”等对 AI 的元指令，不要写进 content。',
     '- 如果用户给了安排、步骤、列表，请整理成清晰的多行内容。',
+    '- 所有相对时间都必须改写成绝对本地日期或绝对本地时间，不能把“昨天/今天/明天/下周四”原样保留在最终 content 里。',
+    '- 如果用户修改了时间，content、dueAt、remindAt、recurrence 要保持一致。',
+    '- title 要短，不能直接复制整段正文。',
     '- 不确定时保守更新，不要编造新事实。',
     '',
     'Schema:',
     '{"action":"update","type":"log|todo|reminder|note|uncategorized","title":"短标题","content":"完整合并后的内容","status":"pending|active|done|cancelled|archived","priority":"low|normal|high","dueAt":null,"remindAt":null,"recurrence":null,"project":null,"tags":[],"changeSummary":"这次具体改了什么","confidence":0.0}',
     '',
-    `当前时间：${new Date(now).toISOString()}`,
+    ...buildAssistantPromptTimeContext(now, timezone ?? record.timezone),
     '',
     '原记录 JSON：',
     JSON.stringify(sourceRecord, null, 2),
@@ -8824,12 +8843,12 @@ function applyAssistantRecordRewriteCandidate(
     attachments: record.attachments.map((attachment) => ({ ...attachment })),
     updatedAt: now,
   };
-  return {
+  return normalizeAssistantRecordForStorage({
     ...next,
     completedAt: candidate.status === 'done' ? (record.completedAt ?? now) : record.completedAt,
     cancelledAt: candidate.status === 'cancelled' ? (record.cancelledAt ?? now) : record.cancelledAt,
     archivedAt: candidate.status === 'archived' ? (record.archivedAt ?? now) : record.archivedAt,
-  };
+  }, { now });
 }
 
 function cloneAssistantRecord(record: AssistantRecord): AssistantRecord {
@@ -9614,16 +9633,46 @@ function buildAssistantUpdateDraftKey(scopeRef: PlatformScopeRef): string {
   return formatPlatformScopeKey(scopeRef.platform, scopeRef.externalScopeId);
 }
 
+function buildAssistantPromptTimeContext(now: number, timezone: string | null): string[] {
+  const resolvedTimezone = normalizeAssistantPromptTimezone(timezone);
+  return [
+    `当前 UTC 时间：${new Date(now).toISOString()}`,
+    `当前本地时区：${resolvedTimezone}`,
+    `当前本地时间：${formatAssistantPromptLocalDateTime(now, resolvedTimezone)}`,
+  ];
+}
+
+function formatAssistantPromptLocalDateTime(timestamp: number, timezone: string): string {
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
+  return `${formatter.format(new Date(timestamp))} ${timezone === 'Etc/UTC' ? 'UTC' : timezone}`;
+}
+
+function normalizeAssistantPromptTimezone(timezone: string | null): string {
+  const normalized = String(timezone ?? '').trim();
+  return normalized || 'Etc/UTC';
+}
+
 function buildAssistantRecordDraftPrompt(
   rawInput: string,
   forcedType: AssistantRecordType | null,
   locale: string | null,
   now: number,
+  timezone: string | null,
 ): string {
   const language = normalizeLocale(locale) === 'zh-CN' ? '中文' : 'English';
   const forcedTypeLine = forcedType
     ? `- 用户使用了强制分类命令，type 必须是 "${forcedType}"。`
     : '- 请根据语义自行选择 type。';
+  const timeContextLines = buildAssistantPromptTimeContext(now, timezone);
   return [
     `你是 CodexBridge 助理记录分类器。请用${language}把用户输入转换成一条结构化助理记录。`,
     '只返回严格 JSON，不要 Markdown，不要解释。',
@@ -9645,11 +9694,14 @@ function buildAssistantRecordDraftPrompt(
     '- 用户说高优先级、重要、必须今天完成、紧急时 priority 用 high。',
     '- title 要短，不能直接复制一整段长文本。',
     '- tags 保留 #标签，但不要带 # 前缀。',
+    '- 所有相对时间都必须换算成绝对本地日期或绝对本地时间，不能把“昨天/今天/明天/后天/下周四/本周五/今晚”原样写进 content。',
+    '- content 里涉及时间时，直接写成“YYYY-MM-DD HH:mm 时区”或“YYYY-MM-DD 时区”。',
+    '- 如果只有日期没有具体时分：todo 的 dueAt 默认用当天 23:59；reminder 不要编造 remindAt，可保留 null。',
     '- dueAt/remindAt 可返回 ISO 时间字符串或 null；没有明确时间就用 null，不要编造。',
     '- recurrence 可用简短自然语言或 null。',
     '- confidence 表示你对结构化结果的置信度，0 到 1。',
     '',
-    `当前时间：${new Date(now).toISOString()}`,
+    ...timeContextLines,
     '',
     '用户输入：',
     rawInput,
@@ -10610,12 +10662,12 @@ function assistantCommandNameForType(type: AssistantRecordType | null): string {
 function renderAssistantRecordTimeLine(record: AssistantRecord, i18n: Translator): string {
   if (record.type === 'reminder' && record.remindAt) {
     return i18n.t('coordinator.assistant.remindAtLine', {
-      value: formatDateTimeForAssistant(record.remindAt),
+      value: formatDateTimeForAssistant(record.remindAt, record.timezone),
     });
   }
   if (record.type === 'todo' && record.dueAt) {
     return i18n.t('coordinator.assistant.dueAtLine', {
-      value: formatDateTimeForAssistant(record.dueAt),
+      value: formatDateTimeForAssistant(record.dueAt, record.timezone),
     });
   }
   if (record.recurrence) {
@@ -10626,17 +10678,21 @@ function renderAssistantRecordTimeLine(record: AssistantRecord, i18n: Translator
   return '';
 }
 
-function formatDateTimeForAssistant(timestamp: number): string {
+function formatDateTimeForAssistant(timestamp: number, timezone: string | null = null): string {
   if (!Number.isFinite(timestamp)) {
     return '';
   }
-  const date = new Date(timestamp);
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
-  const hour = String(date.getHours()).padStart(2, '0');
-  const minute = String(date.getMinutes()).padStart(2, '0');
-  return `${year}-${month}-${day} ${hour}:${minute}`;
+  const resolvedTimezone = normalizeAssistantPromptTimezone(timezone);
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: resolvedTimezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+  return `${formatter.format(new Date(timestamp))} ${resolvedTimezone === 'Etc/UTC' ? 'UTC' : resolvedTimezone}`;
 }
 
 function inferAssistantRecordNaturalAction(input: string): AssistantRecordUpdateAction | null {

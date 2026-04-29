@@ -1831,9 +1831,9 @@ test('/helps lists all supported slash commands and help entrypoints', async () 
   assert.match(text, /\/review \(\/rv\) 对当前工作区改动运行原生 Codex 代码审查/);
   assert.match(text, /\/uploads \(\/up, \/ul\) 开启上传暂存模式/);
   assert.match(text, /\/as \(\/assistant\) 助理记录统一入口/);
-  assert.match(text, /\/todo \(\/td\) 强制保存或管理代办事项/);
-  assert.match(text, /\/remind \(\/rmd\) 强制保存或管理提醒事项/);
-  assert.match(text, /\/note \(\/nt\) 强制保存一条笔记/);
+  assert.match(text, /\/todo \(\/td\) 指定为代办类型的助理入口/);
+  assert.match(text, /\/remind \(\/rmd\) 指定为提醒类型的助理入口/);
+  assert.match(text, /\/note \(\/nt\) 指定为笔记类型的助理入口/);
   assert.match(text, /\/provider \(\/pd\) 查看可用 provider/);
   assert.match(text, /\/models \(\/ms\) 列出当前 provider 的可用模型/);
   assert.match(text, /\/model \(\/m\) 查看或切换当前 scope 的模型设置/);
@@ -1870,9 +1870,9 @@ test('/helps renders English help text when locale is set to en', async () => {
   assert.match(text, /\/review \(\/rv\) Run a native Codex code review for the current workspace changes/);
   assert.match(text, /\/uploads \(\/up, \/ul\) Enter upload staging mode/);
   assert.match(text, /\/as \(\/assistant\) Unified assistant record entry/);
-  assert.match(text, /\/todo \(\/td\) Force-save or manage todo records/);
-  assert.match(text, /\/remind \(\/rmd\) Force-save or manage reminder records/);
-  assert.match(text, /\/note \(\/nt\) Force-save a note record/);
+  assert.match(text, /\/todo \(\/td\) Typed assistant entry for todo records/);
+  assert.match(text, /\/remind \(\/rmd\) Typed assistant entry for reminder records/);
+  assert.match(text, /\/note \(\/nt\) Typed assistant entry for note records/);
   assert.match(text, /\/allow \(\/al\) Inspect and approve in-turn approval requests/);
   assert.match(text, /\/deny \(\/dn\) Deny the current in-turn approval request/);
   assert.match(text, /\/retry \(\/rt\) Retry the previous request in the same thread/);
@@ -2325,6 +2325,65 @@ test('/log saves and lists assistant log records', async () => {
   assert.deepEqual(records[0]?.tags, ['CodexBridge']);
 });
 
+test('/log uses model normalization and rewrites relative dates to absolute local dates', async () => {
+  const defaultCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-assistant-log-relative-'));
+  const fixedNow = Date.UTC(2026, 3, 29, 9, 30, 0);
+  const originalDateNow = Date.now;
+  Date.now = () => fixedNow;
+  try {
+    const { runtime, openai } = makeRuntime({ defaultCwd });
+    const originalStartTurn = openai.startTurn.bind(openai);
+    openai.startTurn = async (args: any) => {
+      openai.startTurnCalls.push(args);
+      if (String(args.inputText ?? '').includes('助理记录分类器')) {
+        return {
+          outputText: JSON.stringify({
+            type: 'log',
+            title: '昨天完成了停机坪的报价以及工程量的测算',
+            content: '昨天完成了停机坪的报价以及工程量的测算',
+            priority: 'normal',
+            dueAt: null,
+            remindAt: null,
+            recurrence: null,
+            project: null,
+            tags: [],
+            confidence: 0.91,
+          }),
+          turnId: `${args.bridgeSession.codexThreadId}-turn-1`,
+          threadId: args.bridgeSession.codexThreadId,
+          title: args.bridgeSession.title,
+        };
+      }
+      return originalStartTurn(args);
+    };
+
+    const saved = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-user-assistant-log-relative-1',
+      text: '/log 昨天完成了停机坪的报价以及工程量的测算',
+      metadata: {
+        timezone: 'Etc/UTC',
+      },
+    });
+
+    const savedText = saved.messages.map((message) => message.text ?? '').join('\n');
+    assert.match(savedText, /助理记录已保存/);
+    assert.match(savedText, /类型：日志/);
+    assert.doesNotMatch(savedText, /标题：昨天完成了停机坪的报价以及工程量的测算/);
+    assert.match(savedText, /内容：\n2026-04-28 UTC 完成了停机坪的报价以及工程量的测算/);
+
+    const record = runtime.repositories.assistantRecords.list()[0];
+    assert.equal(record?.type, 'log');
+    assert.equal(record?.parsedJson?.normalizer, 'codex');
+    assert.match(record?.title ?? '', /停机坪的报价以及工程量的测算/);
+    assert.match(record?.content ?? '', /2026-04-28 UTC/);
+    assert.doesNotMatch(record?.content ?? '', /昨天/);
+    assert.ok(openai.startTurnCalls.some((call: any) => String(call.inputText ?? '').includes('助理记录分类器')));
+  } finally {
+    Date.now = originalDateNow;
+  }
+});
+
 test('/as uses Codex classification for required same-day work instead of local keyword rules', async () => {
   const defaultCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-assistant-work-todo-'));
   const { runtime, openai } = makeRuntime({ defaultCwd });
@@ -2385,7 +2444,8 @@ test('/as uses Codex classification for required same-day work instead of local 
   assert.equal(record?.status, 'pending');
   assert.equal(record?.parsedJson?.normalizer, 'codex');
   assert.match(record?.content ?? '', /停机坪的测算/);
-  assert.match(record?.content ?? '', /今天必须做完/);
+  assert.match(record?.content ?? '', /2026-04-29 UTC 必须做完/);
+  assert.doesNotMatch(record?.content ?? '', /今天必须做完/);
   assert.doesNotMatch(record?.content ?? '', /给我列出来/);
   assert.doesNotMatch(record?.content ?? '', /高的优先级/);
   assert.ok(openai.startTurnCalls.some((call: any) => String(call.inputText ?? '').includes('助理记录分类器')));
@@ -2450,9 +2510,10 @@ test('/as edit modifies the pending assistant record instead of replacing it', a
   assert.equal(after?.id, before?.id);
   assert.equal(after?.type, 'reminder');
   assert.equal(after?.status, 'pending');
+  assert.match(after?.content ?? '', /提醒时间：\d{4}-\d{2}-\d{2} 11:00 UTC/);
   assert.match(after?.content ?? '', /李总/);
   assert.doesNotMatch(after?.content ?? '', /王总/);
-  assert.match(after?.content ?? '', /明天上午11点/);
+  assert.doesNotMatch(after?.content ?? '', /明天上午11点/);
   assert.equal(new Date(after?.remindAt ?? 0).getHours(), 11);
   assert.deepEqual(after?.tags, ['客户', '重要客户']);
   assert.match(after?.originalText ?? '', /修改提示/);
@@ -2763,7 +2824,7 @@ test('/as uses Codex rewrite to merge natural-language edits into the matched as
   assert.match(draftText, /匹配记录：阿尼比莱克鲁/);
   assert.match(draftText, /修改摘要：把第二张单更正为第二期账单/);
   assert.match(draftText, /内容：\n阿尼比莱克鲁第二期账单发票下午要做/);
-  assert.match(draftText, /2\. 明天（周二）提交给业主/);
+  assert.match(draftText, /2\. 2026-04-30 UTC（周二）提交给业主/);
   assert.doesNotMatch(draftText, /这个东西要记一下/);
   assert.equal(openai.startTurnCalls.some((call: any) => String(call.inputText ?? '').includes('原记录 JSON')), true);
 
@@ -2855,7 +2916,7 @@ test('assistant reminder service claims due reminders once', async () => {
 
   const firstClaim = runtime.services.assistantRecords.claimDueReminders('weixin');
   assert.equal(firstClaim.length, 1);
-  assert.equal(firstClaim[0]?.title.includes('给王总回电话'), true);
+  assert.match(firstClaim[0]?.content ?? '', /给王总回电话/);
 
   const secondClaim = runtime.services.assistantRecords.claimDueReminders('weixin');
   assert.equal(secondClaim.length, 0);
@@ -2893,11 +2954,12 @@ test('/uploads plus assistant command archives attachments onto assistant record
   const savedText = saved.messages.map((message) => message.text ?? '').join('\n');
   assert.match(savedText, /助理记录已保存/);
   assert.match(savedText, /附件：1 个/);
-  assert.equal(openai.startTurnCalls.length, 0);
+  assert.ok(openai.startTurnCalls.length >= 1);
 
   const record = runtime.repositories.assistantRecords.list()[0];
   assert.equal(record?.type, 'note');
   assert.equal(record?.attachments.length, 1);
+  assert.notEqual(record?.parsedJson?.normalizer, 'forced-local');
   assert.match(record?.attachments[0]?.storagePath ?? '', /assistant[\\/]attachments[\\/]/);
   assert.equal(fs.existsSync(record?.attachments[0]?.storagePath ?? ''), true);
 

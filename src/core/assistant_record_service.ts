@@ -84,19 +84,23 @@ export class AssistantRecordService {
   async createRecord(params: CreateAssistantRecordParams): Promise<AssistantRecord> {
     const now = this.now();
     const recordId = crypto.randomUUID();
+    const normalizedDraft = normalizeAssistantDraftForStorage(params.draft, {
+      timezone: params.timezone ?? this.timezone,
+      now,
+    });
     const record: AssistantRecord = {
       id: recordId,
-      type: params.draft.type,
+      type: normalizedDraft.type,
       status: params.status ?? 'active',
-      title: normalizeTitle(params.draft.title, params.draft.type),
-      content: String(params.draft.content ?? '').trim(),
-      originalText: String(params.draft.originalText ?? '').trim(),
-      priority: params.draft.priority,
-      project: normalizeNullableString(params.draft.project),
-      tags: normalizeStringArray(params.draft.tags),
-      dueAt: normalizeTimestamp(params.draft.dueAt),
-      remindAt: normalizeTimestamp(params.draft.remindAt),
-      recurrence: normalizeNullableString(params.draft.recurrence),
+      title: normalizeTitle(normalizedDraft.title, normalizedDraft.type),
+      content: String(normalizedDraft.content ?? '').trim(),
+      originalText: String(normalizedDraft.originalText ?? '').trim(),
+      priority: normalizedDraft.priority,
+      project: normalizeNullableString(normalizedDraft.project),
+      tags: normalizeStringArray(normalizedDraft.tags),
+      dueAt: normalizeTimestamp(normalizedDraft.dueAt),
+      remindAt: normalizeTimestamp(normalizedDraft.remindAt),
+      recurrence: normalizeNullableString(normalizedDraft.recurrence),
       timezone: normalizeNullableString(params.timezone) ?? this.timezone,
       source: params.source ?? 'weixin',
       platform: params.scopeRef.platform,
@@ -104,8 +108,8 @@ export class AssistantRecordService {
       contextThreadId: normalizeNullableString(params.contextThreadId),
       attachments: [],
       parseStatus: params.parseStatus ?? 'auto',
-      confidence: clampConfidence(params.draft.confidence),
-      parsedJson: { ...params.draft.parsedJson },
+      confidence: clampConfidence(normalizedDraft.confidence),
+      parsedJson: { ...normalizedDraft.parsedJson },
       lastRemindedAt: null,
       createdAt: now,
       updatedAt: now,
@@ -231,19 +235,23 @@ export class AssistantRecordService {
   }
 
   updatePendingFromDraft(record: AssistantRecord, draft: AssistantRecordDraft): AssistantRecord {
+    const normalizedDraft = normalizeAssistantDraftForStorage(draft, {
+      timezone: record.timezone,
+      now: this.now(),
+    });
     return this.updateRecord(record.id, {
-      type: draft.type,
-      title: normalizeTitle(draft.title, draft.type),
-      content: draft.content,
-      originalText: draft.originalText,
-      priority: draft.priority,
-      project: draft.project,
-      tags: draft.tags,
-      dueAt: draft.dueAt,
-      remindAt: draft.remindAt,
-      recurrence: draft.recurrence,
-      confidence: draft.confidence,
-      parsedJson: draft.parsedJson,
+      type: normalizedDraft.type,
+      title: normalizeTitle(normalizedDraft.title, normalizedDraft.type),
+      content: normalizedDraft.content,
+      originalText: normalizedDraft.originalText,
+      priority: normalizedDraft.priority,
+      project: normalizedDraft.project,
+      tags: normalizedDraft.tags,
+      dueAt: normalizedDraft.dueAt,
+      remindAt: normalizedDraft.remindAt,
+      recurrence: normalizedDraft.recurrence,
+      confidence: normalizedDraft.confidence,
+      parsedJson: normalizedDraft.parsedJson,
       parseStatus: 'edited',
     });
   }
@@ -289,7 +297,7 @@ export class AssistantRecordService {
       ? normalizeTitle(buildTitle(nextContent, nextType), nextType)
       : record.title;
     const now = this.now();
-    return {
+    return normalizeAssistantRecordForStorage({
       ...record,
       type: nextType,
       title: nextTitle,
@@ -313,7 +321,7 @@ export class AssistantRecordService {
       parseStatus: 'edited',
       attachments: record.attachments.map((attachment) => ({ ...attachment })),
       updatedAt: now,
-    };
+    }, { now });
   }
 
   claimDueReminders(platform: string, now = this.now()): AssistantRecord[] {
@@ -373,7 +381,7 @@ function parseAssistantDraft(input: string, forcedType: AssistantRecordType | nu
   const tags = extractTags(originalText);
   const cleaned = stripAssistantMetaInstructions(originalText.replace(/#[\p{L}\p{N}_-]+/gu, '').trim());
   const type = forcedType ?? inferRecordType(cleaned);
-  const dateInfo = parseDateInfo(cleaned, now);
+  const dateInfo = parseDateInfo(cleaned, now, type);
   const priority = inferPriority(cleaned);
   const title = buildTitle(cleaned, type);
   const confidence = computeConfidence({ forcedType, type, text: cleaned, dateInfo });
@@ -634,7 +642,11 @@ function inferRecordType(text: string): AssistantRecordType {
   return 'note';
 }
 
-function parseDateInfo(text: string, now: number): {
+function parseDateInfo(
+  text: string,
+  now: number,
+  type: AssistantRecordType,
+): {
   dueAt: number | null;
   remindAt: number | null;
   recurrence: string | null;
@@ -643,6 +655,9 @@ function parseDateInfo(text: string, now: number): {
   const base = new Date(now);
   const daily = text.match(/每天(?:早上|上午|下午|晚上)?\s*(\d{1,2})(?:[:：](\d{1,2}))?分?|\bevery day\b/iu);
   if (daily) {
+    if (type === 'reminder' && !daily[1]) {
+      return { dueAt: null, remindAt: null, recurrence: 'daily', matched: true };
+    }
     const hour = daily[1] ? normalizeHour(Number(daily[1]), text) : 9;
     const minute = daily[2] ? Number(daily[2]) : 0;
     const next = nextDaily(base, hour, minute);
@@ -650,6 +665,9 @@ function parseDateInfo(text: string, now: number): {
   }
   const weekly = text.match(/每周([一二三四五六日天])?(?:早上|上午|下午|晚上)?\s*(\d{1,2})?(?:[:：](\d{1,2}))?分?/u);
   if (weekly) {
+    if (type === 'reminder' && !weekly[2]) {
+      return { dueAt: null, remindAt: null, recurrence: `weekly ${parseChineseWeekday(weekly[1] ?? '一')}`, matched: true };
+    }
     const weekday = parseChineseWeekday(weekly[1] ?? '一');
     const hour = weekly[2] ? normalizeHour(Number(weekly[2]), text) : 9;
     const minute = weekly[3] ? Number(weekly[3]) : 0;
@@ -671,6 +689,12 @@ function parseDateInfo(text: string, now: number): {
     const next = nextWeekly(base, weekday, hour, minute, true);
     return { dueAt: next, remindAt: next, recurrence: null, matched: true };
   }
+  if (type === 'todo') {
+    const dateOnly = parseDateOnlyDueAt(text, base);
+    if (dateOnly) {
+      return { dueAt: dateOnly, remindAt: null, recurrence: null, matched: true };
+    }
+  }
   const today = text.match(/(?:今天|今晚|上午|下午|晚上)\s*(\d{1,2})(?:[:：](\d{1,2}))?分?点?/u);
   if (today) {
     const hour = normalizeHour(Number(today[1]), text);
@@ -682,6 +706,70 @@ function parseDateInfo(text: string, now: number): {
     return { dueAt: next, remindAt: next, recurrence: null, matched: true };
   }
   return { dueAt: null, remindAt: null, recurrence: null, matched: false };
+}
+
+export function normalizeAssistantDraftForStorage(
+  draft: AssistantRecordDraft,
+  options: {
+    timezone?: string | null;
+    now?: number | null;
+  } = {},
+): AssistantRecordDraft {
+  const timezone = resolveAssistantTimezone(options.timezone);
+  const now = Number.isFinite(options.now) ? Number(options.now) : Date.now();
+  const nextContent = normalizeAssistantContentForStorage(draft.content, {
+    type: draft.type,
+    dueAt: draft.dueAt,
+    remindAt: draft.remindAt,
+    recurrence: draft.recurrence,
+    timezone,
+    now,
+  });
+  const rebuiltTitle = buildTitle(nextContent, draft.type);
+  const nextTitle = shouldRebuildAssistantTitle(draft.title, draft.content, nextContent)
+    ? rebuiltTitle
+    : draft.title;
+  return {
+    ...draft,
+    title: normalizeTitle(nextTitle, draft.type),
+    content: nextContent,
+    parsedJson: {
+      ...(draft.parsedJson ?? {}),
+      relativeTimeNormalized: nextContent !== draft.content,
+      titleRebuilt: normalizeTitle(nextTitle, draft.type) !== normalizeTitle(draft.title, draft.type),
+    },
+  };
+}
+
+export function normalizeAssistantRecordForStorage(
+  record: AssistantRecord,
+  options: {
+    now?: number | null;
+  } = {},
+): AssistantRecord {
+  const now = Number.isFinite(options.now) ? Number(options.now) : Date.now();
+  const nextContent = normalizeAssistantContentForStorage(record.content, {
+    type: record.type,
+    dueAt: record.dueAt,
+    remindAt: record.remindAt,
+    recurrence: record.recurrence,
+    timezone: record.timezone,
+    now,
+  });
+  const rebuiltTitle = buildTitle(nextContent, record.type);
+  const nextTitle = shouldRebuildAssistantTitle(record.title, record.content, nextContent)
+    ? rebuiltTitle
+    : record.title;
+  return {
+    ...record,
+    title: normalizeTitle(nextTitle, record.type),
+    content: nextContent,
+    parsedJson: {
+      ...(record.parsedJson ?? {}),
+      relativeTimeNormalized: nextContent !== record.content,
+      titleRebuilt: normalizeTitle(nextTitle, record.type) !== normalizeTitle(record.title, record.type),
+    },
+  };
 }
 
 function inferPriority(text: string): AssistantRecordPriority {
@@ -710,7 +798,7 @@ function extractTags(text: string): string[] {
 }
 
 function buildTitle(text: string, type: AssistantRecordType): string {
-  const normalized = text.replace(/\s+/g, ' ').trim();
+  const normalized = extractTitleSourceText(text);
   if (!normalized) {
     return normalizeTitle('', type);
   }
@@ -722,6 +810,225 @@ function buildTitle(text: string, type: AssistantRecordType): string {
     return '待取回发票清单';
   }
   return truncate(normalized, 42);
+}
+
+function extractTitleSourceText(text: string): string {
+  const normalized = String(text ?? '').replace(/\s+/g, ' ').trim();
+  if (!normalized) {
+    return '';
+  }
+  const firstSentence = normalized.split(/[。！？!?]/u)[0]?.trim() ?? normalized;
+  const withoutLeadingDate = firstSentence
+    .replace(/^(?:\d{4}-\d{2}-\d{2}(?:\s+\d{2}:\d{2})?(?:\s+[A-Za-z_/\-+]+)?|前天|昨天|今天|明天|后天|今晚|今早|早上|上午|中午|下午|晚上|下周[一二三四五六日天]|本周[一二三四五六日天])(?:\s*[（(][^)）]+[)）])?\s*/u, '')
+    .replace(/^(?:已(?:经)?|需要|要|需|提醒我|给我提醒|帮我提醒|完成了|完成|做完了|做完|跟进|处理|提交|发送|发给|回复|联系)\s*/u, '')
+    .replace(/^[：:，,、\-\s]+/u, '')
+    .trim();
+  return withoutLeadingDate || firstSentence;
+}
+
+function shouldRebuildAssistantTitle(title: string, originalContent: string, normalizedContent: string): boolean {
+  const normalizedTitle = compactWhitespace(title);
+  if (!normalizedTitle) {
+    return true;
+  }
+  if (normalizedTitle.length > 32) {
+    return true;
+  }
+  const original = compactWhitespace(originalContent);
+  const normalized = compactWhitespace(normalizedContent);
+  if (normalizedTitle === original || normalizedTitle === normalized) {
+    return true;
+  }
+  if (containsAssistantMetaInstruction(normalizedTitle)) {
+    return true;
+  }
+  if (containsRelativeTimePhrase(normalizedTitle) || /^\d{4}-\d{2}-\d{2}/u.test(normalizedTitle)) {
+    return true;
+  }
+  return false;
+}
+
+function normalizeAssistantContentForStorage(
+  content: string,
+  options: {
+    type: AssistantRecordType;
+    dueAt: number | null;
+    remindAt: number | null;
+    recurrence: string | null;
+    timezone: string;
+    now: number;
+  },
+): string {
+  let next = String(content ?? '').trim();
+  if (!next) {
+    return '';
+  }
+  next = stripAssistantMetaInstructions(next);
+  next = stripExistingAssistantTimelineLines(next);
+  next = rewriteAssistantRelativeTimePhrases(next, options.now, options.timezone);
+  const anchorTimestamp = options.type === 'reminder'
+    ? options.remindAt
+    : options.type === 'todo'
+      ? options.dueAt
+      : null;
+  if (options.type === 'reminder' && anchorTimestamp && !containsAssistantTimestamp(next, anchorTimestamp, options.timezone)) {
+    next = `提醒时间：${formatAssistantTimestamp(anchorTimestamp, options.timezone)}\n${next}`;
+  }
+  if (options.type === 'todo' && anchorTimestamp && !containsAssistantTimestamp(next, anchorTimestamp, options.timezone)) {
+    next = `截止时间：${formatAssistantTimestamp(anchorTimestamp, options.timezone)}\n${next}`;
+  }
+  return next.replace(/\n{3,}/gu, '\n\n').trim();
+}
+
+function stripExistingAssistantTimelineLines(content: string): string {
+  return String(content ?? '')
+    .replace(/^(?:提醒时间|截止时间)：[^\n]*\n?/gmu, '')
+    .trim();
+}
+
+function rewriteAssistantRelativeTimePhrases(text: string, now: number, timezone: string): string {
+  const base = createAssistantWallClockDate(now, timezone);
+  let next = String(text ?? '');
+  next = next.replace(/(前天|昨天|今天|明天|后天)(?:\s*[（(][^)）]+[)）])?(?:\s*(早上|上午|中午|下午|晚上|今晚))?\s*(\d{1,2})(?:[:：](\d{1,2}))?\s*分?点?/gu, (_full, dayWord, period, hourRaw, minuteRaw) => {
+    const dayOffset = relativeDayOffset(dayWord);
+    const hour = normalizeHour(Number(hourRaw), `${dayWord}${period ?? ''}`);
+    const minute = minuteRaw ? Number(minuteRaw) : 0;
+    return formatAssistantTimestamp(atOffsetDay(base, dayOffset, hour, minute), timezone);
+  });
+  next = next.replace(/(下周|本周)([一二三四五六日天])(?:\s*(早上|上午|中午|下午|晚上))?\s*(\d{1,2})(?:[:：](\d{1,2}))?\s*分?点?/gu, (_full, rangeWord, weekdayRaw, period, hourRaw, minuteRaw) => {
+    const hour = normalizeHour(Number(hourRaw), `${rangeWord}${weekdayRaw}${period ?? ''}`);
+    const minute = minuteRaw ? Number(minuteRaw) : 0;
+    return formatAssistantTimestamp(nextWeekly(base, parseChineseWeekday(weekdayRaw), hour, minute, rangeWord === '下周'), timezone);
+  });
+  next = next.replace(/(下周|本周)([一二三四五六日天])/gu, (_full, rangeWord, weekdayRaw) => {
+    return formatAssistantDate(nextWeekly(base, parseChineseWeekday(weekdayRaw), 23, 59, rangeWord === '下周'), timezone);
+  });
+  next = next.replace(/(前天|昨天|今天|明天|后天)(?!\s*\d)/gu, (_full, dayWord) => {
+    return formatAssistantDate(atOffsetDay(base, relativeDayOffset(dayWord), 0, 0), timezone);
+  });
+  return next
+    .replace(/((?:UTC)|(?:[A-Za-z]+(?:\/[A-Za-z_+-]+)*))(?!\s)(?=[\p{Script=Han}])/gu, '$1 ')
+    .replace(/\s{2,}/gu, ' ')
+    .replace(/\n /gu, '\n')
+    .trim();
+}
+
+function containsAssistantTimestamp(content: string, timestamp: number, timezone: string): boolean {
+  const dateTime = formatAssistantTimestamp(timestamp, timezone);
+  const dateOnly = formatAssistantDate(timestamp, timezone);
+  return content.includes(dateTime) || content.includes(dateOnly);
+}
+
+function formatAssistantTimestamp(timestamp: number, timezone: string): string {
+  const parts = getAssistantDateParts(timestamp, timezone);
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute} ${parts.timeZoneLabel}`;
+}
+
+function formatAssistantDate(timestamp: number, timezone: string): string {
+  const parts = getAssistantDateParts(timestamp, timezone);
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.timeZoneLabel}`;
+}
+
+function getAssistantDateParts(timestamp: number, timezone: string): {
+  year: string;
+  month: string;
+  day: string;
+  hour: string;
+  minute: string;
+  timeZoneLabel: string;
+} {
+  const resolvedTimezone = resolveAssistantTimezone(timezone);
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: resolvedTimezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+  const parts = formatter.formatToParts(new Date(timestamp));
+  const year = parts.find((part) => part.type === 'year')?.value ?? '0000';
+  const month = parts.find((part) => part.type === 'month')?.value ?? '00';
+  const day = parts.find((part) => part.type === 'day')?.value ?? '00';
+  const hour = parts.find((part) => part.type === 'hour')?.value ?? '00';
+  const minute = parts.find((part) => part.type === 'minute')?.value ?? '00';
+  return {
+    year,
+    month,
+    day,
+    hour,
+    minute,
+    timeZoneLabel: assistantTimeZoneLabel(resolvedTimezone),
+  };
+}
+
+function assistantTimeZoneLabel(timezone: string): string {
+  return timezone === 'Etc/UTC' ? 'UTC' : timezone;
+}
+
+function resolveAssistantTimezone(timezone: string | null | undefined): string {
+  return normalizeNullableString(timezone) ?? Intl.DateTimeFormat().resolvedOptions().timeZone ?? 'Etc/UTC';
+}
+
+function createAssistantWallClockDate(now: number, timezone: string): Date {
+  const resolvedTimezone = resolveAssistantTimezone(timezone);
+  const wallClock = new Date(now).toLocaleString('en-US', {
+    timeZone: resolvedTimezone,
+    hour12: false,
+  });
+  const parsed = new Date(wallClock);
+  return Number.isNaN(parsed.getTime()) ? new Date(now) : parsed;
+}
+
+function relativeDayOffset(value: string): number {
+  switch (value) {
+    case '前天':
+      return -2;
+    case '昨天':
+      return -1;
+    case '今天':
+      return 0;
+    case '明天':
+      return 1;
+    case '后天':
+      return 2;
+    default:
+      return 0;
+  }
+}
+
+function parseDateOnlyDueAt(text: string, base: Date): number | null {
+  if (/今天|今晚/u.test(text)) {
+    return atOffsetDay(base, 0, 23, 59);
+  }
+  if (/明天/u.test(text)) {
+    return atOffsetDay(base, 1, 23, 59);
+  }
+  if (/后天/u.test(text)) {
+    return atOffsetDay(base, 2, 23, 59);
+  }
+  const nextWeek = text.match(/下周([一二三四五六日天])(?:前)?/u);
+  if (nextWeek) {
+    return nextWeekly(base, parseChineseWeekday(nextWeek[1]), 23, 59, true);
+  }
+  const thisWeek = text.match(/本周([一二三四五六日天])(?:前)?/u);
+  if (thisWeek) {
+    return nextWeekly(base, parseChineseWeekday(thisWeek[1]), 23, 59, false);
+  }
+  return null;
+}
+
+function compactWhitespace(value: unknown): string {
+  return String(value ?? '').replace(/\s+/gu, ' ').trim();
+}
+
+function containsRelativeTimePhrase(text: string): boolean {
+  return /(前天|昨天|今天|明天|后天|今晚|今早|早上|上午|中午|下午|晚上|下周[一二三四五六日天]|本周[一二三四五六日天])/u.test(text);
+}
+
+function containsAssistantMetaInstruction(text: string): boolean {
+  return /(?:帮我|给我).*(?:记录|整理|保存|记一下)|看看放哪里合适|之后还得记一下/u.test(text);
 }
 
 function normalizeTitle(title: string, type: AssistantRecordType): string {
