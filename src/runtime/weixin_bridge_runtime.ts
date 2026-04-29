@@ -445,7 +445,11 @@ export class WeixinBridgeRuntime {
 
   async processInboundEventWithOptions(
     event: InboundTextEvent,
-    options: { deferPostResponseAction?: boolean } = {},
+    options: {
+      deferPostResponseAction?: boolean;
+      suppressProgressDelivery?: boolean;
+      suppressTyping?: boolean;
+    } = {},
   ): Promise<RuntimeResponse> {
     await this.flushPendingScopeNotice(event.externalScopeId);
     const streamState = createStreamState();
@@ -455,11 +459,19 @@ export class WeixinBridgeRuntime {
       textPreview: truncateDebugText(event?.text),
       attachmentCount: Array.isArray(event?.attachments) ? event.attachments.length : 0,
     });
-    const typingStart = this.safeSendTyping(event.externalScopeId, 'start');
-    const stopTypingKeepalive = this.startTypingKeepalive(event.externalScopeId);
+    const suppressTyping = Boolean(options.suppressTyping);
+    const typingStart = suppressTyping
+      ? Promise.resolve()
+      : this.safeSendTyping(event.externalScopeId, 'start');
+    const stopTypingKeepalive = suppressTyping
+      ? async () => {}
+      : this.startTypingKeepalive(event.externalScopeId);
     try {
       const response = await this.bridgeCoordinator.handleInboundEvent(event, {
         onProgress: async (progress) => {
+          if (options.suppressProgressDelivery) {
+            return;
+          }
           await this.handleProgressUpdate(event, streamState, progress);
         },
         onApprovalRequest: async () => {
@@ -1374,7 +1386,18 @@ export class WeixinBridgeRuntime {
     try {
       const response = await this.enqueueScopeWork(scopeId, async () => this.processInboundEventWithOptions(event, {
         deferPostResponseAction: false,
+        suppressProgressDelivery: true,
+        suppressTyping: true,
       }));
+      const responseSession = (response as { session?: { bridgeSessionId?: string | null } } | null)?.session ?? null;
+      const reboundBridgeSessionId = typeof responseSession?.bridgeSessionId === 'string'
+        ? responseSession.bridgeSessionId.trim()
+        : '';
+      if (reboundBridgeSessionId && reboundBridgeSessionId !== String(job.bridgeSessionId ?? '')) {
+        this.automationJobs?.updateJob?.(job.id, {
+          bridgeSessionId: reboundBridgeSessionId,
+        });
+      }
       const preview = buildAutomationResultPreview(response);
       this.automationJobs?.completeJob?.(job.id, {
         resultPreview: preview,

@@ -523,7 +523,9 @@ test('WeixinBridgeRuntime sends media-only response messages through platform se
 
 test('WeixinBridgeRuntime runs due automation jobs against the same WeChat scope and records completion', async () => {
   const sent: Array<{ externalScopeId: string; content: string }> = [];
+  const typing: Array<{ externalScopeId: string; status: 'start' | 'stop' }> = [];
   const deferredCalls: Array<{ id: string; nextRunAt: number }> = [];
+  const updatedCalls: Array<{ id: string; bridgeSessionId: string }> = [];
   const completedCalls: Array<{ id: string; resultPreview?: string | null; error?: string | null; deliveredAt?: number | null }> = [];
   const job = {
     id: 'auto-1',
@@ -542,6 +544,9 @@ test('WeixinBridgeRuntime runs due automation jobs against the same WeChat scope
       claimDueJobs() {
         return [job];
       },
+      updateJob(id: string, payload: any) {
+        updatedCalls.push({ id, bridgeSessionId: payload.bridgeSessionId });
+      },
       deferJob(id: string, nextRunAt: number) {
         deferredCalls.push({ id, nextRunAt });
       },
@@ -553,13 +558,28 @@ test('WeixinBridgeRuntime runs due automation jobs against the same WeChat scope
     sendText: async ({ externalScopeId, content }) => {
       sent.push({ externalScopeId, content });
     },
+    sendTyping: async ({ externalScopeId, status }) => {
+      typing.push({ externalScopeId, status });
+    },
     coordinator: {
       async reconcileActiveTurn() {
         return null;
       },
-      async handleInboundEvent(event: any) {
+      async handleInboundEvent(event: any, options: any = {}) {
         seenEvents.push(event);
-        return completeResponse('自动化执行完成。');
+        await options.onProgress?.({
+          text: '正在读取助理记录。',
+          delta: '正在读取助理记录。',
+          outputKind: 'commentary',
+        });
+        return {
+          ...completeResponse('自动化执行完成。'),
+          session: {
+            bridgeSessionId: 'session-auto-1b',
+            providerProfileId: 'openai-default',
+            codexThreadId: 'thread-auto-1b',
+          },
+        };
       },
     },
   });
@@ -573,6 +593,10 @@ test('WeixinBridgeRuntime runs due automation jobs against the same WeChat scope
   assert.equal(seenEvents[0]?.metadata?.codexbridge?.automationJobId, 'auto-1');
   assert.deepEqual(sent, [
     { externalScopeId: 'wxid_1', content: '自动化执行完成。' },
+  ]);
+  assert.deepEqual(typing, []);
+  assert.deepEqual(updatedCalls, [
+    { id: 'auto-1', bridgeSessionId: 'session-auto-1b' },
   ]);
   assert.equal(completedCalls.length, 1);
   assert.equal(completedCalls[0]?.id, 'auto-1');

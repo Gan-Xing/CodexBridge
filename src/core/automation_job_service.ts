@@ -21,9 +21,12 @@ interface AutomationJobServiceOptions {
   bridgeSessions?: BridgeSessionsLike | null;
   now?: () => number;
   locale?: string | null;
+  staleRunningMs?: number | null;
 }
 
 export class AutomationJobService {
+  static readonly DEFAULT_STALE_RUNNING_MS = 20 * 60_000;
+
   private readonly automationJobs: AutomationJobRepository;
 
   private readonly bridgeSessions: BridgeSessionsLike | null;
@@ -32,16 +35,20 @@ export class AutomationJobService {
 
   private readonly i18n: Translator;
 
+  private readonly staleRunningMs: number;
+
   constructor({
     automationJobs,
     bridgeSessions = null,
     now = () => Date.now(),
     locale = null,
+    staleRunningMs = AutomationJobService.DEFAULT_STALE_RUNNING_MS,
   }: AutomationJobServiceOptions) {
     this.automationJobs = automationJobs;
     this.bridgeSessions = bridgeSessions;
     this.now = now;
     this.i18n = createI18n(locale);
+    this.staleRunningMs = Math.max(0, Number(staleRunningMs ?? 0));
   }
 
   listForScope(scopeRef: PlatformScopeRef): AutomationJob[] {
@@ -172,6 +179,24 @@ export class AutomationJobService {
 
   claimDueJobs(platform: string, limit = 3): AutomationJob[] {
     const now = this.now();
+    if (this.staleRunningMs > 0) {
+      for (const job of this.automationJobs.list()) {
+        if (
+          job.platform !== platform
+          || job.status !== 'active'
+          || !job.running
+          || job.updatedAt > (now - this.staleRunningMs)
+        ) {
+          continue;
+        }
+        this.automationJobs.save({
+          ...job,
+          running: false,
+          nextRunAt: Math.min(job.nextRunAt, now),
+          updatedAt: now,
+        });
+      }
+    }
     const due = this.automationJobs
       .list()
       .filter((job) => (
