@@ -77,6 +77,7 @@ interface StreamState {
   previewStopped: boolean;
   firstPreviewSent: boolean;
   nextPreviewAt: number;
+  smallPreviewDelayUntil: number;
   streamedText: string;
   sentChunkCount: number;
   streamingDisabled: boolean;
@@ -127,6 +128,7 @@ interface WeixinBridgeRuntimeOptions {
 export class WeixinBridgeRuntime {
   static readonly NOTICE_COOLDOWN_MS = 30_000;
   static readonly DEFAULT_TYPING_KEEPALIVE_MS = 8_000;
+  static readonly PREVIEW_MIN_TARGET_BYTES = 500;
 
   platformPlugin: PlatformPluginLike;
 
@@ -576,24 +578,11 @@ export class WeixinBridgeRuntime {
 
     streamState.pendingPreview += delta;
 
-    if (!streamState.firstPreviewSent) {
-      const firstChunk = extractImmediatePreviewChunk(streamState.pendingPreview, this.previewHardLimitBytes);
-      if (firstChunk) {
-        streamState.pendingPreview = streamState.pendingPreview.slice(firstChunk.length).replace(/^[\s\n]+/u, '');
-        await this.sendPreviewChunk(event, streamState, firstChunk.trim());
-        if (streamState.streamingDisabled || streamState.previewStopped) {
-          return;
-        }
-        streamState.firstPreviewSent = true;
-        streamState.nextPreviewAt = Date.now() + this.previewIntervalMs;
-      }
-    }
-
     this.ensurePreviewPump(event, streamState);
   }
 
   ensurePreviewPump(event: InboundTextEvent, streamState: StreamState): void {
-    if (streamState.previewPumpPromise || streamState.previewStopped || streamState.streamingDisabled || !streamState.firstPreviewSent) {
+    if (streamState.previewPumpPromise || streamState.previewStopped || streamState.streamingDisabled || !streamState.pendingPreview) {
       return;
     }
     streamState.previewPumpPromise = this.runPreviewPump(event, streamState)
@@ -602,8 +591,7 @@ export class WeixinBridgeRuntime {
         if (
           streamState.pendingPreview &&
           !streamState.previewStopped &&
-          !streamState.streamingDisabled &&
-          streamState.firstPreviewSent
+          !streamState.streamingDisabled
         ) {
           this.ensurePreviewPump(event, streamState);
         }
@@ -615,24 +603,38 @@ export class WeixinBridgeRuntime {
       if (!streamState.pendingPreview) {
         return;
       }
-      const waitMs = Math.max(0, streamState.nextPreviewAt - Date.now());
-      if (waitMs > 0) {
-        await sleep(waitMs);
-        if (streamState.previewStopped || streamState.streamingDisabled) {
-          return;
-        }
-      }
-      if (!streamState.pendingPreview) {
+      const waitUntil = Math.max(streamState.nextPreviewAt, streamState.smallPreviewDelayUntil);
+      await waitForPreviewWindow(streamState, waitUntil);
+      if (streamState.previewStopped || streamState.streamingDisabled || !streamState.pendingPreview) {
         return;
       }
-      const chunk = extractTimedPreviewChunk(streamState.pendingPreview, this.previewSoftTargetBytes);
+      const chunk = streamState.firstPreviewSent
+        ? extractTimedPreviewChunk(
+          streamState.pendingPreview,
+          this.previewSoftTargetBytes,
+          this.previewHardLimitBytes,
+        )
+        : extractImmediatePreviewChunk(streamState.pendingPreview, this.previewHardLimitBytes);
       if (!chunk) {
         return;
       }
+      if (
+        utf8ByteLength(chunk) < WeixinBridgeRuntime.PREVIEW_MIN_TARGET_BYTES
+        && this.previewIntervalMs > 0
+      ) {
+        if (streamState.smallPreviewDelayUntil === 0) {
+          streamState.smallPreviewDelayUntil = Date.now() + this.previewIntervalMs;
+          return;
+        }
+      }
+      streamState.smallPreviewDelayUntil = 0;
       streamState.pendingPreview = streamState.pendingPreview.slice(chunk.length).replace(/^[\s\n]+/u, '');
       await this.sendPreviewChunk(event, streamState, chunk.trim());
       if (streamState.streamingDisabled || streamState.previewStopped) {
         return;
+      }
+      if (!streamState.firstPreviewSent) {
+        streamState.firstPreviewSent = true;
       }
       streamState.nextPreviewAt = Date.now() + this.previewIntervalMs;
     }
@@ -667,6 +669,7 @@ export class WeixinBridgeRuntime {
   async stopPreviewStreaming(streamState: StreamState): Promise<void> {
     streamState.previewStopped = true;
     streamState.pendingPreview = '';
+    streamState.smallPreviewDelayUntil = 0;
     const pump = streamState.previewPumpPromise;
     if (pump) {
       await pump;
@@ -1561,6 +1564,7 @@ function createStreamState(): StreamState {
     previewStopped: false,
     firstPreviewSent: false,
     nextPreviewAt: 0,
+    smallPreviewDelayUntil: 0,
     streamedText: '',
     sentChunkCount: 0,
     streamingDisabled: false,
@@ -1678,15 +1682,23 @@ function extractImmediatePreviewChunk(text: string, hardLimitBytes: number): str
   return '';
 }
 
-function extractTimedPreviewChunk(text: string, softTargetBytes: number): string {
+function extractTimedPreviewChunk(text: string, softTargetBytes: number, hardLimitBytes: number): string {
   const bytes = utf8ByteLength(text);
   if (bytes <= 0) {
     return '';
   }
-  if (bytes <= softTargetBytes) {
-    return text;
+  const softBoundary = findStablePreviewBoundary(text, Math.min(bytes, softTargetBytes));
+  if (softBoundary > 0) {
+    return text.slice(0, softBoundary);
   }
-  return sliceByUtf8Bytes(text, softTargetBytes);
+  const hardBoundary = findStablePreviewBoundary(text, Math.min(bytes, hardLimitBytes));
+  if (hardBoundary > 0) {
+    return text.slice(0, hardBoundary);
+  }
+  if (bytes <= hardLimitBytes) {
+    return '';
+  }
+  return trimForcedPreviewChunk(sliceByUtf8Bytes(text, hardLimitBytes));
 }
 
 function findSentenceBoundary(text: string, byteLimit: number): number {
@@ -1706,6 +1718,64 @@ function findSentenceBoundary(text: string, byteLimit: number): number {
     }
   }
   return sentenceBoundary;
+}
+
+function findStablePreviewBoundary(text: string, byteLimit: number): number {
+  let paragraphBoundary = -1;
+  let sentenceBoundary = -1;
+  let lineBoundary = -1;
+  let bytes = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    bytes += utf8ByteLength(text[index]);
+    if (bytes > byteLimit) {
+      break;
+    }
+    if (text[index] === '\n' && text[index + 1] === '\n') {
+      paragraphBoundary = index + 2;
+      continue;
+    }
+    if ('。！？.!?；;'.includes(text[index])) {
+      sentenceBoundary = index + 1;
+      continue;
+    }
+    if (text[index] === '\n') {
+      lineBoundary = index + 1;
+    }
+  }
+  if (utf8ByteLength(text) <= byteLimit && endsWithStablePreviewBoundary(text)) {
+    return text.length;
+  }
+  return paragraphBoundary > 0
+    ? paragraphBoundary
+    : sentenceBoundary > 0
+      ? sentenceBoundary
+      : lineBoundary > 0
+        ? lineBoundary
+        : 0;
+}
+
+function endsWithStablePreviewBoundary(text: string): boolean {
+  return /(?:\n\n|[。！？.!?；;])\s*$/u.test(String(text ?? ''));
+}
+
+function trimForcedPreviewChunk(text: string): string {
+  const normalized = String(text ?? '').trim();
+  if (!normalized) {
+    return '';
+  }
+  const paragraphBoundary = normalized.lastIndexOf('\n\n');
+  if (paragraphBoundary > 0) {
+    return normalized.slice(0, paragraphBoundary + 2).trim();
+  }
+  for (let index = normalized.length - 1; index >= 0; index -= 1) {
+    if ('。！？.!?；;\n '.includes(normalized[index])) {
+      const candidate = normalized.slice(0, index + 1).trim();
+      if (candidate) {
+        return candidate;
+      }
+    }
+  }
+  return normalized;
 }
 
 function sliceByUtf8Bytes(text: string, byteLimit: number): string {
@@ -1742,6 +1812,16 @@ function sleep(ms) {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+async function waitForPreviewWindow(streamState: StreamState, waitUntil: number): Promise<void> {
+  while (!streamState.previewStopped && !streamState.streamingDisabled) {
+    const waitMs = Math.max(0, waitUntil - Date.now());
+    if (waitMs <= 0) {
+      return;
+    }
+    await sleep(Math.min(waitMs, 50));
+  }
 }
 
 function createPendingInboundMerge(event: InboundTextEvent): PendingInboundMerge {

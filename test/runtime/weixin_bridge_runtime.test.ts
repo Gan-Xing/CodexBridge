@@ -976,7 +976,78 @@ test('WeixinBridgeRuntime merges commentary and final-answer progress into the p
   assert.deepEqual(sent, [
     { externalScopeId: 'wxid_1', content: '我先检查一下上下文。' },
     { externalScopeId: 'wxid_1', content: '最终答案第一段。\n\n最终答案第二段。' },
-    { externalScopeId: 'wxid_1', content: '最终答案第一段。\n\n最终答案第二段。' },
+  ]);
+});
+
+test('WeixinBridgeRuntime delays a sub-500 preview block by one extra interval for long-running turns', async () => {
+  const sent: Array<{ externalScopeId: string; content: string }> = [];
+  const runtime = makeRuntime({
+    previewIntervalMs: 20,
+    previewSoftTargetBytes: 1024,
+    sendText: async ({ externalScopeId, content }) => {
+      sent.push({ externalScopeId, content });
+    },
+    coordinator: {
+      async handleInboundEvent(_event: any, options: any = {}) {
+        await options.onProgress?.({
+          text: '短句。',
+          outputKind: 'final_answer',
+        });
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        return completeResponse('短句。\n\n后续说明。');
+      },
+    },
+  });
+
+  const completion = runtime.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wxid_1',
+    text: 'hello',
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(sent, []);
+
+  await new Promise((resolve) => setTimeout(resolve, 45));
+  assert.deepEqual(sent, [
+    { externalScopeId: 'wxid_1', content: '短句。' },
+  ]);
+
+  await completion;
+
+  assert.deepEqual(sent, [
+    { externalScopeId: 'wxid_1', content: '短句。' },
+    { externalScopeId: 'wxid_1', content: '后续说明。' },
+  ]);
+});
+
+test('WeixinBridgeRuntime does not wait for the extra small-preview delay once final delivery starts', async () => {
+  const sent: Array<{ externalScopeId: string; content: string }> = [];
+  const runtime = makeRuntime({
+    previewIntervalMs: 120,
+    previewSoftTargetBytes: 1024,
+    sendText: async ({ externalScopeId, content }) => {
+      sent.push({ externalScopeId, content });
+    },
+    coordinator: {
+      async handleInboundEvent(_event: any, options: any = {}) {
+        await options.onProgress?.({
+          text: '短句。',
+          outputKind: 'final_answer',
+        });
+        return completeResponse('短句。\n\n完整答复。');
+      },
+    },
+  });
+
+  const outcome = await Promise.race([
+    runtime.runOnce().then(() => 'done'),
+    new Promise<string>((resolve) => setTimeout(() => resolve('timeout'), 60)),
+  ]);
+
+  assert.equal(outcome, 'done');
+  assert.deepEqual(sent, [
+    { externalScopeId: 'wxid_1', content: '短句。\n\n完整答复。' },
   ]);
 });
 
