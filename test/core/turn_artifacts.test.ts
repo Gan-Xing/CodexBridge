@@ -27,7 +27,7 @@ test('detectTurnArtifactIntent marks generic export requests for one-time format
   assert.equal(intent.requested, true);
   assert.equal(intent.requestedFormat, null);
   assert.equal(intent.requestedFileName, null);
-  assert.equal(intent.requiresClarification, true);
+  assert.equal(intent.requiresClarification, false);
 });
 
 test('detectTurnArtifactIntent recognizes explicit image-delivery requests', () => {
@@ -54,6 +54,29 @@ test('detectTurnArtifactIntent recognizes bare md file wording in Chinese', () =
   assert.equal(intent.requestedFormat, 'md');
   assert.equal(intent.requestedExtension, '.md');
   assert.equal(intent.requestedFileName, null);
+  assert.equal(intent.requiresClarification, false);
+});
+
+test('detectTurnArtifactIntent does not treat text-only automation prompts as artifact delivery', () => {
+  const intent = detectTurnArtifactIntent(
+    '使用 assistant-checkin skill 和 codexbridge-wechat-delivery skill。检查 CodexBridge 助理记录里的代办、提醒、逾期事项、近期截止、待确认事项和需要注意的事情，输出适合微信阅读的中文助理检查。只返回最终文本，不要寻找微信连接器，不要直接调用微信接口；把最终结果作为 final answer 返回，由 CodexBridge 通过正常 SendGate 队列发送到微信。',
+  );
+  assert.equal(intent.requested, false);
+  assert.equal(intent.requestedFormat, null);
+  assert.equal(intent.requiresClarification, false);
+});
+
+test('detectTurnArtifactIntent does not treat delivery-related skill names as attachment requests by themselves', () => {
+  const intent = detectTurnArtifactIntent('使用 codexbridge-wechat-delivery skill 返回一段微信可读文本');
+  assert.equal(intent.requested, false);
+  assert.equal(intent.requestedFormat, null);
+  assert.equal(intent.requiresClarification, false);
+});
+
+test('detectTurnArtifactIntent does not treat 输出 wording by itself as an attachment request', () => {
+  const intent = detectTurnArtifactIntent('输出适合微信阅读的中文助理检查，然后直接发到微信');
+  assert.equal(intent.requested, false);
+  assert.equal(intent.requestedFormat, null);
   assert.equal(intent.requiresClarification, false);
 });
 

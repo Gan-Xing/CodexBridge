@@ -824,7 +824,7 @@ test('bridge coordinator recognizes "md 文件" requests and returns the markdow
   assert.equal(fs.existsSync(String(result.messages[1]?.mediaPath ?? '')), true);
 });
 
-test('bridge coordinator clarification flow turns "把文件直接发送给我" + "Markdown" into a markdown attachment response', async () => {
+test('bridge coordinator starts a generic file-delivery turn without asking for format first', async () => {
   const { runtime, openai } = makeRuntime({ defaultCwd: '/tmp/codexbridge-artifact-clarify-md' });
   openai.startTurn = async ({ bridgeSession, event, onTurnStarted = null }) => {
     const turnId = `${bridgeSession.codexThreadId}-turn-artifact-clarify-md-1`;
@@ -847,17 +847,10 @@ test('bridge coordinator clarification flow turns "把文件直接发送给我" 
     };
   };
 
-  const clarification = await runtime.services.bridgeCoordinator.handleInboundEvent({
-    platform: 'weixin',
-    externalScopeId: 'wx-user-file-clarify-md-1',
-    text: '把文件直接发送给我',
-  });
-  assert.match(clarification.messages[0]?.text ?? '', /要导出成什么格式/);
-
   const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
     platform: 'weixin',
     externalScopeId: 'wx-user-file-clarify-md-1',
-    text: 'Markdown',
+    text: '把文件直接发送给我',
   });
 
   assert.equal(result.type, 'message');
@@ -902,8 +895,28 @@ test('bridge coordinator falls back to a single generated file in the turn artif
   assert.equal(fs.existsSync(String(result.messages[1]?.mediaPath ?? '')), true);
 });
 
-test('bridge coordinator asks once for the export format before starting a generic file-delivery turn', async () => {
+test('bridge coordinator starts a generic export turn immediately without asking for the export format', async () => {
   const { runtime, openai } = makeRuntime({ defaultCwd: '/tmp/codexbridge-artifact-clarify' });
+  openai.startTurn = async ({ bridgeSession, event, onTurnStarted = null }) => {
+    const turnId = `${bridgeSession.codexThreadId}-turn-artifact-generic-1`;
+    if (typeof onTurnStarted === 'function') {
+      await onTurnStarted({
+        turnId,
+        threadId: bridgeSession.codexThreadId,
+      });
+    }
+    const artifactDir = String(event?.metadata?.codexbridge?.turnArtifactContext?.artifactDir ?? '').trim();
+    assert.ok(artifactDir);
+    const declaredPath = path.join(artifactDir, 'deliverable.txt');
+    fs.mkdirSync(path.dirname(declaredPath), { recursive: true });
+    fs.writeFileSync(declaredPath, 'generic-file-output');
+    return {
+      outputText: `文件已附上。\n\n\`\`\`codexbridge-artifacts\n[{"path":${JSON.stringify(declaredPath)},"kind":"file","displayName":"deliverable.txt","caption":"final deliverable"}]\n\`\`\``,
+      turnId,
+      threadId: bridgeSession.codexThreadId,
+      title: bridgeSession.title,
+    };
+  };
 
   const first = await runtime.services.bridgeCoordinator.handleInboundEvent({
     platform: 'weixin',
@@ -911,17 +924,8 @@ test('bridge coordinator asks once for the export format before starting a gener
     text: '把结果导出一下发我',
   });
 
-  assert.match(first.messages[0]?.text ?? '', /什么格式|PDF|Word|Excel/);
-  assert.equal(openai.startTurnCalls.length, 0);
-
-  await runtime.services.bridgeCoordinator.handleInboundEvent({
-    platform: 'weixin',
-    externalScopeId: 'wx-user-file-clarify-1',
-    text: 'pdf',
-  });
-
-  assert.equal(openai.startTurnCalls.length, 1);
-  assert.match(String(openai.startTurnCalls[0]?.inputText ?? ''), /Export the final deliverable as PDF/i);
+  assert.equal(first.messages[0]?.text, '文件已附上。');
+  assert.ok(typeof first.messages[1]?.mediaPath === 'string' && first.messages[1]?.mediaPath.endsWith('deliverable.txt'));
 });
 
 test('bridge coordinator warns when multiple fallback candidates remain ambiguous instead of sending arbitrary attachments', async () => {

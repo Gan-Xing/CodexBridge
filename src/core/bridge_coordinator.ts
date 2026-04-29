@@ -10,8 +10,6 @@ import type { AssistantRecordDraft } from './assistant_record_service.js';
 import {
   createPendingTurnArtifactDeliveryState,
   createTurnArtifactContext,
-  detectRequestedArtifactFormat,
-  detectTurnArtifactIntent,
   ensureTurnArtifactDirectories,
   finalizeTurnArtifacts,
 } from './turn_artifacts.js';
@@ -400,7 +398,6 @@ export class BridgeCoordinator {
   mcpBrowserStates: Map<any, McpBrowserState>;
   pendingPluginAliasDraftsByScope: Map<string, PendingPluginAliasDraft>;
   localeOverridesByScope: Map<string, SupportedLocale>;
-  pendingArtifactClarificationsByScope: Map<string, { originalText: string; askedAt: number }>;
   pendingInstructionsEditsByScope: Map<string, { startedAt: number }>;
   pendingAutomationDraftsByScope: Map<string, PendingAutomationDraft>;
   pendingAgentDraftsByScope: Map<string, PendingAgentDraft>;
@@ -448,7 +445,6 @@ export class BridgeCoordinator {
     this.mcpBrowserStates = new Map();
     this.pendingPluginAliasDraftsByScope = new Map();
     this.localeOverridesByScope = new Map();
-    this.pendingArtifactClarificationsByScope = new Map();
     this.pendingInstructionsEditsByScope = new Map();
     this.pendingAutomationDraftsByScope = new Map();
     this.pendingAgentDraftsByScope = new Map();
@@ -649,34 +645,7 @@ export class BridgeCoordinator {
   }
 
   resolveArtifactClarification(scopeRef, event) {
-    const scopeKey = formatPlatformScopeKey(scopeRef.platform, scopeRef.externalScopeId);
-    const pending = this.pendingArtifactClarificationsByScope.get(scopeKey) ?? null;
-    if (pending) {
-      this.pendingArtifactClarificationsByScope.delete(scopeKey);
-      const resolvedFormat = detectRequestedArtifactFormat(event?.text ?? '');
-      if (!resolvedFormat) {
-        return { event };
-      }
-      return {
-        event: {
-          ...event,
-          text: mergeArtifactClarificationAnswer(pending.originalText, resolvedFormat),
-        },
-      };
-    }
-    const intent = detectTurnArtifactIntent(event?.text ?? '');
-    if (!intent.requested || !intent.requiresClarification) {
-      return { event };
-    }
-    this.pendingArtifactClarificationsByScope.set(scopeKey, {
-      originalText: String(event?.text ?? ''),
-      askedAt: this.now(),
-    });
-    return {
-      response: messageResponse([
-        this.t('coordinator.artifact.clarifyFormat'),
-      ], this.buildScopedSessionMeta(event)),
-    };
+    return { event, response: null };
   }
 
   async handleCommand(event, command, options = {}) {
@@ -8121,15 +8090,6 @@ function formatBinarySize(value: unknown): string {
   }
   const digits = size >= 10 ? 0 : 1;
   return `${size.toFixed(digits)} ${units[Math.max(unitIndex, 0)]}`;
-}
-
-function mergeArtifactClarificationAnswer(originalText: string, format: string): string {
-  const normalizedOriginal = String(originalText ?? '').trim();
-  const normalizedFormat = String(format ?? '').trim().toUpperCase();
-  if (!normalizedOriginal) {
-    return `Export the final deliverable as ${normalizedFormat} and send it back as an attachment.`;
-  }
-  return `${normalizedOriginal}\n\nExport the final deliverable as ${normalizedFormat} and send it back as an attachment.`;
 }
 
 function messageResponse(lines, session = undefined): CoordinatorResponse {

@@ -55,6 +55,9 @@ export function detectTurnArtifactIntent(text: string): TurnArtifactIntent {
     return emptyIntent();
   }
   const lowered = normalized.toLowerCase();
+  if (explicitlyPrefersTextOnly(lowered)) {
+    return emptyIntent();
+  }
   const requestedFormat = detectRequestedFormat(lowered);
   const requestedExtension = extensionForFormat(requestedFormat);
   const preferredKind = kindForFormat(requestedFormat);
@@ -94,7 +97,7 @@ export function detectTurnArtifactIntent(text: string): TurnArtifactIntent {
       requestedExtension,
       requestedFileName,
       userDescription: normalized,
-      requiresClarification: !requestedFormat,
+      requiresClarification: false,
     };
   }
 
@@ -119,7 +122,7 @@ export function createTurnArtifactContext({
   text: string;
 }): TurnArtifactContext | null {
   const intent = detectTurnArtifactIntent(text);
-  if (!intent.requested || intent.requiresClarification) {
+  if (!intent.requested) {
     return null;
   }
   const requestId = crypto.randomUUID();
@@ -1117,8 +1120,8 @@ function kindForFormat(format: string | null): TurnArtifactIntent['preferredKind
 function hasGenericArtifactRequest(loweredText: string): boolean {
   const hasDeliveryVerb = hasArtifactDeliveryVerb(loweredText);
   const hasArtifactNoun = /(文件|附件|文档|报告|压缩包|file|attachment|document|report|bundle)/iu.test(loweredText);
-  const hasFileCreationVerb = /(导出|输出|保存成|另存为|打包|压缩|export|output|attach|save as)/iu.test(loweredText);
-  const hasReturnVerb = /(发我|给我|发给我|传给我|回传|send me|deliver|return)/iu.test(loweredText);
+  const hasFileCreationVerb = /(导出|保存成|另存为|打包|压缩|\bexport\b|\battach\b|\bsave as\b)/iu.test(loweredText);
+  const hasReturnVerb = /(发我|给我|发给我|传给我|回传|send me|\bdeliver\b|\breturn\b)/iu.test(loweredText);
   return (hasDeliveryVerb && hasArtifactNoun) || (hasFileCreationVerb && hasReturnVerb);
 }
 
@@ -1131,7 +1134,11 @@ function detectExplicitArtifactFileName(text: string): string | null {
 }
 
 function hasArtifactDeliveryVerb(loweredText: string): boolean {
-  return /(发我|给我|发给我|传给我|回传|导出|输出|生成|整理成|保存成|打包|做成|写成|转成|转换成|send me|return .*file|export|deliver|attach|save as|output as|convert to)/iu.test(loweredText);
+  return /(发我|给我|发给我|传给我|回传|导出|生成|整理成|保存成|打包|做成|写成|转成|转换成|send me|\breturn\b.*\bfile\b|\bexport\b|\bdeliver\b|\battach\b|\bsave as\b|\bconvert to\b)/iu.test(loweredText);
+}
+
+function explicitlyPrefersTextOnly(loweredText: string): boolean {
+  return /(只返回最终文本|只返回文本|仅返回文本|直接返回文本|纯文本|text only|final answer 返回|final answer reply|不要附件|无需附件|不带附件|不要文件|无需文件|不要导出|不用导出)/iu.test(loweredText);
 }
 
 function firstNonEmpty(...values: Array<string | null | undefined>): string {
