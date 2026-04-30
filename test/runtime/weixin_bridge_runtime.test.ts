@@ -163,6 +163,38 @@ test('WeixinBridgeRuntime keeps sending typing notifications while a long-runnin
   assert.equal(typing.filter((entry) => entry.status === 'start').length >= 2, true);
 });
 
+test('WeixinBridgeRuntime does not deadlock when the first final preview delta has no sentence boundary', async () => {
+  const sent: Array<{ externalScopeId: string; content: string }> = [];
+  const runtime = makeRuntime({
+    previewSoftTargetBytes: 1024,
+    previewIntervalMs: 1,
+    sendText: async ({ externalScopeId, content }) => {
+      sent.push({ externalScopeId, content });
+    },
+    coordinator: {
+      async handleInboundEvent(_event: any, options: any = {}) {
+        await options.onProgress?.({
+          text: '我',
+          delta: '我',
+          outputKind: 'final_answer',
+        });
+        await options.onProgress?.({
+          text: '我已经查完了。',
+          delta: '已经查完了。',
+          outputKind: 'final_answer',
+        });
+        return completeResponse('我已经查完了。');
+      },
+    },
+  });
+
+  await runtime.runOnce();
+
+  assert.deepEqual(sent, [
+    { externalScopeId: 'wxid_1', content: '我已经查完了。' },
+  ]);
+});
+
 test('WeixinBridgeRuntime runs /review in the background so the immediate progress preview can be delivered without blocking dispatch', async () => {
   const sent: Array<{ externalScopeId: string; content: string }> = [];
   let releaseReview: () => void = () => {};

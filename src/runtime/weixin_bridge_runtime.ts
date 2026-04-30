@@ -600,13 +600,6 @@ export class WeixinBridgeRuntime {
     streamState.previewPumpPromise = this.runPreviewPump(event, streamState)
       .finally(() => {
         streamState.previewPumpPromise = null;
-        if (
-          streamState.pendingPreview &&
-          !streamState.previewStopped &&
-          !streamState.streamingDisabled
-        ) {
-          this.ensurePreviewPump(event, streamState);
-        }
       });
   }
 
@@ -636,7 +629,7 @@ export class WeixinBridgeRuntime {
       ) {
         if (streamState.smallPreviewDelayUntil === 0) {
           streamState.smallPreviewDelayUntil = Date.now() + this.previewIntervalMs;
-          return;
+          continue;
         }
       }
       streamState.smallPreviewDelayUntil = 0;
