@@ -39,6 +39,7 @@ class FakeProviderPlugin {
   mcpServerStatuses: any[];
   mcpEnabledByName: Map<any, any>;
   threadCounter: number;
+  internalThreadCounter: number;
   baseTime: number;
   clock: number;
   threads: Map<any, any>;
@@ -154,6 +155,7 @@ class FakeProviderPlugin {
     this.mcpServerStatuses = [];
     this.mcpEnabledByName = new Map();
     this.threadCounter = 0;
+    this.internalThreadCounter = 0;
     this.baseTime = Date.now();
     this.clock = 0;
     this.threads = new Map();
@@ -165,12 +167,25 @@ class FakeProviderPlugin {
   }
 
   async startThread({ providerProfile, cwd, title, metadata }) {
-    this.threadCounter += 1;
-    this.startThreadCalls.push({ providerProfile, cwd, title, metadata });
+    const internalArtifactThread = metadata?.source === 'turn-artifact-intent';
+    if (internalArtifactThread) {
+      this.internalThreadCounter += 1;
+    } else {
+      this.threadCounter += 1;
+    }
+    if (metadata?.source !== 'turn-artifact-intent') {
+      this.startThreadCalls.push({ providerProfile, cwd, title, metadata });
+    }
+    const threadSuffix = internalArtifactThread
+      ? `internal-thread-${this.internalThreadCounter}`
+      : `thread-${this.threadCounter}`;
+    const defaultTitle = internalArtifactThread
+      ? `${providerProfile.displayName} ${threadSuffix}`
+      : `${providerProfile.displayName} thread ${this.threadCounter}`;
     const thread = {
-      threadId: `${providerProfile.id}-thread-${this.threadCounter}`,
+      threadId: `${providerProfile.id}-${threadSuffix}`,
       cwd: cwd ?? `/tmp/${providerProfile.id}`,
-      title: title ?? `${providerProfile.displayName} thread ${this.threadCounter}`,
+      title: title ?? defaultTitle,
       updatedAt: this.nextUpdatedAt(),
       preview: '',
       turns: [],
@@ -232,7 +247,9 @@ class FakeProviderPlugin {
   }
 
   async startTurn({ providerProfile, bridgeSession, sessionSettings, event, inputText, onTurnStarted = null }) {
-    this.startTurnCalls.push({ providerProfile, bridgeSession, sessionSettings, event, inputText });
+    if (bridgeSession?.title !== 'Artifact Delivery Intent Parser') {
+      this.startTurnCalls.push({ providerProfile, bridgeSession, sessionSettings, event, inputText });
+    }
     const existingThread = this.threads.get(bridgeSession.codexThreadId);
     if (!existingThread) {
       throw new Error(`thread not found: ${bridgeSession.codexThreadId}`);
@@ -504,6 +521,33 @@ function makeRuntime({
   return { runtime, openai, minimax };
 }
 
+async function maybeReturnArtifactIntentParserResult({
+  bridgeSession,
+  onTurnStarted,
+  decision,
+}: {
+  bridgeSession: any;
+  onTurnStarted?: ((meta: { turnId?: string | null; threadId?: string | null }) => Promise<void>) | null;
+  decision: Record<string, unknown>;
+}) {
+  if (bridgeSession?.title !== 'Artifact Delivery Intent Parser') {
+    return null;
+  }
+  const turnId = `${bridgeSession.codexThreadId}-artifact-intent`;
+  if (typeof onTurnStarted === 'function') {
+    await onTurnStarted({
+      turnId,
+      threadId: bridgeSession.codexThreadId,
+    });
+  }
+  return {
+    outputText: JSON.stringify(decision),
+    turnId,
+    threadId: bridgeSession.codexThreadId,
+    title: bridgeSession.title,
+  };
+}
+
 function makeFakeCodexInstructionsManager({
   path: filePath = '/tmp/.codex/AGENTS.md',
   content = '',
@@ -753,6 +797,21 @@ test('bridge coordinator returns generated image outputs as media messages', asy
 test('bridge coordinator strips hidden artifact manifests and returns declared file attachments as media messages', async () => {
   const { runtime, openai } = makeRuntime({ defaultCwd: '/tmp/codexbridge-artifact-manifest' });
   openai.startTurn = async ({ bridgeSession, inputText, event, onTurnStarted = null }) => {
+    const parserResult = await maybeReturnArtifactIntentParserResult({
+      bridgeSession,
+      onTurnStarted,
+      decision: {
+        action: 'deliver_file',
+        preferredKind: 'file',
+        requestedFormat: 'docx',
+        explicit: true,
+        confidence: 0.99,
+        reason: '用户明确要求整理成 Word 文档并发送。',
+      },
+    });
+    if (parserResult) {
+      return parserResult;
+    }
     const turnId = `${bridgeSession.codexThreadId}-turn-artifact-1`;
     if (typeof onTurnStarted === 'function') {
       await onTurnStarted({
@@ -790,6 +849,21 @@ test('bridge coordinator strips hidden artifact manifests and returns declared f
 test('bridge coordinator recognizes "md 文件" requests and returns the markdown deliverable as media', async () => {
   const { runtime, openai } = makeRuntime({ defaultCwd: '/tmp/codexbridge-artifact-markdown' });
   openai.startTurn = async ({ bridgeSession, event, onTurnStarted = null }) => {
+    const parserResult = await maybeReturnArtifactIntentParserResult({
+      bridgeSession,
+      onTurnStarted,
+      decision: {
+        action: 'deliver_file',
+        preferredKind: 'file',
+        requestedFormat: 'md',
+        explicit: true,
+        confidence: 0.99,
+        reason: '用户明确要求 md 文件交付。',
+      },
+    });
+    if (parserResult) {
+      return parserResult;
+    }
     const turnId = `${bridgeSession.codexThreadId}-turn-artifact-md-1`;
     if (typeof onTurnStarted === 'function') {
       await onTurnStarted({
@@ -827,6 +901,21 @@ test('bridge coordinator recognizes "md 文件" requests and returns the markdow
 test('bridge coordinator starts a generic file-delivery turn without asking for format first', async () => {
   const { runtime, openai } = makeRuntime({ defaultCwd: '/tmp/codexbridge-artifact-clarify-md' });
   openai.startTurn = async ({ bridgeSession, event, onTurnStarted = null }) => {
+    const parserResult = await maybeReturnArtifactIntentParserResult({
+      bridgeSession,
+      onTurnStarted,
+      decision: {
+        action: 'deliver_file',
+        preferredKind: 'file',
+        requestedFormat: null,
+        explicit: true,
+        confidence: 0.97,
+        reason: '用户明确要求把文件直接发送回去，格式未指定。',
+      },
+    });
+    if (parserResult) {
+      return parserResult;
+    }
     const turnId = `${bridgeSession.codexThreadId}-turn-artifact-clarify-md-1`;
     if (typeof onTurnStarted === 'function') {
       await onTurnStarted({
@@ -864,6 +953,21 @@ test('bridge coordinator starts a generic file-delivery turn without asking for 
 test('bridge coordinator falls back to a single generated file in the turn artifact directory when the manifest is missing', async () => {
   const { runtime, openai } = makeRuntime({ defaultCwd: '/tmp/codexbridge-artifact-fallback' });
   openai.startTurn = async ({ bridgeSession, event, onTurnStarted = null }) => {
+    const parserResult = await maybeReturnArtifactIntentParserResult({
+      bridgeSession,
+      onTurnStarted,
+      decision: {
+        action: 'deliver_file',
+        preferredKind: 'file',
+        requestedFormat: 'pdf',
+        explicit: true,
+        confidence: 0.99,
+        reason: '用户明确要求导出 PDF 并发送。',
+      },
+    });
+    if (parserResult) {
+      return parserResult;
+    }
     const turnId = `${bridgeSession.codexThreadId}-turn-artifact-2`;
     if (typeof onTurnStarted === 'function') {
       await onTurnStarted({
@@ -898,6 +1002,21 @@ test('bridge coordinator falls back to a single generated file in the turn artif
 test('bridge coordinator starts a generic export turn immediately without asking for the export format', async () => {
   const { runtime, openai } = makeRuntime({ defaultCwd: '/tmp/codexbridge-artifact-clarify' });
   openai.startTurn = async ({ bridgeSession, event, onTurnStarted = null }) => {
+    const parserResult = await maybeReturnArtifactIntentParserResult({
+      bridgeSession,
+      onTurnStarted,
+      decision: {
+        action: 'deliver_file',
+        preferredKind: 'file',
+        requestedFormat: null,
+        explicit: true,
+        confidence: 0.95,
+        reason: '用户明确要求导出并发送结果，但没有指定格式。',
+      },
+    });
+    if (parserResult) {
+      return parserResult;
+    }
     const turnId = `${bridgeSession.codexThreadId}-turn-artifact-generic-1`;
     if (typeof onTurnStarted === 'function') {
       await onTurnStarted({
@@ -931,6 +1050,21 @@ test('bridge coordinator starts a generic export turn immediately without asking
 test('bridge coordinator warns when multiple fallback candidates remain ambiguous instead of sending arbitrary attachments', async () => {
   const { runtime, openai } = makeRuntime({ defaultCwd: '/tmp/codexbridge-artifact-ambiguous' });
   openai.startTurn = async ({ bridgeSession, event, onTurnStarted = null }) => {
+    const parserResult = await maybeReturnArtifactIntentParserResult({
+      bridgeSession,
+      onTurnStarted,
+      decision: {
+        action: 'deliver_file',
+        preferredKind: 'file',
+        requestedFormat: 'pdf',
+        explicit: true,
+        confidence: 0.99,
+        reason: '用户明确要求导出 PDF 并发送。',
+      },
+    });
+    if (parserResult) {
+      return parserResult;
+    }
     const turnId = `${bridgeSession.codexThreadId}-turn-artifact-3`;
     if (typeof onTurnStarted === 'function') {
       await onTurnStarted({
@@ -961,6 +1095,53 @@ test('bridge coordinator warns when multiple fallback candidates remain ambiguou
   assert.equal(result.messages.some((message) => Boolean(message.mediaPath)), false);
   assert.equal(lines[0], 'PDF 已生成。');
   assert.ok(lines.some((line) => /候选文件/.test(line)));
+});
+
+test('bridge coordinator does not force artifact delivery when the user complains about unexpected files', async () => {
+  const { runtime, openai } = makeRuntime({ defaultCwd: '/tmp/codexbridge-artifact-complaint' });
+  openai.startTurn = async ({ bridgeSession, event, inputText, onTurnStarted = null }) => {
+    const parserResult = await maybeReturnArtifactIntentParserResult({
+      bridgeSession,
+      onTurnStarted,
+      decision: {
+        action: 'none',
+        preferredKind: null,
+        requestedFormat: null,
+        textOnly: true,
+        explicit: false,
+        confidence: 0.98,
+        reason: '用户是在抱怨附件，不是在要求新的文件交付。',
+      },
+    });
+    if (parserResult) {
+      return parserResult;
+    }
+    const turnId = `${bridgeSession.codexThreadId}-turn-artifact-complaint-1`;
+    if (typeof onTurnStarted === 'function') {
+      await onTurnStarted({
+        turnId,
+        threadId: bridgeSession.codexThreadId,
+      });
+    }
+    assert.equal(event?.metadata?.codexbridge?.turnArtifactContext ?? null, null);
+    return {
+      outputText: `openai: ${inputText}`,
+      turnId,
+      threadId: bridgeSession.codexThreadId,
+      title: bridgeSession.title,
+    };
+  };
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-file-complaint-1',
+    text: '怎么回事？怎么又多了一个文件？又多了一个文件，你这每回都会给我发文件，这可不太好吧',
+  });
+
+  assert.equal(result.type, 'message');
+  assert.equal(result.messages.length, 1);
+  assert.match(result.messages[0]?.text ?? '', /openai:/);
+  assert.equal(result.messages[0]?.mediaPath ?? null, null);
 });
 
 test('bridge coordinator uses the runtime default cwd for new sessions', async () => {
@@ -1228,6 +1409,21 @@ test('/status details includes full diagnostics for the current session', async 
 test('/status details includes the last artifact delivery status for the current session', async () => {
   const { runtime, openai } = makeRuntime({ defaultCwd: '/tmp/codexbridge-status-artifacts' });
   openai.startTurn = async ({ bridgeSession, event, onTurnStarted = null }) => {
+    const parserResult = await maybeReturnArtifactIntentParserResult({
+      bridgeSession,
+      onTurnStarted,
+      decision: {
+        action: 'deliver_file',
+        preferredKind: 'file',
+        requestedFormat: 'docx',
+        explicit: true,
+        confidence: 0.99,
+        reason: '用户明确要求整理成 Word 发回。',
+      },
+    });
+    if (parserResult) {
+      return parserResult;
+    }
     const turnId = `${bridgeSession.codexThreadId}-turn-artifact-status-1`;
     if (typeof onTurnStarted === 'function') {
       await onTurnStarted({
@@ -1654,6 +1850,21 @@ test('conversation turns remain blocked when the previous provider turn is still
   let runningTurnId = '';
 
   openai.startTurn = async ({ bridgeSession, onTurnStarted = null }) => {
+    const parserResult = await maybeReturnArtifactIntentParserResult({
+      bridgeSession,
+      onTurnStarted,
+      decision: {
+        action: 'none',
+        preferredKind: null,
+        requestedFormat: null,
+        explicit: false,
+        confidence: 0.95,
+        reason: '普通对话，不要求附件。',
+      },
+    });
+    if (parserResult) {
+      return parserResult;
+    }
     openai.startTurnCalls.push({ bridgeSession });
     const thread = openai.threads.get(bridgeSession.codexThreadId);
     assert.ok(thread);
@@ -3612,6 +3823,21 @@ test('/stop interrupts the active turn once the provider has issued a turn id', 
   let interrupted = false;
 
   openai.startTurn = async ({ bridgeSession, inputText, onTurnStarted = null }) => {
+    const parserResult = await maybeReturnArtifactIntentParserResult({
+      bridgeSession,
+      onTurnStarted,
+      decision: {
+        action: 'none',
+        preferredKind: null,
+        requestedFormat: null,
+        explicit: false,
+        confidence: 0.95,
+        reason: '普通对话，不要求附件。',
+      },
+    });
+    if (parserResult) {
+      return parserResult;
+    }
     const existingThread = openai.threads.get(bridgeSession.codexThreadId);
     assert.ok(existingThread);
     const turnId = `${bridgeSession.codexThreadId}-turn-${(existingThread?.turns.length ?? 0) + 1}`;
@@ -3703,6 +3929,21 @@ test('/interrupt remains a hidden compatibility alias and can queue an interrupt
   });
 
   openai.startTurn = async ({ bridgeSession, onTurnStarted = null }) => {
+    const parserResult = await maybeReturnArtifactIntentParserResult({
+      bridgeSession,
+      onTurnStarted,
+      decision: {
+        action: 'none',
+        preferredKind: null,
+        requestedFormat: null,
+        explicit: false,
+        confidence: 0.95,
+        reason: '普通对话，不要求附件。',
+      },
+    });
+    if (parserResult) {
+      return parserResult;
+    }
     await startGate;
     await onTurnStarted?.({
       turnId: `${bridgeSession.codexThreadId}-turn-pending`,
@@ -3753,6 +3994,21 @@ test('/status shows running active-turn details and control hint', async () => {
   });
 
   openai.startTurn = async ({ bridgeSession, inputText, onTurnStarted = null }) => {
+    const parserResult = await maybeReturnArtifactIntentParserResult({
+      bridgeSession,
+      onTurnStarted,
+      decision: {
+        action: 'none',
+        preferredKind: null,
+        requestedFormat: null,
+        explicit: false,
+        confidence: 0.95,
+        reason: '普通对话，不要求附件。',
+      },
+    });
+    if (parserResult) {
+      return parserResult;
+    }
     const thread = openai.threads.get(bridgeSession.codexThreadId);
     assert.ok(thread);
     await onTurnStarted?.({
@@ -3966,6 +4222,21 @@ test('command-specific blocked messages switch to wait-for-stop wording after in
   let interrupted = false;
 
   openai.startTurn = async ({ bridgeSession, onTurnStarted = null }) => {
+    const parserResult = await maybeReturnArtifactIntentParserResult({
+      bridgeSession,
+      onTurnStarted,
+      decision: {
+        action: 'none',
+        preferredKind: null,
+        requestedFormat: null,
+        explicit: false,
+        confidence: 0.95,
+        reason: '普通对话，不要求附件。',
+      },
+    });
+    if (parserResult) {
+      return parserResult;
+    }
     const thread = openai.threads.get(bridgeSession.codexThreadId);
     assert.ok(thread);
     await onTurnStarted?.({
@@ -5068,6 +5339,21 @@ test('/agent stores generated attachments and can resend them', async () => {
   try {
     const { runtime, openai } = makeRuntime({ defaultCwd: fs.mkdtempSync(path.join(os.tmpdir(), 'agent-artifacts-')) });
     openai.startTurn = async ({ providerProfile, bridgeSession, sessionSettings, event, inputText, onTurnStarted = null }) => {
+      const parserResult = await maybeReturnArtifactIntentParserResult({
+        bridgeSession,
+        onTurnStarted,
+        decision: {
+          action: 'deliver_file',
+          preferredKind: 'file',
+          requestedFormat: 'docx',
+          explicit: true,
+          confidence: 0.99,
+          reason: '任务明确要求返回一份 Word 报告。',
+        },
+      });
+      if (parserResult) {
+        return parserResult;
+      }
       openai.startTurnCalls.push({ providerProfile, bridgeSession, sessionSettings, event, inputText });
       const turnId = 'agent-artifact-turn-1';
       await onTurnStarted?.({

@@ -3,82 +3,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { detectTurnArtifactIntent, finalizeTurnArtifacts } from '../../src/core/turn_artifacts.js';
+import { finalizeTurnArtifacts } from '../../src/core/turn_artifacts.js';
 import type { TurnArtifactContext } from '../../src/types/core.js';
-
-test('detectTurnArtifactIntent does not treat document-analysis requests as artifact delivery', () => {
-  const intent = detectTurnArtifactIntent('请总结这份文档的要点，并告诉我结论。');
-  assert.equal(intent.requested, false);
-  assert.equal(intent.requestedFormat, null);
-});
-
-test('detectTurnArtifactIntent recognizes explicit file-delivery requests', () => {
-  const intent = detectTurnArtifactIntent('把结果整理成 Word 发我');
-  assert.equal(intent.requested, true);
-  assert.equal(intent.preferredKind, 'file');
-  assert.equal(intent.requestedFormat, 'docx');
-  assert.equal(intent.requestedExtension, '.docx');
-  assert.equal(intent.requestedFileName, null);
-  assert.equal(intent.requiresClarification, false);
-});
-
-test('detectTurnArtifactIntent marks generic export requests for one-time format clarification', () => {
-  const intent = detectTurnArtifactIntent('把结果导出一下发我');
-  assert.equal(intent.requested, true);
-  assert.equal(intent.requestedFormat, null);
-  assert.equal(intent.requestedFileName, null);
-  assert.equal(intent.requiresClarification, false);
-});
-
-test('detectTurnArtifactIntent recognizes explicit image-delivery requests', () => {
-  const intent = detectTurnArtifactIntent('导出成 PNG 发我');
-  assert.equal(intent.requested, true);
-  assert.equal(intent.preferredKind, 'image');
-  assert.equal(intent.requestedFormat, 'png');
-  assert.equal(intent.requestedExtension, '.png');
-  assert.equal(intent.requestedFileName, null);
-  assert.equal(intent.requiresClarification, false);
-});
-
-test('detectTurnArtifactIntent preserves explicit deliverable filenames from the user request', () => {
-  const intent = detectTurnArtifactIntent('请把未提交修改导出成 release-notes.pdf 发我');
-  assert.equal(intent.requested, true);
-  assert.equal(intent.requestedFormat, 'pdf');
-  assert.equal(intent.requestedFileName, 'release-notes.pdf');
-});
-
-test('detectTurnArtifactIntent recognizes bare md file wording in Chinese', () => {
-  const intent = detectTurnArtifactIntent('帮我整理成一个 md 文件发给我');
-  assert.equal(intent.requested, true);
-  assert.equal(intent.preferredKind, 'file');
-  assert.equal(intent.requestedFormat, 'md');
-  assert.equal(intent.requestedExtension, '.md');
-  assert.equal(intent.requestedFileName, null);
-  assert.equal(intent.requiresClarification, false);
-});
-
-test('detectTurnArtifactIntent does not treat text-only automation prompts as artifact delivery', () => {
-  const intent = detectTurnArtifactIntent(
-    '使用 assistant-checkin skill 和 codexbridge-wechat-delivery skill。检查 CodexBridge 助理记录里的代办、提醒、逾期事项、近期截止、待确认事项和需要注意的事情，输出适合微信阅读的中文助理检查。只返回最终文本，不要寻找微信连接器，不要直接调用微信接口；把最终结果作为 final answer 返回，由 CodexBridge 通过正常 SendGate 队列发送到微信。',
-  );
-  assert.equal(intent.requested, false);
-  assert.equal(intent.requestedFormat, null);
-  assert.equal(intent.requiresClarification, false);
-});
-
-test('detectTurnArtifactIntent does not treat delivery-related skill names as attachment requests by themselves', () => {
-  const intent = detectTurnArtifactIntent('使用 codexbridge-wechat-delivery skill 返回一段微信可读文本');
-  assert.equal(intent.requested, false);
-  assert.equal(intent.requestedFormat, null);
-  assert.equal(intent.requiresClarification, false);
-});
-
-test('detectTurnArtifactIntent does not treat 输出 wording by itself as an attachment request', () => {
-  const intent = detectTurnArtifactIntent('输出适合微信阅读的中文助理检查，然后直接发到微信');
-  assert.equal(intent.requested, false);
-  assert.equal(intent.requestedFormat, null);
-  assert.equal(intent.requiresClarification, false);
-});
 
 test('finalizeTurnArtifacts rejects symlinked manifest files that escape the turn artifact directory', () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-artifacts-'));

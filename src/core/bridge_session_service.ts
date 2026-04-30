@@ -362,6 +362,9 @@ export class BridgeSessionService {
         if (!remoteThread?.threadId || seenThreadIds.has(remoteThread.threadId)) {
           continue;
         }
+        if (isHiddenBridgeInternalThread(remoteThread)) {
+          continue;
+        }
         seenThreadIds.add(remoteThread.threadId);
         const localSession = localByThreadId.get(remoteThread.threadId) ?? null;
         const metadata = metadataByThreadId.get(remoteThread.threadId) ?? null;
@@ -575,6 +578,23 @@ export class BridgeSessionService {
     this.sessionSettings.save(next);
     return next;
   }
+}
+
+function isHiddenBridgeInternalThread(thread: { title?: string | null } | null | undefined): boolean {
+  const title = String(thread?.title ?? '').trim();
+  if (!title) {
+    return false;
+  }
+  return new Set([
+    'Artifact Delivery Intent Parser',
+    'Assistant Record Classifier',
+    'Assistant Record Router',
+    'Assistant Record Rewriter',
+    'Automation Draft Parser',
+    'Automation Draft Editor',
+    'Agent Draft Parser',
+    'Agent Draft Editor',
+  ]).has(title);
 }
 
 function normalizeCwd(value: string | null | undefined): string | null {

@@ -44,6 +44,7 @@ import type {
   PlatformScopeRef,
   PluginAlias,
   SessionSettings,
+  TurnArtifactIntent,
   TurnArtifactDeliveredItem,
   TurnArtifactDeliveryState,
   UploadBatchItem,
@@ -7514,15 +7515,120 @@ export class BridgeCoordinator {
     }
   }
 
+  async normalizeTurnArtifactIntent(
+    event,
+    scopeRef: PlatformScopeRef,
+    session,
+    providerProfile,
+    providerPlugin,
+    sessionSettings,
+  ): Promise<TurnArtifactIntent> {
+    const locale = sessionSettings?.locale ?? this.resolveScopeLocale(scopeRef, event);
+    const timezone = extractEventTimezone(event);
+    const cwd = normalizeCwd(session?.cwd) ?? this.resolveEventCwd(event) ?? null;
+    const codexIntent = await this.normalizeTurnArtifactIntentWithCodex(
+      event,
+      providerProfile,
+      providerPlugin,
+      sessionSettings,
+      session,
+      locale,
+      timezone,
+      cwd,
+    ).catch(() => null);
+    if (codexIntent) {
+      return codexIntent;
+    }
+    const agentsIntent = await normalizeTurnArtifactIntentWithOpenAIAgents(
+      event.text,
+      locale,
+      this.now(),
+      timezone,
+    ).catch(() => null);
+    if (agentsIntent) {
+      return agentsIntent;
+    }
+    return buildEmptyTurnArtifactIntent();
+  }
+
+  async normalizeTurnArtifactIntentWithCodex(
+    event,
+    providerProfile,
+    providerPlugin,
+    sessionSettings,
+    session,
+    locale: string | null,
+    timezone: string | null,
+    cwd: string | null,
+  ): Promise<TurnArtifactIntent | null> {
+    if (!providerPlugin || typeof providerPlugin.startThread !== 'function' || typeof providerPlugin.startTurn !== 'function') {
+      return null;
+    }
+    const thread = await providerPlugin.startThread({
+      providerProfile,
+      cwd,
+      title: 'Artifact Delivery Intent Parser',
+      metadata: {
+        sourcePlatform: event.platform,
+        source: 'turn-artifact-intent',
+      },
+    });
+    const parserSession = {
+      id: crypto.randomUUID(),
+      providerProfileId: providerProfile.id,
+      codexThreadId: thread.threadId,
+      cwd: thread.cwd ?? cwd,
+      title: thread.title ?? 'Artifact Delivery Intent Parser',
+      createdAt: this.now(),
+      updatedAt: this.now(),
+    };
+    const prompt = buildTurnArtifactIntentPrompt(event.text, locale, this.now(), timezone);
+    const result = await providerPlugin.startTurn({
+      providerProfile,
+      bridgeSession: parserSession,
+      sessionSettings: {
+        bridgeSessionId: parserSession.id,
+        model: sessionSettings?.model ?? null,
+        reasoningEffort: sessionSettings?.reasoningEffort ?? null,
+        serviceTier: sessionSettings?.serviceTier ?? null,
+        collaborationMode: null,
+        personality: null,
+        accessPreset: 'read-only',
+        approvalPolicy: 'never',
+        sandboxMode: 'read-only',
+        locale,
+        metadata: {},
+        updatedAt: this.now(),
+      },
+      event: {
+        ...event,
+        text: prompt,
+        cwd: parserSession.cwd ?? null,
+        locale,
+        attachments: [],
+      },
+      inputText: prompt,
+    });
+    return parseTurnArtifactIntentCandidate(result.outputText, event.text, 'codex');
+  }
+
   async startTurnOnSession(session, event, options: StartTurnOptions = {}) {
     const scopeRef = toScopeRef(event);
     const providerProfile = this.requireProviderProfile(session.providerProfileId);
     const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
     const sessionSettings = this.bridgeSessions.getSessionSettings(session.id);
+    const artifactIntent = await this.normalizeTurnArtifactIntent(
+      event,
+      scopeRef,
+      session,
+      providerProfile,
+      providerPlugin,
+      sessionSettings,
+    );
     const turnArtifactContext = createTurnArtifactContext({
       bridgeSessionId: session.id,
       cwd: normalizeCwd(session.cwd) ?? this.resolveEventCwd(event),
-      text: event.text,
+      intent: artifactIntent,
     });
     const pendingArtifactDelivery = createPendingTurnArtifactDeliveryState(turnArtifactContext);
     ensureTurnArtifactDirectories(turnArtifactContext);
@@ -7548,8 +7654,11 @@ export class BridgeCoordinator {
           turnId: turnArtifactContext.turnId ?? null,
           artifactDir: turnArtifactContext.artifactDir ?? null,
           spoolDir: turnArtifactContext.spoolDir ?? null,
+          intent: turnArtifactContext.intent,
         }
-        : null,
+        : {
+          intent: artifactIntent,
+        },
     });
     const result = await providerPlugin.startTurn({
       providerProfile,
@@ -8552,6 +8661,23 @@ async function normalizeAssistantRecordDraftWithOpenAIAgents(
     input: buildAssistantRecordDraftPrompt(rawInput, forcedType, locale, now, timezone),
   });
   return parseAssistantRecordDraftCandidate(output, rawInput, forcedType, fallbackDraft, 'agents-sdk');
+}
+
+async function normalizeTurnArtifactIntentWithOpenAIAgents(
+  rawInput: string,
+  locale: string | null,
+  now: number,
+  timezone: string | null,
+): Promise<TurnArtifactIntent | null> {
+  if (!resolveOpenAIAgentRuntimeConfig().apiKey) {
+    return null;
+  }
+  const output = await runOpenAIAgentJson({
+    name: 'CodexBridge Artifact Intent Classifier',
+    instructions: 'Classify artifact delivery intent as strict JSON only. Do not use markdown.',
+    input: buildTurnArtifactIntentPrompt(rawInput, locale, now, timezone),
+  });
+  return parseTurnArtifactIntentCandidate(output, rawInput, 'agents-sdk');
 }
 
 async function normalizeAutomationDraftWithOpenAIAgents(
@@ -9921,6 +10047,38 @@ function normalizeAssistantPromptTimezone(timezone: string | null): string {
   return normalized || 'Etc/UTC';
 }
 
+function buildTurnArtifactIntentPrompt(
+  rawInput: string,
+  locale: string | null,
+  now: number,
+  timezone: string | null,
+): string {
+  const language = normalizeLocale(locale) === 'zh-CN' ? '中文' : 'English';
+  const resolvedTimezone = normalizeAssistantPromptTimezone(timezone);
+  return [
+    `你是 CodexBridge 的附件交付意图分类器。请用${language}判断用户这条消息是否真的要求“返回一个附件/文件/图片/媒体交付物”。`,
+    '只返回严格 JSON，不要 Markdown，不要解释。',
+    '',
+    'Schema:',
+    '{"action":"none|deliver_file|deliver_image|deliver_video|deliver_audio|clarify","preferredKind":"file|image|video|audio|null","requestedFormat":null,"requestedFileName":null,"textOnly":false,"explicit":false,"confidence":0.0,"reason":"简短理由"}',
+    '',
+    '判断规则：',
+    '- 只有当用户明确要求“导出/整理成某种文件/做成附件/返回图片或文件/发送给我附件”时，action 才能是 deliver_*。',
+    '- 只是提到文件、抱怨附件、讨论“为什么又发文件”、说“不要文件/不要附件/直接文本回复”、分析现有文件、总结上传的文档，这些都必须是 action=none。',
+    '- 如果用户明确要求纯文本回复，不要附件，则 action=none 且 textOnly=true。',
+    '- 如果用户明确要求返回一个交付物，但格式没指定，也不要追问格式；直接用 action=deliver_file，requestedFormat=null。',
+    '- requestedFileName 只有在用户明确给出具体文件名时才填写。',
+    '- 如果用户只是要求“把结论发到微信/直接回复给我”，这仍然是普通文本回复，不是附件交付，action=none。',
+    '- 不确定时宁可返回 none，不要误判成要附件。',
+    '',
+    `当前 UTC 时间：${new Date(now).toISOString()}`,
+    `当前本地时区：${resolvedTimezone}`,
+    '',
+    '用户输入：',
+    rawInput,
+  ].join('\n');
+}
+
 function buildAssistantRecordDraftPrompt(
   rawInput: string,
   forcedType: AssistantRecordType | null,
@@ -9966,6 +10124,58 @@ function buildAssistantRecordDraftPrompt(
     '用户输入：',
     rawInput,
   ].join('\n');
+}
+
+function parseTurnArtifactIntentCandidate(
+  value: unknown,
+  rawInput: string,
+  source: 'codex' | 'agents-sdk',
+): TurnArtifactIntent | null {
+  const parsed = parseJsonObject(value);
+  if (!parsed) {
+    return null;
+  }
+  const action = normalizeTurnArtifactIntentAction(parsed.action ?? parsed.intent ?? parsed.result);
+  if (!action) {
+    return null;
+  }
+  const textOnly = Boolean(parsed.textOnly ?? parsed.text_only ?? parsed.preferTextOnly ?? parsed.prefer_text_only);
+  const explicit = Boolean(parsed.explicit ?? parsed.isExplicit ?? parsed.is_explicit);
+  const reason = truncateText(compactWhitespace(parsed.reason ?? parsed.summary ?? ''), 160);
+  const confidence = clampAssistantConfidence(Number(parsed.confidence ?? 0.8));
+  const requestedFileName = sanitizeRequestedArtifactFileName(
+    parsed.requestedFileName
+      ?? parsed.requested_filename
+      ?? parsed.fileName
+      ?? parsed.filename,
+  );
+  let requestedFormat = normalizeRequestedArtifactFormat(
+    parsed.requestedFormat
+      ?? parsed.requested_format
+      ?? parsed.format,
+  );
+  if (!requestedFormat && requestedFileName) {
+    requestedFormat = normalizeRequestedArtifactFormat(path.extname(requestedFileName));
+  }
+  let preferredKind = normalizeTurnArtifactIntentKind(parsed.preferredKind ?? parsed.preferred_kind ?? parsed.kind);
+  if (!preferredKind && requestedFormat) {
+    preferredKind = artifactKindForRequestedFormat(requestedFormat);
+  }
+  if (!preferredKind && action !== 'none' && action !== 'clarify') {
+    preferredKind = artifactKindForTurnArtifactAction(action);
+  }
+  if (textOnly || action === 'none' || action === 'clarify') {
+    return buildEmptyTurnArtifactIntent();
+  }
+  return {
+    requested: true,
+    preferredKind: preferredKind ?? 'file',
+    requestedFormat,
+    requestedExtension: requestedArtifactExtensionForFormat(requestedFormat),
+    requestedFileName,
+    userDescription: explicit ? rawInput : (reason || rawInput),
+    requiresClarification: false,
+  };
 }
 
 function parseAssistantRecordDraftCandidate(
@@ -10877,6 +11087,164 @@ function formatThreadTitle(title, preview, i18n: Translator) {
 function normalizeThreadPreview(preview, i18n: Translator) {
   const normalized = compactWhitespace(preview || '');
   return normalized ? truncateText(normalized, THREAD_PREVIEW_LIMIT) : i18n.t('coordinator.thread.emptyPreview');
+}
+
+function buildEmptyTurnArtifactIntent(): TurnArtifactIntent {
+  return {
+    requested: false,
+    preferredKind: null,
+    requestedFormat: null,
+    requestedExtension: null,
+    requestedFileName: null,
+    userDescription: null,
+    requiresClarification: false,
+  };
+}
+
+function normalizeTurnArtifactIntentAction(value: unknown): 'none' | 'deliver_file' | 'deliver_image' | 'deliver_video' | 'deliver_audio' | 'clarify' | null {
+  const normalized = compactWhitespace(value).toLowerCase();
+  switch (normalized) {
+    case 'none':
+    case 'no':
+    case 'text':
+    case 'text_only':
+      return 'none';
+    case 'deliver_file':
+    case 'file':
+    case 'attachment':
+      return 'deliver_file';
+    case 'deliver_image':
+    case 'image':
+    case 'photo':
+      return 'deliver_image';
+    case 'deliver_video':
+    case 'video':
+      return 'deliver_video';
+    case 'deliver_audio':
+    case 'audio':
+      return 'deliver_audio';
+    case 'clarify':
+    case 'ambiguous':
+      return 'clarify';
+    default:
+      return null;
+  }
+}
+
+function normalizeTurnArtifactIntentKind(value: unknown): TurnArtifactIntent['preferredKind'] {
+  const normalized = compactWhitespace(value).toLowerCase();
+  switch (normalized) {
+    case 'image':
+    case 'photo':
+      return 'image';
+    case 'video':
+      return 'video';
+    case 'audio':
+      return 'audio';
+    case 'file':
+    case 'document':
+    case 'attachment':
+      return 'file';
+    default:
+      return null;
+  }
+}
+
+function normalizeRequestedArtifactFormat(value: unknown): string | null {
+  const normalized = compactWhitespace(value).toLowerCase().replace(/^\./u, '');
+  if (!normalized) {
+    return null;
+  }
+  const aliasMap: Record<string, string> = {
+    jpeg: 'jpg',
+    word: 'docx',
+    doc: 'docx',
+    xls: 'xlsx',
+    markdown: 'md',
+    htm: 'html',
+  };
+  const resolved = aliasMap[normalized] ?? normalized;
+  return new Set([
+    'png',
+    'jpg',
+    'webp',
+    'docx',
+    'pdf',
+    'xlsx',
+    'csv',
+    'zip',
+    'md',
+    'txt',
+    'json',
+    'html',
+    'mp4',
+    'mov',
+    'webm',
+    'mp3',
+    'wav',
+    'ogg',
+    'm4a',
+  ]).has(resolved) ? resolved : null;
+}
+
+function requestedArtifactExtensionForFormat(format: string | null): string | null {
+  if (!format) {
+    return null;
+  }
+  return format.startsWith('.') ? format : `.${format}`;
+}
+
+function artifactKindForRequestedFormat(format: string | null): TurnArtifactIntent['preferredKind'] {
+  switch (format) {
+    case 'png':
+    case 'jpg':
+    case 'webp':
+      return 'image';
+    case 'mp4':
+    case 'mov':
+    case 'webm':
+      return 'video';
+    case 'mp3':
+    case 'wav':
+    case 'ogg':
+    case 'm4a':
+      return 'audio';
+    case 'docx':
+    case 'pdf':
+    case 'xlsx':
+    case 'csv':
+    case 'zip':
+    case 'md':
+    case 'txt':
+    case 'json':
+    case 'html':
+      return 'file';
+    default:
+      return null;
+  }
+}
+
+function artifactKindForTurnArtifactAction(action: 'deliver_file' | 'deliver_image' | 'deliver_video' | 'deliver_audio'): TurnArtifactIntent['preferredKind'] {
+  switch (action) {
+    case 'deliver_image':
+      return 'image';
+    case 'deliver_video':
+      return 'video';
+    case 'deliver_audio':
+      return 'audio';
+    default:
+      return 'file';
+  }
+}
+
+function sanitizeRequestedArtifactFileName(value: unknown): string | null {
+  const normalized = compactWhitespace(value);
+  if (!normalized) {
+    return null;
+  }
+  const baseName = path.basename(normalized);
+  const sanitized = baseName.replace(/[\u0000-\u001f<>:"/\\|?*]+/gu, '-').trim();
+  return sanitized || null;
 }
 
 function compactWhitespace(value) {

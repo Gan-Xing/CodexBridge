@@ -49,80 +49,16 @@ interface ArtifactPolicyResult extends MaterializedArtifactResult {
   countRejectedCount: number;
 }
 
-export function detectTurnArtifactIntent(text: string): TurnArtifactIntent {
-  const normalized = String(text ?? '').trim();
-  if (!normalized) {
-    return emptyIntent();
-  }
-  const lowered = normalized.toLowerCase();
-  if (explicitlyPrefersTextOnly(lowered)) {
-    return emptyIntent();
-  }
-  const requestedFormat = detectRequestedFormat(lowered);
-  const requestedExtension = extensionForFormat(requestedFormat);
-  const preferredKind = kindForFormat(requestedFormat);
-  const explicitFileName = detectExplicitArtifactFileName(normalized);
-  const requestedFileName = explicitFileName;
-  const hasDeliveryVerb = hasArtifactDeliveryVerb(lowered);
-
-  if (preferredKind && preferredKind !== 'image' && hasDeliveryVerb) {
-    return {
-      requested: true,
-      preferredKind,
-      requestedFormat,
-      requestedExtension,
-      requestedFileName,
-      userDescription: normalized,
-      requiresClarification: false,
-    };
-  }
-
-  if (preferredKind === 'image' && hasDeliveryVerb) {
-    return {
-      requested: true,
-      preferredKind,
-      requestedFormat,
-      requestedExtension,
-      requestedFileName,
-      userDescription: normalized,
-      requiresClarification: false,
-    };
-  }
-
-  if (hasGenericArtifactRequest(lowered)) {
-    return {
-      requested: true,
-      preferredKind: 'file',
-      requestedFormat,
-      requestedExtension,
-      requestedFileName,
-      userDescription: normalized,
-      requiresClarification: false,
-    };
-  }
-
-  return emptyIntent();
-}
-
-export function detectRequestedArtifactFormat(text: string): string | null {
-  const normalized = String(text ?? '').trim().toLowerCase();
-  if (!normalized) {
-    return null;
-  }
-  return detectRequestedFormat(normalized);
-}
-
 export function createTurnArtifactContext({
   bridgeSessionId,
   cwd,
-  text,
+  intent,
 }: {
   bridgeSessionId: string;
   cwd?: string | null;
-  text: string;
+  intent: TurnArtifactIntent | null | undefined;
 }): TurnArtifactContext | null {
-  const intent = detectTurnArtifactIntent(text);
-  if (!intent.requested) {
+  if (!intent?.requested) {
     return null;
   }
   const requestId = crypto.randomUUID();
@@ -1045,102 +981,6 @@ function resolveArtifactBaseDir(cwd: string | null | undefined): string {
   return normalized || path.join(os.homedir(), '.codexbridge');
 }
 
-function detectRequestedFormat(loweredText: string): string | null {
-  if (/(?:\.png\b|\bpng\b|png图片|png图)/iu.test(loweredText)) {
-    return 'png';
-  }
-  if (/(?:\.jpe?g\b|\.jpg\b|\bjpeg\b|\bjpg\b|jpg图片|jpeg图片)/iu.test(loweredText)) {
-    return 'jpg';
-  }
-  if (/(?:\.webp\b|\bwebp\b)/iu.test(loweredText)) {
-    return 'webp';
-  }
-  if (/(?:\.docx\b|\.doc\b|\bdocx\b|\bdoc\b|\bword\b|word文档|文档|文稿)/iu.test(loweredText)) {
-    return 'docx';
-  }
-  if (/(?:\.pdf\b|\bpdf\b|pdf文件)/iu.test(loweredText)) {
-    return 'pdf';
-  }
-  if (/(?:\.xlsx\b|\.xls\b|\bxlsx\b|\bxls\b|\bexcel\b|表格|工作簿)/iu.test(loweredText)) {
-    return 'xlsx';
-  }
-  if (/(?:\.csv\b|\bcsv\b)/iu.test(loweredText)) {
-    return 'csv';
-  }
-  if (/(?:\.zip\b|\bzip\b|压缩包|打包)/iu.test(loweredText)) {
-    return 'zip';
-  }
-  if (/(?:\.md\b|\bmd\b|\bmarkdown\b|md文件|md 文件|md文档|md 文档|markdown文件|markdown 文件|markdown文档|markdown 文档)/iu.test(loweredText)) {
-    return 'md';
-  }
-  if (/(?:\.txt\b|\btxt\b|文本文件)/iu.test(loweredText)) {
-    return 'txt';
-  }
-  if (/(?:\.json\b|\bjson\b)/iu.test(loweredText)) {
-    return 'json';
-  }
-  if (/(?:\.html?\b|\bhtml\b)/iu.test(loweredText)) {
-    return 'html';
-  }
-  return null;
-}
-
-function extensionForFormat(format: string | null): string | null {
-  if (!format) {
-    return null;
-  }
-  return format.startsWith('.') ? format : `.${format}`;
-}
-
-function kindForFormat(format: string | null): TurnArtifactIntent['preferredKind'] {
-  if (!format) {
-    return null;
-  }
-  switch (format) {
-    case 'png':
-    case 'jpg':
-    case 'jpeg':
-    case 'gif':
-    case 'webp':
-      return 'image';
-    case 'mp4':
-    case 'mov':
-    case 'webm':
-      return 'video';
-    case 'mp3':
-    case 'wav':
-    case 'ogg':
-    case 'm4a':
-      return 'audio';
-    default:
-      return 'file';
-  }
-}
-
-function hasGenericArtifactRequest(loweredText: string): boolean {
-  const hasDeliveryVerb = hasArtifactDeliveryVerb(loweredText);
-  const hasArtifactNoun = /(文件|附件|文档|报告|压缩包|file|attachment|document|report|bundle)/iu.test(loweredText);
-  const hasFileCreationVerb = /(导出|保存成|另存为|打包|压缩|\bexport\b|\battach\b|\bsave as\b)/iu.test(loweredText);
-  const hasReturnVerb = /(发我|给我|发给我|传给我|回传|send me|\bdeliver\b|\breturn\b)/iu.test(loweredText);
-  return (hasDeliveryVerb && hasArtifactNoun) || (hasFileCreationVerb && hasReturnVerb);
-}
-
-function detectExplicitArtifactFileName(text: string): string | null {
-  const match = String(text ?? '').match(/([^\s"'`<>|]+?\.(?:pdf|docx?|xlsx?|xls|csv|zip|png|jpe?g|webp|md|txt|json|html?))/iu);
-  if (!match?.[1]) {
-    return null;
-  }
-  return sanitizeArtifactName(match[1]);
-}
-
-function hasArtifactDeliveryVerb(loweredText: string): boolean {
-  return /(发我|给我|发给我|传给我|回传|导出|生成|整理成|保存成|打包|做成|写成|转成|转换成|send me|\breturn\b.*\bfile\b|\bexport\b|\bdeliver\b|\battach\b|\bsave as\b|\bconvert to\b)/iu.test(loweredText);
-}
-
-function explicitlyPrefersTextOnly(loweredText: string): boolean {
-  return /(只返回最终文本|只返回文本|仅返回文本|直接返回文本|纯文本|text only|final answer 返回|final answer reply|不要附件|无需附件|不带附件|不要文件|无需文件|不要导出|不用导出)/iu.test(loweredText);
-}
-
 function firstNonEmpty(...values: Array<string | null | undefined>): string {
   for (const value of values) {
     const normalized = String(value ?? '').trim();
@@ -1153,18 +993,6 @@ function firstNonEmpty(...values: Array<string | null | undefined>): string {
 
 function unique<T>(values: T[]): T[] {
   return [...new Set(values)];
-}
-
-function emptyIntent(): TurnArtifactIntent {
-  return {
-    requested: false,
-    preferredKind: null,
-    requestedFormat: null,
-    requestedExtension: null,
-    requestedFileName: null,
-    userDescription: null,
-    requiresClarification: false,
-  };
 }
 
 function escapeRegex(value: string): string {
