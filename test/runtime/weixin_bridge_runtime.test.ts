@@ -433,6 +433,39 @@ test('WeixinBridgeRuntime dispatches plain-text turns in the background so slash
   ]);
 });
 
+test('WeixinBridgeRuntime swallows a single slash keepalive pulse without replying or forwarding to Codex', async () => {
+  const seen: string[] = [];
+  const sent: Array<{ externalScopeId: string; content: string }> = [];
+  const typing: Array<{ externalScopeId: string; status: 'start' | 'stop' }> = [];
+  const runtime = makeRuntime({
+    pollEvents: [
+      {
+        platform: 'weixin',
+        externalScopeId: 'wxid_1',
+        text: '/',
+      },
+    ],
+    sendText: async ({ externalScopeId, content }) => {
+      sent.push({ externalScopeId, content });
+    },
+    sendTyping: async ({ externalScopeId, status }) => {
+      typing.push({ externalScopeId, status });
+    },
+    coordinator: {
+      async handleInboundEvent(event: any) {
+        seen.push(event.text);
+        return completeResponse('should not happen');
+      },
+    },
+  });
+
+  await runtime.runOnce();
+
+  assert.deepEqual(seen, []);
+  assert.deepEqual(sent, []);
+  assert.deepEqual(typing, []);
+});
+
 test('WeixinBridgeRuntime sends a compact WeChat approval prompt when Codex requests approval mid-turn', async () => {
   const sent: Array<{ externalScopeId: string; content: string }> = [];
   const seenEvents: string[] = [];

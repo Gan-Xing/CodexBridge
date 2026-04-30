@@ -244,10 +244,24 @@ export class WeixinBridgeRuntime {
   }
 
   async handleInboundEvent(event: InboundTextEvent): Promise<RuntimeResponse> {
+    if (isLocalKeepalivePulse(event)) {
+      debugRuntime('local_keepalive_pulse_swallowed', {
+        scopeId: event.externalScopeId,
+        textPreview: truncateDebugText(event?.text),
+      });
+      return { type: 'local_noop' };
+    }
     return this.scheduleInboundEvent(event);
   }
 
   async dispatchInboundEvent(event: InboundTextEvent): Promise<any> {
+    if (isLocalKeepalivePulse(event)) {
+      debugRuntime('local_keepalive_pulse_swallowed', {
+        scopeId: event.externalScopeId,
+        textPreview: truncateDebugText(event?.text),
+      });
+      return undefined;
+    }
     const command = parseSlashCommand(String(event?.text ?? ''));
     if (command) {
       await this.flushPendingInboundMerge(event.externalScopeId);
@@ -1867,8 +1881,14 @@ function shouldScheduleSlashCommand(command: { name?: string | null; args?: stri
 
 function shouldDelayInboundEvent(event: InboundTextEvent): boolean {
   return !parseSlashCommand(String(event?.text ?? ''))
+    && !isLocalKeepalivePulse(event)
     && hasAttachments(event)
     && !String(event?.text ?? '').trim();
+}
+
+function isLocalKeepalivePulse(event: InboundTextEvent | null | undefined): boolean {
+  return !hasAttachments(event)
+    && String(event?.text ?? '').trim() === '/';
 }
 
 function hasAttachments(event: InboundTextEvent | null | undefined): boolean {
