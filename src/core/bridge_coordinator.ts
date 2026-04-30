@@ -11229,6 +11229,7 @@ function renderCommandCatalog(i18n: Translator) {
     const aliasLabel = spec.aliases.length > 0 ? ` (${spec.aliases.map((alias) => `/${alias}`).join(', ')})` : '';
     lines.push(`/${spec.name}${aliasLabel} ${spec.summary}`);
   }
+  lines.push(i18n.t('coordinator.help.localPulseLine'));
   lines.push('');
   lines.push(i18n.t('coordinator.help.helpLabel'));
   lines.push(i18n.t('coordinator.help.exampleLabel'));

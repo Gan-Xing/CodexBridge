@@ -1849,6 +1849,8 @@ test('/helps lists all supported slash commands and help entrypoints', async () 
   assert.match(text, /\/deny \(\/dn\) 拒绝当前回合中的审批请求/);
   assert.match(text, /\/retry \(\/rt\) 在同一线程里重试上一条请求/);
   assert.match(text, /\/lang 查看\/切换当前会话的语言/);
+  assert.match(text, /\/lang 查看\/切换当前会话的语言\n⭐️ \/ 本地续聊脉冲：若 bot 单独连续发送接近 10 条消息/u);
+  assert.match(text, /说明：这不是严格的 shell CLI，而是借用 CLI 的帮助习惯做聊天命令。$/u);
   assert.match(text, /帮助：\/helps <命令>/);
   assert.match(text, /示例：\/helps threads  或  \/threads -h/);
 });
@@ -1883,6 +1885,8 @@ test('/helps renders English help text when locale is set to en', async () => {
   assert.match(text, /\/instructions \(\/ins\) View or edit the global custom instructions/);
   assert.match(text, /\/fast Enable or disable Fast mode/);
   assert.match(text, /\/lang Show or switch the current language used for text replies/);
+  assert.match(text, /\/lang Show or switch the current language used for text replies\n⭐️ \/ Local keepalive pulse: when the bot is about to send roughly 10 consecutive messages on its own/u);
+  assert.match(text, /Note: this is not a strict shell CLI\. It borrows familiar CLI help conventions for chat commands\.$/u);
 });
 
 test('/login starts a pending Codex device login flow', async () => {
@@ -3435,6 +3439,21 @@ test('/helps threads renders usage, examples, and notes for a specific command',
   assert.match(text, /\/th -h/);
   assert.match(text, /\/open 2/);
   assert.match(text, /默认列表会把置顶线程排在前面/);
+});
+
+test('/helps help entry explains the local keepalive slash pulse', async () => {
+  const { runtime } = makeRuntime();
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-help-helps-1',
+    text: '/helps helps',
+  });
+
+  const text = result.messages[0]?.text ?? '';
+  assert.match(text, /主动单独发送 \/ 作为本地 keepalive/);
+  assert.match(text, /不会转发给 Codex/);
+  assert.match(text, /不会触发回复/);
 });
 
 test('/use without enough arguments returns the full use help page', async () => {

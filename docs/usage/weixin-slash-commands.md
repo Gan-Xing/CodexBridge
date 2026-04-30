@@ -32,12 +32,14 @@ It borrows the most useful CLI help conventions while staying chat-friendly:
 - every slash command also supports a short alias such as `/h`, `/st`, `/us`, `/lg`, `/sp`, `/rv`, `/ag`, `/sk`, `/n`, `/up`, `/as`, `/td`, `/rmd`, `/nt`, `/pd`, `/ms`, `/m`, `/psn`, `/ins`, `/th`, `/se`, `/nx`, `/pv`, `/o`, `/pk`, `/rn`, `/perm`, `/al`, `/dn`, `/rc`, `/rt`, and `/rs`
 - `/lang` and `/lang <zh|en>` to switch reply language for this scope (higher priority than env).
 - thread browsing is index-first on WeChat, so `/open 2` is preferred over copying raw thread ids
+- before the bot reaches roughly 10 consecutive replies, the user can proactively send a single `/` to break the WeChat-side frequency limit; it is swallowed by the bridge, not forwarded to Codex, and does not create a reply
 
 ## Fast Start
 
 ```text
 /helps
 /h
+/ 
 /st
 /login
 /lg
@@ -101,6 +103,7 @@ It borrows the most useful CLI help conventions while staying chat-friendly:
 /models
 /ms
 /lang zh
+/
 /personality
 /psn pragmatic
 /instructions
@@ -130,6 +133,22 @@ Examples:
 /helps threads
 /help open
 /h
+```
+
+### Local keepalive pulse: `/`
+
+Use a single `/` proactively before the bot reaches roughly 10 consecutive replies, so you can break the WeChat-side frequency limit before normal commands continue.
+
+- it is treated as a local keepalive pulse by the bridge
+- it is not forwarded to Codex
+- it does not create a new reply, task, or record
+- its purpose is to let the user proactively break the WeChat-side consecutive bot-message throttle
+
+Example:
+
+```text
+/
+/retry
 ```
 
 ### `/status`, `/where`, and `/st`
@@ -701,6 +720,15 @@ Examples:
 /lang en
 /lang zh
 ```
+
+### `⭐️ /`
+
+Send a single `/` proactively before the bot reaches roughly 10 consecutive outbound WeChat messages.
+
+- it is treated as a local keepalive pulse by the bridge
+- it is not forwarded to Codex
+- it does not trigger any reply
+- use it to break the current WeChat-side risk-control streak before you stop receiving later Codex messages
 
 ## Help Conventions
 
