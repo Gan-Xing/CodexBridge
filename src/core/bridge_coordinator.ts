@@ -11,6 +11,7 @@ import {
   normalizeAssistantRecordForStorage,
   type AssistantRecordDraft,
 } from './assistant_record_service.js';
+import { computeNextRunAt as computeAutomationNextRunAt } from './automation_job_service.js';
 import {
   createPendingTurnArtifactDeliveryState,
   createTurnArtifactContext,
@@ -44,7 +45,6 @@ import type {
   PlatformScopeRef,
   PluginAlias,
   SessionSettings,
-  TurnArtifactIntent,
   TurnArtifactDeliveredItem,
   TurnArtifactDeliveryState,
   UploadBatchItem,
@@ -78,6 +78,7 @@ const STATUS_DETAILS_ARG_SET = new Set(['details', 'detail', 'full']);
 const FAST_SERVICE_TIER = 'fast';
 const NORMAL_SERVICE_TIER = 'flex';
 const CODEX_BACKED_PROVIDER_KIND_SET = new Set(['openai-native', 'minimax-via-cliproxy']);
+const AUTO_COMMAND_SKILL_PATH = path.resolve('docs/command-skills/auto.md');
 const REVIEW_PROGRESS_HEARTBEAT_MS = 20_000;
 const REVIEW_PROGRESS_HEARTBEAT_MAX_RUNS = 1;
 
@@ -149,6 +150,98 @@ type PendingAutomationDraft = {
   initialSettings: Partial<SessionSettings>;
   threadBridgeSessionId: string | null;
 };
+
+type AutomationOperationTarget = {
+  jobId: string | null;
+  index: number | null;
+  matchText: string | null;
+};
+
+type AutomationJobPatch = {
+  title?: string;
+  mode?: AutomationMode;
+  schedule?: AutomationSchedule;
+  prompt?: string;
+};
+
+type PendingAutomationOperation =
+  | {
+    kind: 'draft';
+    createdAt: number;
+    rawInput: string;
+    draft: PendingAutomationDraft;
+    changes: string[];
+  }
+  | {
+    kind: 'update_job';
+    createdAt: number;
+    rawInput: string;
+    target: AutomationOperationTarget;
+    patch: AutomationJobPatch;
+    changes: string[];
+  }
+  | {
+    kind: 'delete_job' | 'pause_job' | 'resume_job';
+    createdAt: number;
+    rawInput: string;
+    target: AutomationOperationTarget;
+    reason: string | null;
+  }
+  | {
+    kind: 'rename_job';
+    createdAt: number;
+    rawInput: string;
+    target: AutomationOperationTarget;
+    newTitle: string;
+  };
+
+type AutomationCommandSkillResult =
+  | {
+    action: 'create_draft' | 'update_pending_draft';
+    confidence: number;
+    candidate: AutomationDraftCandidate;
+    changes: string[];
+  }
+  | {
+    action: 'propose_update_job';
+    confidence: number;
+    target: AutomationOperationTarget;
+    patch: AutomationJobPatch;
+    changes: string[];
+  }
+  | {
+    action: 'propose_delete_job' | 'propose_pause_job' | 'propose_resume_job';
+    confidence: number;
+    target: AutomationOperationTarget;
+    reason: string | null;
+  }
+  | {
+    action: 'propose_rename_job';
+    confidence: number;
+    target: AutomationOperationTarget;
+    newTitle: string;
+  }
+  | {
+    action: 'query_jobs';
+    confidence: number;
+    filterText: string | null;
+  }
+  | {
+    action: 'show_job';
+    confidence: number;
+    target: AutomationOperationTarget;
+  }
+  | {
+    action: 'clarify';
+    confidence: number;
+    question: string;
+    candidates: Array<Record<string, unknown>>;
+  }
+  | {
+    action: 'reject' | 'local_only';
+    confidence: number;
+    reason: string | null;
+  };
 
 type AgentDraftCandidate = {
   title: string;
@@ -424,7 +517,7 @@ export class BridgeCoordinator {
   pendingPluginAliasDraftsByScope: Map<string, PendingPluginAliasDraft>;
   localeOverridesByScope: Map<string, SupportedLocale>;
   pendingInstructionsEditsByScope: Map<string, { startedAt: number }>;
-  pendingAutomationDraftsByScope: Map<string, PendingAutomationDraft>;
+  pendingAutomationDraftsByScope: Map<string, PendingAutomationOperation>;
   pendingAgentDraftsByScope: Map<string, PendingAgentDraft>;
   pendingAssistantUpdateDraftsByScope: Map<string, PendingAssistantRecordUpdateDraft>;
   localeContext: AsyncLocalStorage<SupportedLocale>;
@@ -1157,11 +1250,26 @@ export class BridgeCoordinator {
   }
 
   getPendingAutomationDraft(scopeRef: PlatformScopeRef): PendingAutomationDraft | null {
-    return this.pendingAutomationDraftsByScope.get(buildAutomationDraftKey(scopeRef)) ?? null;
+    const operation = this.getPendingAutomationOperation(scopeRef);
+    return operation?.kind === 'draft' ? operation.draft : null;
   }
 
   setPendingAutomationDraft(scopeRef: PlatformScopeRef, draft: PendingAutomationDraft) {
-    this.pendingAutomationDraftsByScope.set(buildAutomationDraftKey(scopeRef), draft);
+    this.setPendingAutomationOperation(scopeRef, {
+      kind: 'draft',
+      createdAt: this.now(),
+      rawInput: draft.rawInput,
+      draft,
+      changes: [],
+    });
+  }
+
+  getPendingAutomationOperation(scopeRef: PlatformScopeRef): PendingAutomationOperation | null {
+    return this.pendingAutomationDraftsByScope.get(buildAutomationDraftKey(scopeRef)) ?? null;
+  }
+
+  setPendingAutomationOperation(scopeRef: PlatformScopeRef, operation: PendingAutomationOperation) {
+    this.pendingAutomationDraftsByScope.set(buildAutomationDraftKey(scopeRef), operation);
   }
 
   clearPendingAutomationDraft(scopeRef: PlatformScopeRef) {
@@ -6358,9 +6466,9 @@ export class BridgeCoordinator {
     const normalizedArgs = Array.isArray(args) ? args.map((value) => String(value ?? '').trim()) : [];
     const subcommand = String(normalizedArgs[0] ?? '').trim().toLowerCase();
     if (!subcommand) {
-      const pendingDraft = this.getPendingAutomationDraft(scopeRef);
-      if (pendingDraft) {
-        return this.renderAutomationDraftResponse(event, pendingDraft);
+      const pendingOperation = this.getPendingAutomationOperation(scopeRef);
+      if (pendingOperation) {
+        return this.renderAutomationPendingOperationResponse(event, pendingOperation);
       }
       return this.handleAutomationListCommand(event);
     }
@@ -6394,7 +6502,7 @@ export class BridgeCoordinator {
     if (['add'].includes(subcommand)) {
       return this.handleAutomationAddCommand(event);
     }
-    return this.handleHelpsCommand(event, ['automation']);
+    return this.handleAutomationNaturalCommand(event);
   }
 
   async handleWeiboCommand(event, args = []) {
@@ -6577,10 +6685,10 @@ export class BridgeCoordinator {
     if (!rawInput) {
       return this.handleHelpsCommand(event, ['automation']);
     }
-    let draft = await this.normalizeAutomationDraftFromNaturalLanguage(event, scopeRef, rawInput);
+    const parsed = parseAutomationAddSpec(event.text);
+    let draft = parsed ? this.buildPendingAutomationDraft(event, scopeRef, parsed, rawInput, 'explicit') : null;
     if (!draft) {
-      const parsed = parseAutomationAddSpec(event.text);
-      draft = parsed ? this.buildPendingAutomationDraft(event, scopeRef, parsed, rawInput, 'explicit') : null;
+      draft = await this.normalizeAutomationDraftFromNaturalLanguage(event, scopeRef, rawInput);
     }
     if (draft?.mode === 'thread' && !this.bridgeSessions.resolveScopeSession(scopeRef)) {
       return messageResponse([
@@ -6596,18 +6704,45 @@ export class BridgeCoordinator {
     return this.renderAutomationDraftResponse(event, draft);
   }
 
+  async handleAutomationNaturalCommand(event) {
+    const activeResponse = await this.rejectIfActiveTurnForCommand(event, 'automation');
+    if (activeResponse) {
+      return activeResponse;
+    }
+    const scopeRef = toScopeRef(event);
+    const rawInput = extractAutomationNaturalBody(event.text);
+    if (!rawInput) {
+      return this.handleHelpsCommand(event, ['automation']);
+    }
+    const result = await this.normalizeAutomationCommandWithCodex(event, scopeRef, {
+      subcommand: 'natural',
+      userInput: rawInput,
+      pendingDraft: this.getPendingAutomationDraft(scopeRef),
+    });
+    if (!result) {
+      return messageResponse([
+        this.t('coordinator.auto.parseFailed'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    return this.handleAutomationCommandSkillResult(event, scopeRef, rawInput, result);
+  }
+
   async handleAutomationConfirmCommand(event) {
     const activeResponse = await this.rejectIfActiveTurnForCommand(event, 'automation');
     if (activeResponse) {
       return activeResponse;
     }
     const scopeRef = toScopeRef(event);
-    const draft = this.getPendingAutomationDraft(scopeRef);
-    if (!draft) {
+    const operation = this.getPendingAutomationOperation(scopeRef);
+    if (!operation) {
       return messageResponse([
         this.t('coordinator.auto.noDraft'),
       ], this.buildScopedSessionMeta(event));
     }
+    if (operation.kind !== 'draft') {
+      return this.confirmAutomationOperation(event, scopeRef, operation);
+    }
+    const draft = operation.draft;
     let threadTargetSession = null;
     if (draft.mode === 'thread') {
       threadTargetSession = draft.threadBridgeSessionId
@@ -6703,8 +6838,8 @@ export class BridgeCoordinator {
 
   handleAutomationCancelCommand(event) {
     const scopeRef = toScopeRef(event);
-    const draft = this.getPendingAutomationDraft(scopeRef);
-    if (!draft) {
+    const operation = this.getPendingAutomationOperation(scopeRef);
+    if (!operation) {
       return messageResponse([
         this.t('coordinator.auto.noDraft'),
       ], this.buildScopedSessionMeta(event));
@@ -6713,6 +6848,127 @@ export class BridgeCoordinator {
     return messageResponse([
       this.t('coordinator.auto.draftCancelled'),
     ], this.buildScopedSessionMeta(event));
+  }
+
+  handleAutomationCommandSkillResult(
+    event,
+    scopeRef: PlatformScopeRef,
+    rawInput: string,
+    result: AutomationCommandSkillResult,
+  ) {
+    if (result.action === 'create_draft' || result.action === 'update_pending_draft') {
+      const draft = this.buildPendingAutomationDraft(event, scopeRef, result.candidate, rawInput, 'codex');
+      if (!draft) {
+        return messageResponse([
+          this.t('coordinator.auto.parseFailed'),
+        ], this.buildScopedSessionMeta(event));
+      }
+      if (draft.mode === 'thread' && !draft.threadBridgeSessionId) {
+        return messageResponse([
+          this.t('coordinator.auto.threadModeNeedsSession'),
+        ], this.buildScopedSessionMeta(event));
+      }
+      const operation: PendingAutomationOperation = {
+        kind: 'draft',
+        createdAt: this.now(),
+        rawInput,
+        draft,
+        changes: result.changes,
+      };
+      this.setPendingAutomationOperation(scopeRef, operation);
+      return this.renderAutomationDraftResponse(event, draft);
+    }
+    if (result.action === 'query_jobs') {
+      return this.handleAutomationListCommand(event);
+    }
+    if (result.action === 'show_job') {
+      const resolved = this.resolveAutomationTargetForScope(event, result.target);
+      if (resolved.status !== 'found') {
+        return this.renderAutomationTargetResolutionResponse(event, resolved);
+      }
+      return this.handleAutomationShowCommand(event, String(resolved.index ?? resolved.job.id));
+    }
+    if (result.action === 'clarify') {
+      return this.renderAutomationClarifyResponse(event, result.question, result.candidates);
+    }
+    if (result.action === 'reject' || result.action === 'local_only') {
+      return messageResponse([
+        result.reason || this.t('coordinator.auto.parseFailed'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const operation = this.buildPendingAutomationOperationFromSkillResult(rawInput, result);
+    if (!operation) {
+      return messageResponse([
+        this.t('coordinator.auto.parseFailed'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    if (operation.kind === 'draft') {
+      this.setPendingAutomationOperation(scopeRef, operation);
+      return this.renderAutomationPendingOperationResponse(event, operation);
+    }
+    const resolved = this.resolveAutomationTargetForScope(event, operation.target);
+    if (resolved.status !== 'found') {
+      return this.renderAutomationTargetResolutionResponse(event, resolved);
+    }
+    this.setPendingAutomationOperation(scopeRef, operation);
+    return this.renderAutomationPendingOperationResponse(event, operation);
+  }
+
+  buildPendingAutomationOperationFromSkillResult(
+    rawInput: string,
+    result: AutomationCommandSkillResult,
+  ): PendingAutomationOperation | null {
+    const createdAt = this.now();
+    if (result.action === 'propose_update_job') {
+      if (!Object.keys(result.patch).length) {
+        return null;
+      }
+      return {
+        kind: 'update_job',
+        createdAt,
+        rawInput,
+        target: result.target,
+        patch: result.patch,
+        changes: result.changes,
+      };
+    }
+    if (result.action === 'propose_delete_job') {
+      return {
+        kind: 'delete_job',
+        createdAt,
+        rawInput,
+        target: result.target,
+        reason: result.reason,
+      };
+    }
+    if (result.action === 'propose_pause_job') {
+      return {
+        kind: 'pause_job',
+        createdAt,
+        rawInput,
+        target: result.target,
+        reason: result.reason,
+      };
+    }
+    if (result.action === 'propose_resume_job') {
+      return {
+        kind: 'resume_job',
+        createdAt,
+        rawInput,
+        target: result.target,
+        reason: result.reason,
+      };
+    }
+    if (result.action === 'propose_rename_job') {
+      return {
+        kind: 'rename_job',
+        createdAt,
+        rawInput,
+        target: result.target,
+        newTitle: result.newTitle,
+      };
+    }
+    return null;
   }
 
   renderAutomationDraftResponse(event, draft: PendingAutomationDraft) {
@@ -6726,6 +6982,153 @@ export class BridgeCoordinator {
       this.t('coordinator.auto.confirmHint'),
       this.t('coordinator.auto.editHint'),
       this.t('coordinator.auto.cancelHint'),
+    ], this.buildScopedSessionMeta(event));
+  }
+
+  renderAutomationPendingOperationResponse(event, operation: PendingAutomationOperation) {
+    if (operation.kind === 'draft') {
+      return this.renderAutomationDraftResponse(event, operation.draft);
+    }
+    const lines = [
+      this.t('coordinator.auto.operationDraftTitle', { action: formatAutomationOperationKind(operation.kind, this.currentI18n) }),
+    ];
+    const targetLabel = formatAutomationTarget(operation.target);
+    if (targetLabel) {
+      lines.push(this.t('coordinator.auto.operationTarget', { value: targetLabel }));
+    }
+    if (operation.kind === 'update_job') {
+      if (operation.patch.title) {
+        lines.push(this.t('coordinator.auto.title', { value: operation.patch.title }));
+      }
+      if (operation.patch.schedule) {
+        lines.push(this.t('coordinator.auto.schedule', { value: operation.patch.schedule.label }));
+      }
+      if (operation.patch.prompt) {
+        lines.push(this.t('coordinator.auto.prompt', { value: operation.patch.prompt }));
+      }
+      if (operation.changes.length > 0) {
+        lines.push(this.t('coordinator.auto.operationChanges', { value: operation.changes.join('；') }));
+      }
+    } else if (operation.kind === 'rename_job') {
+      lines.push(this.t('coordinator.auto.title', { value: operation.newTitle }));
+    } else if (operation.reason) {
+      lines.push(this.t('coordinator.auto.operationReason', { value: operation.reason }));
+    }
+    lines.push(this.t('coordinator.auto.draftNotice'));
+    lines.push(this.t('coordinator.auto.confirmHint'));
+    lines.push(this.t('coordinator.auto.cancelHint'));
+    return messageResponse(lines, this.buildScopedSessionMeta(event));
+  }
+
+  renderAutomationClarifyResponse(event, question: string, candidates: Array<Record<string, unknown>>) {
+    const lines = [
+      question || this.t('coordinator.auto.parseFailed'),
+    ];
+    if (Array.isArray(candidates) && candidates.length > 0) {
+      lines.push(this.t('coordinator.auto.candidatesTitle'));
+      for (const [index, candidate] of candidates.slice(0, 6).entries()) {
+        const label = [
+          candidate.index ? `${candidate.index}.` : `${index + 1}.`,
+          compactWhitespace(candidate.title ?? candidate.matchText ?? candidate.jobId ?? this.t('common.unknown')),
+          candidate.schedule ? `(${compactWhitespace(candidate.schedule)})` : '',
+        ].filter(Boolean).join(' ');
+        lines.push(label);
+      }
+    }
+    return messageResponse(lines, this.buildScopedSessionMeta(event));
+  }
+
+  renderAutomationTargetResolutionResponse(event, resolved) {
+    if (resolved.status === 'ambiguous') {
+      return this.renderAutomationClarifyResponse(
+        event,
+        this.t('coordinator.auto.ambiguousTarget'),
+        resolved.candidates.map((candidate) => ({
+          index: candidate.index,
+          title: candidate.job.title,
+          schedule: candidate.job.schedule?.label ?? '',
+        })),
+      );
+    }
+    return messageResponse([
+      this.t('coordinator.auto.notFound', { value: resolved.value || '?' }),
+    ], this.buildScopedSessionMeta(event));
+  }
+
+  confirmAutomationOperation(event, scopeRef: PlatformScopeRef, operation: PendingAutomationOperation) {
+    if (operation.kind === 'draft') {
+      return messageResponse([
+        this.t('coordinator.auto.parseFailed'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const resolved = this.resolveAutomationTargetForScope(event, operation.target);
+    if (resolved.status !== 'found') {
+      return this.renderAutomationTargetResolutionResponse(event, resolved);
+    }
+    const { job } = resolved;
+    if (operation.kind === 'update_job') {
+      const updates: Record<string, unknown> = {};
+      if (operation.patch.title) {
+        updates.title = operation.patch.title;
+      }
+      if (operation.patch.mode) {
+        updates.mode = operation.patch.mode;
+      }
+      if (operation.patch.prompt) {
+        updates.prompt = operation.patch.prompt;
+      }
+      if (operation.patch.schedule) {
+        updates.schedule = operation.patch.schedule;
+        updates.nextRunAt = computeAutomationNextRunAt(operation.patch.schedule, this.now());
+      }
+      const updated = this.automationJobs.updateJob(job.id, updates);
+      this.clearPendingAutomationDraft(scopeRef);
+      return messageResponse([
+        this.t('coordinator.auto.updated'),
+        this.t('coordinator.auto.title', { value: updated.title }),
+        this.t('coordinator.auto.schedule', { value: updated.schedule.label }),
+        this.t('coordinator.auto.nextRun', {
+          value: formatRelativeTimeLocalized(updated.nextRunAt, this.currentI18n.locale, this.now()),
+        }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    if (operation.kind === 'delete_job') {
+      this.automationJobs.deleteJob(job.id);
+      this.clearPendingAutomationDraft(scopeRef);
+      return messageResponse([
+        this.t('coordinator.auto.deleted'),
+        this.t('coordinator.auto.title', { value: job.title }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    if (operation.kind === 'pause_job') {
+      const updated = this.automationJobs.pauseJob(job.id);
+      this.clearPendingAutomationDraft(scopeRef);
+      return messageResponse([
+        this.t('coordinator.auto.paused'),
+        this.t('coordinator.auto.title', { value: updated.title }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    if (operation.kind === 'resume_job') {
+      const updated = this.automationJobs.resumeJob(job.id);
+      this.clearPendingAutomationDraft(scopeRef);
+      return messageResponse([
+        this.t('coordinator.auto.resumed'),
+        this.t('coordinator.auto.title', { value: updated.title }),
+        this.t('coordinator.auto.nextRun', {
+          value: formatRelativeTimeLocalized(updated.nextRunAt, this.currentI18n.locale, this.now()),
+        }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    if (operation.kind !== 'rename_job') {
+      return messageResponse([
+        this.t('coordinator.auto.parseFailed'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const updated = this.automationJobs.renameJob(job.id, operation.newTitle);
+    this.clearPendingAutomationDraft(scopeRef);
+    return messageResponse([
+      this.t('coordinator.auto.renamed'),
+      this.t('coordinator.auto.title', { value: updated.title }),
     ], this.buildScopedSessionMeta(event));
   }
 
@@ -6775,15 +7178,26 @@ export class BridgeCoordinator {
     };
   }
 
-  async normalizeAutomationDraftFromNaturalLanguage(event, scopeRef: PlatformScopeRef, rawInput: string): Promise<PendingAutomationDraft | null> {
+  async normalizeAutomationCommandWithCodex(
+    event,
+    scopeRef: PlatformScopeRef,
+    {
+      subcommand,
+      userInput,
+      pendingDraft = null,
+    }: {
+      subcommand: 'add' | 'edit' | 'natural';
+      userInput: string;
+      pendingDraft?: PendingAutomationDraft | null;
+    },
+  ): Promise<AutomationCommandSkillResult | null> {
     const boundSession = this.bridgeSessions.resolveScopeSession(scopeRef);
     const providerProfile = boundSession
       ? this.requireProviderProfile(boundSession.providerProfileId)
       : this.resolveScopeProviderProfile(scopeRef);
     const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
     if (!providerPlugin || typeof providerPlugin.startThread !== 'function' || typeof providerPlugin.startTurn !== 'function') {
-      const agentsCandidate = await normalizeAutomationDraftWithOpenAIAgents(rawInput, this.resolveScopeLocale(scopeRef, event)).catch(() => null);
-      return agentsCandidate ? this.buildPendingAutomationDraft(event, scopeRef, agentsCandidate, rawInput, 'agents-sdk') : null;
+      return null;
     }
     const inheritedSettings = boundSession
       ? this.bridgeSessions.getSessionSettings(boundSession.id)
@@ -6793,10 +7207,12 @@ export class BridgeCoordinator {
     const thread = await providerPlugin.startThread({
       providerProfile,
       cwd,
-      title: 'Automation Draft Parser',
+      title: 'Automation Command Skill',
       metadata: {
         sourcePlatform: event.platform,
-        source: 'automation-draft',
+        source: 'automation-command-skill',
+        command: 'auto',
+        subcommand,
       },
     });
     const parserSession = {
@@ -6804,18 +7220,19 @@ export class BridgeCoordinator {
       providerProfileId: providerProfile.id,
       codexThreadId: thread.threadId,
       cwd: thread.cwd ?? cwd,
-      title: thread.title ?? 'Automation Draft Parser',
+      title: thread.title ?? 'Automation Command Skill',
       createdAt: this.now(),
       updatedAt: this.now(),
     };
-    const parserPrompt = buildAutomationDraftPrompt(rawInput, locale);
-    const parserEvent = {
-      ...event,
-      text: parserPrompt,
-      cwd: parserSession.cwd ?? null,
+    const prompt = buildAutomationCommandSkillPrompt({
+      event,
+      subcommand,
+      userInput,
       locale,
-      attachments: [],
-    };
+      now: this.now(),
+      pendingDraft,
+      jobs: this.automationJobs.listForScope(scopeRef),
+    });
     const result = await providerPlugin.startTurn({
       providerProfile,
       bridgeSession: parserSession,
@@ -6832,14 +7249,30 @@ export class BridgeCoordinator {
         metadata: {},
         updatedAt: this.now(),
       },
-      event: parserEvent,
-      inputText: parserPrompt,
+      event: {
+        ...event,
+        text: prompt,
+        cwd: parserSession.cwd ?? null,
+        locale,
+        attachments: [],
+      },
+      inputText: prompt,
     });
-    const candidate = parseAutomationDraftCandidate(result.outputText);
-    if (candidate) {
-      return this.buildPendingAutomationDraft(event, scopeRef, candidate, rawInput, 'codex');
+    return parseAutomationCommandSkillResult(result.outputText);
+  }
+
+  async normalizeAutomationDraftFromNaturalLanguage(event, scopeRef: PlatformScopeRef, rawInput: string): Promise<PendingAutomationDraft | null> {
+    const commandResult = await this.normalizeAutomationCommandWithCodex(event, scopeRef, {
+      subcommand: 'add',
+      userInput: rawInput,
+    }).catch(() => null);
+    if (commandResult && commandResult.action === 'create_draft') {
+      return this.buildPendingAutomationDraft(event, scopeRef, commandResult.candidate, rawInput, 'codex');
     }
-    const agentsCandidate = await normalizeAutomationDraftWithOpenAIAgents(rawInput, locale).catch(() => null);
+    if (commandResult && commandResult.action === 'update_pending_draft') {
+      return this.buildPendingAutomationDraft(event, scopeRef, commandResult.candidate, rawInput, 'codex');
+    }
+    const agentsCandidate = await normalizeAutomationDraftWithOpenAIAgents(rawInput, this.resolveScopeLocale(scopeRef, event)).catch(() => null);
     return agentsCandidate ? this.buildPendingAutomationDraft(event, scopeRef, agentsCandidate, rawInput, 'agents-sdk') : null;
   }
 
@@ -6850,58 +7283,16 @@ export class BridgeCoordinator {
     instruction: string,
   ): Promise<PendingAutomationDraft | null> {
     const locale = draft.locale ?? this.resolveScopeLocale(scopeRef, event);
-    const providerProfile = this.requireProviderProfile(draft.providerProfileId);
-    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
-    const prompt = buildAutomationDraftEditPrompt(draft, instruction, normalizeLocale(locale) ?? 'zh-CN');
-    if (providerPlugin && typeof providerPlugin.startThread === 'function' && typeof providerPlugin.startTurn === 'function') {
-      const thread = await providerPlugin.startThread({
-        providerProfile,
-        cwd: draft.cwd,
-        title: 'Automation Draft Editor',
-        metadata: {
-          sourcePlatform: event.platform,
-          source: 'automation-draft-editor',
-        },
-      });
-      const parserSession = {
-        id: crypto.randomUUID(),
-        providerProfileId: providerProfile.id,
-        codexThreadId: thread.threadId,
-        cwd: thread.cwd ?? draft.cwd,
-        title: thread.title ?? 'Automation Draft Editor',
-        createdAt: this.now(),
-        updatedAt: this.now(),
-      };
-      const result = await providerPlugin.startTurn({
-        providerProfile,
-        bridgeSession: parserSession,
-        sessionSettings: {
-          bridgeSessionId: parserSession.id,
-          model: draft.initialSettings.model ?? null,
-          reasoningEffort: draft.initialSettings.reasoningEffort ?? null,
-          serviceTier: draft.initialSettings.serviceTier ?? null,
-          collaborationMode: null,
-          personality: null,
-          accessPreset: 'read-only',
-          approvalPolicy: 'never',
-          sandboxMode: 'read-only',
-          locale,
-          metadata: {},
-          updatedAt: this.now(),
-        },
-        event: {
-          ...event,
-          text: prompt,
-          cwd: parserSession.cwd ?? null,
-          locale,
-          attachments: [],
-        },
-        inputText: prompt,
-      });
-      const candidate = parseAutomationDraftCandidate(result.outputText);
-      if (candidate) {
-        return this.buildEditedPendingAutomationDraft(draft, instruction, candidate, 'codex');
-      }
+    const commandResult = await this.normalizeAutomationCommandWithCodex(event, scopeRef, {
+      subcommand: 'edit',
+      userInput: instruction,
+      pendingDraft: draft,
+    }).catch(() => null);
+    if (commandResult && (
+      commandResult.action === 'update_pending_draft'
+      || commandResult.action === 'create_draft'
+    )) {
+      return this.buildEditedPendingAutomationDraft(draft, instruction, commandResult.candidate, 'codex');
     }
     const agentsCandidate = await normalizeAutomationDraftEditWithOpenAIAgents(draft, instruction, locale).catch(() => null);
     return agentsCandidate ? this.buildEditedPendingAutomationDraft(draft, instruction, agentsCandidate, 'agents-sdk') : null;
@@ -6942,6 +7333,56 @@ export class BridgeCoordinator {
     return {
       job,
       index: index >= 0 ? index + 1 : null,
+    };
+  }
+
+  resolveAutomationTargetForScope(event, target: AutomationOperationTarget) {
+    const scopeRef = toScopeRef(event);
+    const jobs = this.automationJobs.listForScope(scopeRef);
+    const token = target.jobId || (target.index ? String(target.index) : '');
+    if (token) {
+      const resolved = this.resolveAutomationJobForScope(event, token);
+      if (resolved) {
+        return {
+          status: 'found' as const,
+          job: resolved.job,
+          index: resolved.index,
+        };
+      }
+    }
+    const matchText = compactWhitespace(target.matchText);
+    if (!matchText) {
+      return {
+        status: 'not_found' as const,
+        value: token,
+      };
+    }
+    const normalizedMatch = matchText.toLowerCase();
+    const matches = jobs
+      .map((job, index) => ({ job, index: index + 1 }))
+      .filter(({ job }) => {
+        const haystack = [
+          job.title,
+          job.prompt,
+          job.schedule?.label,
+        ].map((value) => compactWhitespace(value).toLowerCase()).join(' ');
+        return haystack.includes(normalizedMatch);
+      });
+    if (matches.length === 1) {
+      return {
+        status: 'found' as const,
+        ...matches[0],
+      };
+    }
+    if (matches.length > 1) {
+      return {
+        status: 'ambiguous' as const,
+        candidates: matches,
+      };
+    }
+    return {
+      status: 'not_found' as const,
+      value: matchText || token,
     };
   }
 
@@ -7515,120 +7956,15 @@ export class BridgeCoordinator {
     }
   }
 
-  async normalizeTurnArtifactIntent(
-    event,
-    scopeRef: PlatformScopeRef,
-    session,
-    providerProfile,
-    providerPlugin,
-    sessionSettings,
-  ): Promise<TurnArtifactIntent> {
-    const locale = sessionSettings?.locale ?? this.resolveScopeLocale(scopeRef, event);
-    const timezone = extractEventTimezone(event);
-    const cwd = normalizeCwd(session?.cwd) ?? this.resolveEventCwd(event) ?? null;
-    const codexIntent = await this.normalizeTurnArtifactIntentWithCodex(
-      event,
-      providerProfile,
-      providerPlugin,
-      sessionSettings,
-      session,
-      locale,
-      timezone,
-      cwd,
-    ).catch(() => null);
-    if (codexIntent) {
-      return codexIntent;
-    }
-    const agentsIntent = await normalizeTurnArtifactIntentWithOpenAIAgents(
-      event.text,
-      locale,
-      this.now(),
-      timezone,
-    ).catch(() => null);
-    if (agentsIntent) {
-      return agentsIntent;
-    }
-    return buildEmptyTurnArtifactIntent();
-  }
-
-  async normalizeTurnArtifactIntentWithCodex(
-    event,
-    providerProfile,
-    providerPlugin,
-    sessionSettings,
-    session,
-    locale: string | null,
-    timezone: string | null,
-    cwd: string | null,
-  ): Promise<TurnArtifactIntent | null> {
-    if (!providerPlugin || typeof providerPlugin.startThread !== 'function' || typeof providerPlugin.startTurn !== 'function') {
-      return null;
-    }
-    const thread = await providerPlugin.startThread({
-      providerProfile,
-      cwd,
-      title: 'Artifact Delivery Intent Parser',
-      metadata: {
-        sourcePlatform: event.platform,
-        source: 'turn-artifact-intent',
-      },
-    });
-    const parserSession = {
-      id: crypto.randomUUID(),
-      providerProfileId: providerProfile.id,
-      codexThreadId: thread.threadId,
-      cwd: thread.cwd ?? cwd,
-      title: thread.title ?? 'Artifact Delivery Intent Parser',
-      createdAt: this.now(),
-      updatedAt: this.now(),
-    };
-    const prompt = buildTurnArtifactIntentPrompt(event.text, locale, this.now(), timezone);
-    const result = await providerPlugin.startTurn({
-      providerProfile,
-      bridgeSession: parserSession,
-      sessionSettings: {
-        bridgeSessionId: parserSession.id,
-        model: sessionSettings?.model ?? null,
-        reasoningEffort: sessionSettings?.reasoningEffort ?? null,
-        serviceTier: sessionSettings?.serviceTier ?? null,
-        collaborationMode: null,
-        personality: null,
-        accessPreset: 'read-only',
-        approvalPolicy: 'never',
-        sandboxMode: 'read-only',
-        locale,
-        metadata: {},
-        updatedAt: this.now(),
-      },
-      event: {
-        ...event,
-        text: prompt,
-        cwd: parserSession.cwd ?? null,
-        locale,
-        attachments: [],
-      },
-      inputText: prompt,
-    });
-    return parseTurnArtifactIntentCandidate(result.outputText, event.text, 'codex');
-  }
-
   async startTurnOnSession(session, event, options: StartTurnOptions = {}) {
     const scopeRef = toScopeRef(event);
     const providerProfile = this.requireProviderProfile(session.providerProfileId);
     const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
     const sessionSettings = this.bridgeSessions.getSessionSettings(session.id);
-    const artifactIntent = await this.normalizeTurnArtifactIntent(
-      event,
-      scopeRef,
-      session,
-      providerProfile,
-      providerPlugin,
-      sessionSettings,
-    );
     const turnArtifactContext = createTurnArtifactContext({
       bridgeSessionId: session.id,
       cwd: normalizeCwd(session.cwd) ?? this.resolveEventCwd(event),
-      intent: artifactIntent,
+      intent: null,
     });
     const pendingArtifactDelivery = createPendingTurnArtifactDeliveryState(turnArtifactContext);
     ensureTurnArtifactDirectories(turnArtifactContext);
@@ -7656,9 +7992,7 @@ export class BridgeCoordinator {
           spoolDir: turnArtifactContext.spoolDir ?? null,
           intent: turnArtifactContext.intent,
         }
-        : {
-          intent: artifactIntent,
-        },
+        : null,
     });
     const result = await providerPlugin.startTurn({
       providerProfile,
@@ -8661,23 +8995,6 @@ async function normalizeAssistantRecordDraftWithOpenAIAgents(
     input: buildAssistantRecordDraftPrompt(rawInput, forcedType, locale, now, timezone),
   });
   return parseAssistantRecordDraftCandidate(output, rawInput, forcedType, fallbackDraft, 'agents-sdk');
-}
-
-async function normalizeTurnArtifactIntentWithOpenAIAgents(
-  rawInput: string,
-  locale: string | null,
-  now: number,
-  timezone: string | null,
-): Promise<TurnArtifactIntent | null> {
-  if (!resolveOpenAIAgentRuntimeConfig().apiKey) {
-    return null;
-  }
-  const output = await runOpenAIAgentJson({
-    name: 'CodexBridge Artifact Intent Classifier',
-    instructions: 'Classify artifact delivery intent as strict JSON only. Do not use markdown.',
-    input: buildTurnArtifactIntentPrompt(rawInput, locale, now, timezone),
-  });
-  return parseTurnArtifactIntentCandidate(output, rawInput, 'agents-sdk');
 }
 
 async function normalizeAutomationDraftWithOpenAIAgents(
@@ -10011,6 +10328,11 @@ function extractAutomationAddBody(text: string): string {
   return compactWhitespace(match?.[1] ?? '');
 }
 
+function extractAutomationNaturalBody(text: string): string {
+  const normalized = String(text ?? '').trim();
+  return compactWhitespace(normalized.replace(/^\/\S+\s*/u, ''));
+}
+
 function buildAutomationDraftKey(scopeRef: PlatformScopeRef): string {
   return formatPlatformScopeKey(scopeRef.platform, scopeRef.externalScopeId);
 }
@@ -10045,38 +10367,6 @@ function formatAssistantPromptLocalDateTime(timestamp: number, timezone: string)
 function normalizeAssistantPromptTimezone(timezone: string | null): string {
   const normalized = String(timezone ?? '').trim();
   return normalized || 'Etc/UTC';
-}
-
-function buildTurnArtifactIntentPrompt(
-  rawInput: string,
-  locale: string | null,
-  now: number,
-  timezone: string | null,
-): string {
-  const language = normalizeLocale(locale) === 'zh-CN' ? '中文' : 'English';
-  const resolvedTimezone = normalizeAssistantPromptTimezone(timezone);
-  return [
-    `你是 CodexBridge 的附件交付意图分类器。请用${language}判断用户这条消息是否真的要求“返回一个附件/文件/图片/媒体交付物”。`,
-    '只返回严格 JSON，不要 Markdown，不要解释。',
-    '',
-    'Schema:',
-    '{"action":"none|deliver_file|deliver_image|deliver_video|deliver_audio|clarify","preferredKind":"file|image|video|audio|null","requestedFormat":null,"requestedFileName":null,"textOnly":false,"explicit":false,"confidence":0.0,"reason":"简短理由"}',
-    '',
-    '判断规则：',
-    '- 只有当用户明确要求“导出/整理成某种文件/做成附件/返回图片或文件/发送给我附件”时，action 才能是 deliver_*。',
-    '- 只是提到文件、抱怨附件、讨论“为什么又发文件”、说“不要文件/不要附件/直接文本回复”、分析现有文件、总结上传的文档，这些都必须是 action=none。',
-    '- 如果用户明确要求纯文本回复，不要附件，则 action=none 且 textOnly=true。',
-    '- 如果用户明确要求返回一个交付物，但格式没指定，也不要追问格式；直接用 action=deliver_file，requestedFormat=null。',
-    '- requestedFileName 只有在用户明确给出具体文件名时才填写。',
-    '- 如果用户只是要求“把结论发到微信/直接回复给我”，这仍然是普通文本回复，不是附件交付，action=none。',
-    '- 不确定时宁可返回 none，不要误判成要附件。',
-    '',
-    `当前 UTC 时间：${new Date(now).toISOString()}`,
-    `当前本地时区：${resolvedTimezone}`,
-    '',
-    '用户输入：',
-    rawInput,
-  ].join('\n');
 }
 
 function buildAssistantRecordDraftPrompt(
@@ -10124,58 +10414,6 @@ function buildAssistantRecordDraftPrompt(
     '用户输入：',
     rawInput,
   ].join('\n');
-}
-
-function parseTurnArtifactIntentCandidate(
-  value: unknown,
-  rawInput: string,
-  source: 'codex' | 'agents-sdk',
-): TurnArtifactIntent | null {
-  const parsed = parseJsonObject(value);
-  if (!parsed) {
-    return null;
-  }
-  const action = normalizeTurnArtifactIntentAction(parsed.action ?? parsed.intent ?? parsed.result);
-  if (!action) {
-    return null;
-  }
-  const textOnly = Boolean(parsed.textOnly ?? parsed.text_only ?? parsed.preferTextOnly ?? parsed.prefer_text_only);
-  const explicit = Boolean(parsed.explicit ?? parsed.isExplicit ?? parsed.is_explicit);
-  const reason = truncateText(compactWhitespace(parsed.reason ?? parsed.summary ?? ''), 160);
-  const confidence = clampAssistantConfidence(Number(parsed.confidence ?? 0.8));
-  const requestedFileName = sanitizeRequestedArtifactFileName(
-    parsed.requestedFileName
-      ?? parsed.requested_filename
-      ?? parsed.fileName
-      ?? parsed.filename,
-  );
-  let requestedFormat = normalizeRequestedArtifactFormat(
-    parsed.requestedFormat
-      ?? parsed.requested_format
-      ?? parsed.format,
-  );
-  if (!requestedFormat && requestedFileName) {
-    requestedFormat = normalizeRequestedArtifactFormat(path.extname(requestedFileName));
-  }
-  let preferredKind = normalizeTurnArtifactIntentKind(parsed.preferredKind ?? parsed.preferred_kind ?? parsed.kind);
-  if (!preferredKind && requestedFormat) {
-    preferredKind = artifactKindForRequestedFormat(requestedFormat);
-  }
-  if (!preferredKind && action !== 'none' && action !== 'clarify') {
-    preferredKind = artifactKindForTurnArtifactAction(action);
-  }
-  if (textOnly || action === 'none' || action === 'clarify') {
-    return buildEmptyTurnArtifactIntent();
-  }
-  return {
-    requested: true,
-    preferredKind: preferredKind ?? 'file',
-    requestedFormat,
-    requestedExtension: requestedArtifactExtensionForFormat(requestedFormat),
-    requestedFileName,
-    userDescription: explicit ? rawInput : (reason || rawInput),
-    requiresClarification: false,
-  };
 }
 
 function parseAssistantRecordDraftCandidate(
@@ -10229,6 +10467,82 @@ function isAssistantRecordDraftSchemaPlaceholder(content: string): boolean {
   const normalized = compactWhitespace(content).toLowerCase();
   return normalized === '保存给用户看的完整内容'
     || normalized === 'complete content to save for the user';
+}
+
+function buildAutomationCommandSkillPrompt({
+  event,
+  subcommand,
+  userInput,
+  locale,
+  now,
+  pendingDraft,
+  jobs,
+}: {
+  event: InboundTextEvent;
+  subcommand: 'add' | 'edit' | 'natural';
+  userInput: string;
+  locale: string | null;
+  now: number;
+  pendingDraft: PendingAutomationDraft | null;
+  jobs: any[];
+}): string {
+  const payload = {
+    command: 'auto',
+    subcommand,
+    rawText: String(event.text ?? ''),
+    userInput,
+    now: new Date(now).toISOString(),
+    locale: normalizeLocale(locale) ?? 'zh-CN',
+    scope: {
+      platform: event.platform,
+      externalScopeId: event.externalScopeId,
+    },
+    pendingDraft: pendingDraft ? automationDraftToCommandSkillJson(pendingDraft) : null,
+    jobs: jobs.map((job, index) => automationJobToCommandSkillJson(job, index + 1)),
+    skillPath: AUTO_COMMAND_SKILL_PATH,
+  };
+  return [
+    'CodexBridge command skill invocation.',
+    '',
+    `Please read and follow this command skill file: ${AUTO_COMMAND_SKILL_PATH}`,
+    'Use it to interpret the /auto command request below.',
+    'Return exactly one JSON object that matches the skill contract.',
+    'Do not use Markdown. Do not explain. Do not execute or persist automation jobs yourself.',
+    '',
+    'Invocation payload:',
+    JSON.stringify(payload, null, 2),
+  ].join('\n');
+}
+
+function automationDraftToCommandSkillJson(draft: PendingAutomationDraft): Record<string, unknown> {
+  return {
+    title: draft.title,
+    mode: draft.mode,
+    schedules: getAutomationDraftSchedules(draft).map((schedule) => automationScheduleToModelJson(schedule)),
+    task: draft.prompt,
+    cwd: draft.cwd,
+    providerProfileId: draft.providerProfileId,
+    locale: draft.locale,
+  };
+}
+
+function automationJobToCommandSkillJson(job: any, index: number): Record<string, unknown> {
+  return {
+    id: job.id,
+    index,
+    title: job.title,
+    mode: job.mode,
+    schedule: job.schedule,
+    status: job.status,
+    running: job.running,
+    task: job.prompt,
+    cwd: job.cwd,
+    providerProfileId: job.providerProfileId,
+    nextRunAt: typeof job.nextRunAt === 'number' ? new Date(job.nextRunAt).toISOString() : null,
+    lastRunAt: typeof job.lastRunAt === 'number' ? new Date(job.lastRunAt).toISOString() : null,
+    lastResultPreview: job.lastResultPreview ?? null,
+    lastError: job.lastError ?? null,
+  };
 }
 
 function buildAutomationDraftPrompt(rawInput: string, locale: SupportedLocale): string {
@@ -10460,6 +10774,157 @@ ${instruction}`;
   return localizedInstruction.trim();
 }
 
+function parseAutomationCommandSkillResult(value: unknown): AutomationCommandSkillResult | null {
+  const parsed = parseJsonObject(value);
+  if (!parsed) {
+    return null;
+  }
+  const action = normalizeAutomationCommandSkillAction(parsed.action);
+  if (!action) {
+    return null;
+  }
+  const confidence = clampAssistantConfidence(Number(parsed.confidence ?? 0.8));
+  if (action === 'create_draft' || action === 'update_pending_draft') {
+    const candidate = parseAutomationDraftCandidateFromObject(parsed);
+    return candidate
+      ? {
+        action,
+        confidence,
+        candidate,
+        changes: normalizeStringArray(parsed.changes),
+      }
+      : null;
+  }
+  if (action === 'propose_update_job') {
+    const target = parseAutomationOperationTarget(parsed.target);
+    const patch = parseAutomationJobPatch(parsed.patch);
+    return target && Object.keys(patch).length > 0
+      ? {
+        action,
+        confidence,
+        target,
+        patch,
+        changes: normalizeStringArray(parsed.changes),
+      }
+      : null;
+  }
+  if (action === 'propose_delete_job' || action === 'propose_pause_job' || action === 'propose_resume_job') {
+    const target = parseAutomationOperationTarget(parsed.target);
+    return target
+      ? {
+        action,
+        confidence,
+        target,
+        reason: normalizeNullableText(parsed.reason),
+      }
+      : null;
+  }
+  if (action === 'propose_rename_job') {
+    const target = parseAutomationOperationTarget(parsed.target);
+    const newTitle = compactWhitespace(parsed.newTitle ?? parsed.title ?? '');
+    return target && newTitle
+      ? {
+        action,
+        confidence,
+        target,
+        newTitle,
+      }
+      : null;
+  }
+  if (action === 'query_jobs') {
+    return {
+      action,
+      confidence,
+      filterText: normalizeNullableText(parsed.query?.filterText ?? parsed.filterText),
+    };
+  }
+  if (action === 'show_job') {
+    const target = parseAutomationOperationTarget(parsed.target);
+    return target
+      ? {
+        action,
+        confidence,
+        target,
+      }
+      : null;
+  }
+  if (action === 'clarify') {
+    return {
+      action,
+      confidence,
+      question: compactWhitespace(parsed.question ?? parsed.message ?? '') || '请补充你想对自动化任务做什么。',
+      candidates: Array.isArray(parsed.candidates) ? parsed.candidates.filter((entry) => entry && typeof entry === 'object') : [],
+    };
+  }
+  return {
+    action,
+    confidence,
+    reason: normalizeNullableText(parsed.reason ?? parsed.message),
+  };
+}
+
+function normalizeAutomationCommandSkillAction(value: unknown): AutomationCommandSkillResult['action'] | null {
+  const normalized = compactWhitespace(value).toLowerCase();
+  switch (normalized) {
+    case 'create_draft':
+    case 'update_pending_draft':
+    case 'propose_update_job':
+    case 'propose_delete_job':
+    case 'propose_pause_job':
+    case 'propose_resume_job':
+    case 'propose_rename_job':
+    case 'query_jobs':
+    case 'show_job':
+    case 'clarify':
+    case 'reject':
+    case 'local_only':
+      return normalized;
+    default:
+      return null;
+  }
+}
+
+function parseAutomationOperationTarget(value: unknown): AutomationOperationTarget | null {
+  const parsed = value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, any>
+    : {};
+  const jobId = compactWhitespace(parsed.jobId ?? parsed.id ?? '');
+  const index = Number(parsed.index);
+  const matchText = compactWhitespace(parsed.matchText ?? parsed.match ?? parsed.title ?? '');
+  if (!jobId && (!Number.isInteger(index) || index <= 0) && !matchText) {
+    return null;
+  }
+  return {
+    jobId: jobId || null,
+    index: Number.isInteger(index) && index > 0 ? index : null,
+    matchText: matchText || null,
+  };
+}
+
+function parseAutomationJobPatch(value: unknown): AutomationJobPatch {
+  const parsed = value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, any>
+    : {};
+  const patch: AutomationJobPatch = {};
+  const title = compactWhitespace(parsed.title ?? '');
+  if (title) {
+    patch.title = title;
+  }
+  const prompt = compactWhitespace(parsed.task ?? parsed.prompt ?? '');
+  if (prompt) {
+    patch.prompt = prompt;
+  }
+  const modeValue = compactWhitespace(parsed.mode).toLowerCase();
+  if (modeValue === 'standalone' || modeValue === 'thread') {
+    patch.mode = modeValue;
+  }
+  const schedules = normalizeAutomationSchedules(parsed);
+  if (schedules.length > 0) {
+    patch.schedule = schedules[0];
+  }
+  return patch;
+}
+
 function parseAutomationDraftCandidate(text: string): AutomationDraftCandidate | null {
   const payload = extractFirstJsonObject(text);
   if (!payload) {
@@ -10474,14 +10939,21 @@ function parseAutomationDraftCandidate(text: string): AutomationDraftCandidate |
   if (!parsed || parsed.valid === false) {
     return null;
   }
-  const prompt = compactWhitespace(String(parsed.task ?? ''));
+  return parseAutomationDraftCandidateFromObject(parsed);
+}
+
+function parseAutomationDraftCandidateFromObject(parsed: Record<string, any>): AutomationDraftCandidate | null {
+  const draft = parsed.draft && typeof parsed.draft === 'object' && !Array.isArray(parsed.draft)
+    ? parsed.draft as Record<string, any>
+    : parsed;
+  const prompt = compactWhitespace(String(draft.task ?? draft.prompt ?? ''));
   if (!prompt) {
     return null;
   }
-  const title = compactWhitespace(String(parsed.title ?? '')) || deriveAutomationTitle(prompt);
-  const modeValue = String(parsed.mode ?? 'standalone').trim().toLowerCase();
+  const title = compactWhitespace(String(draft.title ?? '')) || deriveAutomationTitle(prompt);
+  const modeValue = String(draft.mode ?? 'standalone').trim().toLowerCase();
   const mode: AutomationMode = modeValue === 'thread' ? 'thread' : 'standalone';
-  const schedules = normalizeAutomationSchedules(parsed);
+  const schedules = normalizeAutomationSchedules(draft);
   if (schedules.length === 0) {
     return null;
   }
@@ -10625,6 +11097,32 @@ function formatAutomationDraftSchedules(draft: PendingAutomationDraft): string {
   return getAutomationDraftSchedules(draft)
     .map((schedule) => schedule.label)
     .join('；');
+}
+
+function formatAutomationOperationKind(kind: PendingAutomationOperation['kind'], i18n: Translator): string {
+  switch (kind) {
+    case 'update_job':
+      return i18n.t('coordinator.auto.operation.update');
+    case 'delete_job':
+      return i18n.t('coordinator.auto.operation.delete');
+    case 'pause_job':
+      return i18n.t('coordinator.auto.operation.pause');
+    case 'resume_job':
+      return i18n.t('coordinator.auto.operation.resume');
+    case 'rename_job':
+      return i18n.t('coordinator.auto.operation.rename');
+    default:
+      return i18n.t('coordinator.auto.operation.draft');
+  }
+}
+
+function formatAutomationTarget(target: AutomationOperationTarget): string {
+  const parts = [
+    target.index ? `#${target.index}` : '',
+    target.matchText || '',
+    target.jobId ? `(${target.jobId})` : '',
+  ].filter(Boolean);
+  return parts.join(' ');
 }
 
 function appendAutomationDraftEditInput(rawInput: string, instruction: string): string {
@@ -11089,166 +11587,19 @@ function normalizeThreadPreview(preview, i18n: Translator) {
   return normalized ? truncateText(normalized, THREAD_PREVIEW_LIMIT) : i18n.t('coordinator.thread.emptyPreview');
 }
 
-function buildEmptyTurnArtifactIntent(): TurnArtifactIntent {
-  return {
-    requested: false,
-    preferredKind: null,
-    requestedFormat: null,
-    requestedExtension: null,
-    requestedFileName: null,
-    userDescription: null,
-    requiresClarification: false,
-  };
-}
-
-function normalizeTurnArtifactIntentAction(value: unknown): 'none' | 'deliver_file' | 'deliver_image' | 'deliver_video' | 'deliver_audio' | 'clarify' | null {
-  const normalized = compactWhitespace(value).toLowerCase();
-  switch (normalized) {
-    case 'none':
-    case 'no':
-    case 'text':
-    case 'text_only':
-      return 'none';
-    case 'deliver_file':
-    case 'file':
-    case 'attachment':
-      return 'deliver_file';
-    case 'deliver_image':
-    case 'image':
-    case 'photo':
-      return 'deliver_image';
-    case 'deliver_video':
-    case 'video':
-      return 'deliver_video';
-    case 'deliver_audio':
-    case 'audio':
-      return 'deliver_audio';
-    case 'clarify':
-    case 'ambiguous':
-      return 'clarify';
-    default:
-      return null;
-  }
-}
-
-function normalizeTurnArtifactIntentKind(value: unknown): TurnArtifactIntent['preferredKind'] {
-  const normalized = compactWhitespace(value).toLowerCase();
-  switch (normalized) {
-    case 'image':
-    case 'photo':
-      return 'image';
-    case 'video':
-      return 'video';
-    case 'audio':
-      return 'audio';
-    case 'file':
-    case 'document':
-    case 'attachment':
-      return 'file';
-    default:
-      return null;
-  }
-}
-
-function normalizeRequestedArtifactFormat(value: unknown): string | null {
-  const normalized = compactWhitespace(value).toLowerCase().replace(/^\./u, '');
-  if (!normalized) {
-    return null;
-  }
-  const aliasMap: Record<string, string> = {
-    jpeg: 'jpg',
-    word: 'docx',
-    doc: 'docx',
-    xls: 'xlsx',
-    markdown: 'md',
-    htm: 'html',
-  };
-  const resolved = aliasMap[normalized] ?? normalized;
-  return new Set([
-    'png',
-    'jpg',
-    'webp',
-    'docx',
-    'pdf',
-    'xlsx',
-    'csv',
-    'zip',
-    'md',
-    'txt',
-    'json',
-    'html',
-    'mp4',
-    'mov',
-    'webm',
-    'mp3',
-    'wav',
-    'ogg',
-    'm4a',
-  ]).has(resolved) ? resolved : null;
-}
-
-function requestedArtifactExtensionForFormat(format: string | null): string | null {
-  if (!format) {
-    return null;
-  }
-  return format.startsWith('.') ? format : `.${format}`;
-}
-
-function artifactKindForRequestedFormat(format: string | null): TurnArtifactIntent['preferredKind'] {
-  switch (format) {
-    case 'png':
-    case 'jpg':
-    case 'webp':
-      return 'image';
-    case 'mp4':
-    case 'mov':
-    case 'webm':
-      return 'video';
-    case 'mp3':
-    case 'wav':
-    case 'ogg':
-    case 'm4a':
-      return 'audio';
-    case 'docx':
-    case 'pdf':
-    case 'xlsx':
-    case 'csv':
-    case 'zip':
-    case 'md':
-    case 'txt':
-    case 'json':
-    case 'html':
-      return 'file';
-    default:
-      return null;
-  }
-}
-
-function artifactKindForTurnArtifactAction(action: 'deliver_file' | 'deliver_image' | 'deliver_video' | 'deliver_audio'): TurnArtifactIntent['preferredKind'] {
-  switch (action) {
-    case 'deliver_image':
-      return 'image';
-    case 'deliver_video':
-      return 'video';
-    case 'deliver_audio':
-      return 'audio';
-    default:
-      return 'file';
-  }
-}
-
-function sanitizeRequestedArtifactFileName(value: unknown): string | null {
-  const normalized = compactWhitespace(value);
-  if (!normalized) {
-    return null;
-  }
-  const baseName = path.basename(normalized);
-  const sanitized = baseName.replace(/[\u0000-\u001f<>:"/\\|?*]+/gu, '-').trim();
-  return sanitized || null;
-}
-
 function compactWhitespace(value) {
   return String(value ?? '').replace(/\s+/gu, ' ').trim();
+}
+
+function normalizeNullableText(value: unknown): string | null {
+  const normalized = compactWhitespace(value);
+  return normalized || null;
+}
+
+function normalizeStringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.map((entry) => compactWhitespace(entry)).filter(Boolean).slice(0, 12)
+    : [];
 }
 
 function truncateText(value, limit) {

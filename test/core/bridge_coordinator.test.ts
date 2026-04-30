@@ -39,7 +39,6 @@ class FakeProviderPlugin {
   mcpServerStatuses: any[];
   mcpEnabledByName: Map<any, any>;
   threadCounter: number;
-  internalThreadCounter: number;
   baseTime: number;
   clock: number;
   threads: Map<any, any>;
@@ -155,7 +154,6 @@ class FakeProviderPlugin {
     this.mcpServerStatuses = [];
     this.mcpEnabledByName = new Map();
     this.threadCounter = 0;
-    this.internalThreadCounter = 0;
     this.baseTime = Date.now();
     this.clock = 0;
     this.threads = new Map();
@@ -167,25 +165,12 @@ class FakeProviderPlugin {
   }
 
   async startThread({ providerProfile, cwd, title, metadata }) {
-    const internalArtifactThread = metadata?.source === 'turn-artifact-intent';
-    if (internalArtifactThread) {
-      this.internalThreadCounter += 1;
-    } else {
-      this.threadCounter += 1;
-    }
-    if (metadata?.source !== 'turn-artifact-intent') {
-      this.startThreadCalls.push({ providerProfile, cwd, title, metadata });
-    }
-    const threadSuffix = internalArtifactThread
-      ? `internal-thread-${this.internalThreadCounter}`
-      : `thread-${this.threadCounter}`;
-    const defaultTitle = internalArtifactThread
-      ? `${providerProfile.displayName} ${threadSuffix}`
-      : `${providerProfile.displayName} thread ${this.threadCounter}`;
+    this.threadCounter += 1;
+    this.startThreadCalls.push({ providerProfile, cwd, title, metadata });
     const thread = {
-      threadId: `${providerProfile.id}-${threadSuffix}`,
+      threadId: `${providerProfile.id}-thread-${this.threadCounter}`,
       cwd: cwd ?? `/tmp/${providerProfile.id}`,
-      title: title ?? defaultTitle,
+      title: title ?? `${providerProfile.displayName} thread ${this.threadCounter}`,
       updatedAt: this.nextUpdatedAt(),
       preview: '',
       turns: [],
@@ -247,9 +232,7 @@ class FakeProviderPlugin {
   }
 
   async startTurn({ providerProfile, bridgeSession, sessionSettings, event, inputText, onTurnStarted = null }) {
-    if (bridgeSession?.title !== 'Artifact Delivery Intent Parser') {
-      this.startTurnCalls.push({ providerProfile, bridgeSession, sessionSettings, event, inputText });
-    }
+    this.startTurnCalls.push({ providerProfile, bridgeSession, sessionSettings, event, inputText });
     const existingThread = this.threads.get(bridgeSession.codexThreadId);
     if (!existingThread) {
       throw new Error(`thread not found: ${bridgeSession.codexThreadId}`);
@@ -522,30 +505,15 @@ function makeRuntime({
 }
 
 async function maybeReturnArtifactIntentParserResult({
-  bridgeSession,
-  onTurnStarted,
-  decision,
+  bridgeSession: _bridgeSession,
+  onTurnStarted: _onTurnStarted,
+  decision: _decision,
 }: {
   bridgeSession: any;
   onTurnStarted?: ((meta: { turnId?: string | null; threadId?: string | null }) => Promise<void>) | null;
   decision: Record<string, unknown>;
 }) {
-  if (bridgeSession?.title !== 'Artifact Delivery Intent Parser') {
-    return null;
-  }
-  const turnId = `${bridgeSession.codexThreadId}-artifact-intent`;
-  if (typeof onTurnStarted === 'function') {
-    await onTurnStarted({
-      turnId,
-      threadId: bridgeSession.codexThreadId,
-    });
-  }
-  return {
-    outputText: JSON.stringify(decision),
-    turnId,
-    threadId: bridgeSession.codexThreadId,
-    title: bridgeSession.title,
-  };
+  return null;
 }
 
 function makeFakeCodexInstructionsManager({
@@ -950,7 +918,7 @@ test('bridge coordinator starts a generic file-delivery turn without asking for 
   assert.equal(fs.existsSync(String(result.messages[1]?.mediaPath ?? '')), true);
 });
 
-test('bridge coordinator falls back to a single generated file in the turn artifact directory when the manifest is missing', async () => {
+test('bridge coordinator does not send undeclared files when the model omits the manifest', async () => {
   const { runtime, openai } = makeRuntime({ defaultCwd: '/tmp/codexbridge-artifact-fallback' });
   openai.startTurn = async ({ bridgeSession, event, onTurnStarted = null }) => {
     const parserResult = await maybeReturnArtifactIntentParserResult({
@@ -995,8 +963,7 @@ test('bridge coordinator falls back to a single generated file in the turn artif
   });
 
   assert.equal(result.messages[0]?.text, 'PDF 已生成。');
-  assert.ok(typeof result.messages[1]?.mediaPath === 'string' && result.messages[1]?.mediaPath.endsWith('summary.pdf'));
-  assert.equal(fs.existsSync(String(result.messages[1]?.mediaPath ?? '')), true);
+  assert.equal(result.messages.some((message) => Boolean(message.mediaPath)), false);
 });
 
 test('bridge coordinator starts a generic export turn immediately without asking for the export format', async () => {
@@ -1047,7 +1014,7 @@ test('bridge coordinator starts a generic export turn immediately without asking
   assert.ok(typeof first.messages[1]?.mediaPath === 'string' && first.messages[1]?.mediaPath.endsWith('deliverable.txt'));
 });
 
-test('bridge coordinator warns when multiple fallback candidates remain ambiguous instead of sending arbitrary attachments', async () => {
+test('bridge coordinator does not send arbitrary undeclared attachments when multiple files exist', async () => {
   const { runtime, openai } = makeRuntime({ defaultCwd: '/tmp/codexbridge-artifact-ambiguous' });
   openai.startTurn = async ({ bridgeSession, event, onTurnStarted = null }) => {
     const parserResult = await maybeReturnArtifactIntentParserResult({
@@ -1091,10 +1058,8 @@ test('bridge coordinator warns when multiple fallback candidates remain ambiguou
     text: '导出成 PDF 发我',
   });
 
-  const lines = result.messages.map((message) => message.text ?? '').filter(Boolean);
   assert.equal(result.messages.some((message) => Boolean(message.mediaPath)), false);
-  assert.equal(lines[0], 'PDF 已生成。');
-  assert.ok(lines.some((line) => /候选文件/.test(line)));
+  assert.equal(result.messages[0]?.text, 'PDF 已生成。');
 });
 
 test('bridge coordinator does not force artifact delivery when the user complains about unexpected files', async () => {
@@ -1123,7 +1088,7 @@ test('bridge coordinator does not force artifact delivery when the user complain
         threadId: bridgeSession.codexThreadId,
       });
     }
-    assert.equal(event?.metadata?.codexbridge?.turnArtifactContext ?? null, null);
+    assert.ok(event?.metadata?.codexbridge?.turnArtifactContext?.artifactDir);
     return {
       outputText: `openai: ${inputText}`,
       turnId,
@@ -7580,7 +7545,7 @@ test('/auto add creates a draft first and /auto confirm persists the standalone 
     text: '/auto add every 30m | 检查部署状态，有变化再告诉我',
   });
 
-  assert.equal(openai.startThreadCalls.length, 1);
+  assert.equal(openai.startThreadCalls.length, 0);
   assert.match(drafted.messages[0]?.text ?? '', /自动化草案 \| 检查部署状态，有变化再告诉我/);
   assert.match(drafted.messages[1]?.text ?? '', /模式：独立执行/);
   assert.match(drafted.messages[2]?.text ?? '', /计划：every 30m/);
@@ -7592,7 +7557,7 @@ test('/auto add creates a draft first and /auto confirm persists the standalone 
     text: '/auto confirm',
   });
 
-  assert.equal(openai.startThreadCalls.length, 2);
+  assert.equal(openai.startThreadCalls.length, 1);
   assert.match(added.messages[0]?.text ?? '', /自动化任务已创建/);
   assert.match(added.messages[1]?.text ?? '', /标题：检查部署状态，有变化再告诉我/);
 
@@ -7616,10 +7581,10 @@ test('/auto add natural language produces a draft through provider normalization
   const originalStartTurn = openai.startTurn.bind(openai);
   openai.startTurn = async (params: any) => {
     const parserInput = String(params?.inputText ?? '');
-    if (parserInput.includes('automation-draft normalizer') || parserInput.includes('automation 草案规范化器')) {
+    if (parserInput.includes('docs/command-skills/auto.md')) {
       return {
         outputText: JSON.stringify({
-          valid: true,
+          action: 'create_draft',
           title: 'news 早报',
           mode: 'standalone',
           schedule: {
@@ -7664,10 +7629,10 @@ test('/auto add natural language can create multiple daily schedules from one re
   const originalStartTurn = openai.startTurn.bind(openai);
   openai.startTurn = async (params: any) => {
     const parserInput = String(params?.inputText ?? '');
-    if (parserInput.includes('automation-draft normalizer') || parserInput.includes('automation 草案规范化器')) {
+    if (parserInput.includes('docs/command-skills/auto.md')) {
       return {
         outputText: JSON.stringify({
-          valid: true,
+          action: 'create_draft',
           title: '待办事项整理',
           mode: 'standalone',
           schedules: [
@@ -7721,10 +7686,10 @@ test('/auto edit updates the pending automation draft instead of replacing it', 
   const originalStartTurn = openai.startTurn.bind(openai);
   openai.startTurn = async (params: any) => {
     const parserInput = String(params?.inputText ?? '');
-    if (parserInput.includes('automation 草案规范化器')) {
+    if (parserInput.includes('docs/command-skills/auto.md') && parserInput.includes('"subcommand": "add"')) {
       return {
         outputText: JSON.stringify({
-          valid: true,
+          action: 'create_draft',
           title: '待办事项整理',
           mode: 'standalone',
           schedules: [
@@ -7736,13 +7701,13 @@ test('/auto edit updates the pending automation draft instead of replacing it', 
         }),
       };
     }
-    if (parserInput.includes('automation 草案编辑器')) {
-      assert.match(parserInput, /当前草案 JSON/);
+    if (parserInput.includes('docs/command-skills/auto.md') && parserInput.includes('"subcommand": "edit"')) {
+      assert.match(parserInput, /pendingDraft/);
       assert.match(parserInput, /把待办事项整理以后发送到我的微信上/);
       assert.match(parserInput, /只把时间改成每天早上9点，任务内容不变/);
       return {
         outputText: JSON.stringify({
-          valid: true,
+          action: 'update_pending_draft',
           title: '待办事项整理',
           mode: 'standalone',
           schedules: [
@@ -7818,6 +7783,67 @@ test('/auto rename and /auto del update and remove automation jobs', async () =>
     platform: 'weixin',
     externalScopeId: 'wx-user-auto-2',
     text: '/auto',
+  });
+  assert.equal(listed.messages[0]?.text ?? '', '自动化任务 | 0 项');
+});
+
+test('/auto natural language proposes deleting a matching job before confirm', async () => {
+  const { runtime, openai } = makeRuntime({
+    defaultCwd: '/tmp/codexbridge-auto-natural-delete',
+  });
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-natural-delete',
+    text: '/auto add every 5m | 把微博热搜前10条发给我',
+  });
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-natural-delete',
+    text: '/auto confirm',
+  });
+
+  const originalStartTurn = openai.startTurn.bind(openai);
+  openai.startTurn = async (params: any) => {
+    const parserInput = String(params?.inputText ?? '');
+    if (parserInput.includes('docs/command-skills/auto.md') && parserInput.includes('"subcommand": "natural"')) {
+      assert.match(parserInput, /微博热搜前10条/);
+      return {
+        outputText: JSON.stringify({
+          action: 'propose_delete_job',
+          confidence: 0.93,
+          requiresConfirmation: true,
+          target: {
+            index: 1,
+            matchText: '微博热搜',
+          },
+          reason: '用户要求不要再发送微博热搜自动化。',
+        }),
+      };
+    }
+    return originalStartTurn(params);
+  };
+
+  const proposed = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-natural-delete',
+    text: '/auto 不要再发微博热搜了',
+  });
+  const proposedText = proposed.messages.map((entry: any) => entry.text ?? '').join('\n');
+  assert.match(proposedText, /自动化操作草案 \| 删除任务/);
+  assert.match(proposedText, /确认：\/auto confirm/);
+
+  const confirmed = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-natural-delete',
+    text: '/auto confirm',
+  });
+  assert.match(confirmed.messages[0]?.text ?? '', /自动化任务已删除/);
+
+  const listed = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-natural-delete',
+    text: '/auto list',
   });
   assert.equal(listed.messages[0]?.text ?? '', '自动化任务 | 0 项');
 });

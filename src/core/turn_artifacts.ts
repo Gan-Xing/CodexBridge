@@ -57,10 +57,7 @@ export function createTurnArtifactContext({
   bridgeSessionId: string;
   cwd?: string | null;
   intent: TurnArtifactIntent | null | undefined;
-}): TurnArtifactContext | null {
-  if (!intent?.requested) {
-    return null;
-  }
+}): TurnArtifactContext {
   const requestId = crypto.randomUUID();
   const baseDir = resolveArtifactBaseDir(cwd);
   return {
@@ -69,7 +66,7 @@ export function createTurnArtifactContext({
     artifactDir: path.join(baseDir, '.codexbridge', 'turn-artifacts', requestId),
     spoolDir: path.join(baseDir, '.codexbridge', 'artifact-spool', requestId),
     turnId: null,
-    intent,
+    intent: intent ?? emptyIntent(),
   };
 }
 
@@ -111,33 +108,30 @@ export function createPendingTurnArtifactDeliveryState(
 }
 
 export function buildTurnArtifactDeveloperInstructions(context: TurnArtifactContext | null | undefined): string {
-  if (!context?.intent.requested) {
+  if (!context) {
     return '';
   }
   const limits = resolveTurnArtifactLimits();
-  const preferredFormat = context.intent.requestedFormat ?? 'file';
   const exampleFilename = buildManifestExampleFilename(context.intent);
-  const preferredKind = context.intent.preferredKind ?? 'file';
   const lines = [
     'CodexBridge attachment delivery protocol:',
-    'The user explicitly expects a deliverable attachment in this turn.',
-    `Write any deliverable files only inside this directory: ${context.artifactDir}`,
-    `Preferred output format: ${preferredFormat}. If that is not practical, create the closest useful deliverable file and declare it.`,
-    `Keep the number of returned deliverables at or below ${limits.maxArtifactCount}.`,
-    `Keep each declared file at or below ${limits.maxArtifactSizeBytes} bytes whenever practical.`,
+    `If and only if the user clearly asks for a file, image, audio, or video deliverable, write it only inside this directory: ${context.artifactDir}`,
+    'Do not return attachments when the user is only mentioning files, complaining about previous attachments, asking to analyze existing documents, or asking for a normal text reply.',
+    'If the user prefers a text-only answer, do not create any deliverable file and do not append a manifest block.',
+    `When you do return deliverables, keep the number of returned files at or below ${limits.maxArtifactCount}.`,
+    `When you do return deliverables, keep each declared file at or below ${limits.maxArtifactSizeBytes} bytes whenever practical.`,
     'Use absolute paths in the manifest whenever possible.',
   ];
   if (context.intent.requestedFileName) {
     lines.push(`Use this exact filename for the final deliverable whenever practical: ${context.intent.requestedFileName}`);
-  } else {
-    lines.push('Choose a clear, semantic final filename yourself. If you are modifying an existing file, keep its current filename.');
-    lines.push('In the manifest example below, replace the placeholder filename with the real filename you chose.');
   }
+  lines.push('If you do return a deliverable, choose a clear, semantic final filename yourself. If you are modifying an existing file, keep its current filename.');
+  lines.push('If you do not return a deliverable, reply normally and omit the manifest entirely.');
   return [
     ...lines,
-    'After your normal user-visible final answer, append exactly one fenced JSON manifest block in this format:',
+    'If you are returning deliverables, append exactly one fenced JSON manifest block after your normal user-visible final answer in this format:',
     `\`\`\`${MANIFEST_FENCE}`,
-    `[{"path":"${path.join(context.artifactDir, exampleFilename)}","kind":"${preferredKind}","displayName":"${exampleFilename}","caption":"final deliverable"}]`,
+    `[{"path":"${path.join(context.artifactDir, exampleFilename)}","kind":"file","displayName":"${exampleFilename}","caption":"final deliverable"}]`,
     '```',
     'Only include files that should be sent back to the user.',
     'Do not explain the protocol or mention the manifest outside the fenced block.',
@@ -166,7 +160,7 @@ export function finalizeTurnArtifacts({
   ensureTurnArtifactDirectories(context);
   const extracted = extractDeclaredArtifactsFromText(String(result?.outputText ?? ''));
   const declaredArtifacts = materializeDeclaredArtifacts(extracted.entries, context, limits.maxArtifactSizeBytes);
-  const fallbackArtifacts = declaredArtifacts.artifacts.length === 0
+  const fallbackArtifacts = declaredArtifacts.artifacts.length === 0 && context.intent.requested
     ? collectFallbackArtifacts(context, limits.maxArtifactSizeBytes)
     : {
       artifacts: [],
@@ -191,9 +185,17 @@ export function finalizeTurnArtifacts({
     deliverableCount: limitedArtifacts.artifacts.length,
     requestedByUser: context.intent.requested,
   });
-  const artifactDelivery: TurnArtifactDeliveryState | null = pendingState
+  const deliveryBaseState = pendingState
+    ?? createObservedTurnArtifactDeliveryState(context, {
+      artifacts: limitedArtifacts.artifacts,
+      manifestDeclaredCount: extracted.entries.length,
+      noticeCode,
+      turnId: result.turnId ?? context.turnId ?? null,
+      limits,
+    });
+  const artifactDelivery: TurnArtifactDeliveryState | null = deliveryBaseState
     ? {
-      ...pendingState,
+      ...deliveryBaseState,
       turnId: result.turnId ?? context.turnId ?? null,
       stage: resolveArtifactDeliveryStage({
         fallbackUsed: fallbackArtifacts.artifacts.length > 0,
@@ -256,6 +258,48 @@ function normalizeProviderArtifacts(result: ProviderTurnResult): OutputArtifact[
       };
     })
     .filter(Boolean) as OutputArtifact[]);
+}
+
+function createObservedTurnArtifactDeliveryState(
+  context: TurnArtifactContext,
+  {
+    artifacts,
+    manifestDeclaredCount,
+    noticeCode,
+    turnId,
+    limits,
+  }: {
+    artifacts: OutputArtifact[];
+    manifestDeclaredCount: number;
+    noticeCode: TurnArtifactNoticeCode | null;
+    turnId: string | null;
+    limits: { maxArtifactCount: number; maxArtifactSizeBytes: number };
+  },
+): TurnArtifactDeliveryState | null {
+  if (artifacts.length === 0 && manifestDeclaredCount <= 0 && !noticeCode) {
+    return null;
+  }
+  const observedIntent = inferTurnArtifactIntentFromArtifacts(context.intent, artifacts);
+  return {
+    requestId: context.requestId,
+    bridgeSessionId: context.bridgeSessionId,
+    turnId,
+    requestedByUser: observedIntent.requested,
+    requestedFormat: observedIntent.requestedFormat,
+    preferredKind: observedIntent.preferredKind,
+    requestedByText: observedIntent.userDescription,
+    artifactDir: context.artifactDir,
+    spoolDir: context.spoolDir,
+    stage: 'pending',
+    fallbackUsed: false,
+    manifestDeclaredCount,
+    scannedCandidateCount: 0,
+    maxArtifactCount: limits.maxArtifactCount,
+    maxArtifactSizeBytes: limits.maxArtifactSizeBytes,
+    noticeCode,
+    deliveredArtifacts: [],
+    rejectedArtifacts: [],
+  };
 }
 
 function normalizeImageMedia(artifacts: OutputArtifact[]): Array<{
@@ -976,9 +1020,41 @@ function buildManifestExampleFilename(intent: TurnArtifactIntent): string {
   return `${baseName}${extension}`;
 }
 
+function inferTurnArtifactIntentFromArtifacts(
+  existingIntent: TurnArtifactIntent,
+  artifacts: OutputArtifact[],
+): TurnArtifactIntent {
+  if (existingIntent.requested) {
+    return existingIntent;
+  }
+  const firstArtifact = artifacts[0] ?? null;
+  if (!firstArtifact) {
+    return existingIntent;
+  }
+  const fileName = sanitizeArtifactName(firstArtifact.displayName ?? path.basename(String(firstArtifact.path ?? '')));
+  const extension = path.extname(fileName).toLowerCase();
+  return {
+    requested: true,
+    preferredKind: firstArtifact.kind ?? 'file',
+    requestedFormat: extension ? extension.replace(/^\./u, '') : null,
+    requestedExtension: extension || null,
+    requestedFileName: fileName || null,
+    userDescription: null,
+    requiresClarification: false,
+  };
+}
+
 function resolveArtifactBaseDir(cwd: string | null | undefined): string {
   const normalized = String(cwd ?? '').trim();
-  return normalized || path.join(os.homedir(), '.codexbridge');
+  if (normalized) {
+    try {
+      fs.accessSync(normalized, fs.constants.W_OK);
+      return normalized;
+    } catch {
+      // Fall through to a stable writable home-based location.
+    }
+  }
+  return os.homedir();
 }
 
 function firstNonEmpty(...values: Array<string | null | undefined>): string {
@@ -989,6 +1065,18 @@ function firstNonEmpty(...values: Array<string | null | undefined>): string {
     }
   }
   return '';
+}
+
+function emptyIntent(): TurnArtifactIntent {
+  return {
+    requested: false,
+    preferredKind: null,
+    requestedFormat: null,
+    requestedExtension: null,
+    requestedFileName: null,
+    userDescription: null,
+    requiresClarification: false,
+  };
 }
 
 function unique<T>(values: T[]): T[] {
