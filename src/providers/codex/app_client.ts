@@ -2378,6 +2378,7 @@ function summarizeProgressState(progressState: Partial<ProgressState>) {
 function summarizeSessionState(sessionPath: string | null | undefined, sessionState: {
   hasTaskComplete: boolean;
   lastAgentMessage: string | null;
+  toolSuggestionMessage?: string | null;
   outputArtifacts: Array<{ kind?: string | null; path?: string | null }>;
   runtimeError?: string | null;
 }) {
@@ -2385,6 +2386,7 @@ function summarizeSessionState(sessionPath: string | null | undefined, sessionSt
     sessionPath: sessionPath ?? null,
     hasTaskComplete: sessionState.hasTaskComplete,
     lastAgentMessagePreview: truncateDebugText(sessionState.lastAgentMessage, 160),
+    toolSuggestionPreview: truncateDebugText(sessionState.toolSuggestionMessage, 160),
     runtimeError: truncateDebugText(sessionState.runtimeError, 160),
     outputArtifactCount: sessionState.outputArtifacts.length,
     outputArtifacts: sessionState.outputArtifacts.map((artifact) => ({
@@ -3214,6 +3216,7 @@ function inspectTurnCompletionFromSessionPath(sessionPath, turnId) {
     return {
       hasTaskComplete: false,
       lastAgentMessage: null,
+      toolSuggestionMessage: null,
       outputArtifacts: [],
       runtimeError: null,
     };
@@ -3239,10 +3242,12 @@ function inspectTurnCompletionFromSessionPath(sessionPath, turnId) {
         continue;
       }
       const lastAgentMessage = extractTextCandidate(payload.last_agent_message)?.trim() || null;
+      const toolSuggestionMessage = findSessionToolSuggestionMessageForTurn(lines, index, turnId);
       const runtimeError = findSessionRuntimeErrorForTurn(lines, index, turnId);
       return inspectSessionTurnArtifacts(lines, index, {
         hasTaskComplete: true,
         lastAgentMessage,
+        toolSuggestionMessage,
         runtimeError,
       });
     }
@@ -3250,6 +3255,7 @@ function inspectTurnCompletionFromSessionPath(sessionPath, turnId) {
     return {
       hasTaskComplete: false,
       lastAgentMessage: null,
+      toolSuggestionMessage: null,
       outputArtifacts: [],
       runtimeError: null,
     };
@@ -3257,9 +3263,67 @@ function inspectTurnCompletionFromSessionPath(sessionPath, turnId) {
   return {
     hasTaskComplete: false,
     lastAgentMessage: null,
+    toolSuggestionMessage: null,
     outputArtifacts: [],
     runtimeError: null,
   };
+}
+
+function findSessionToolSuggestionMessageForTurn(lines: string[], taskCompleteIndex: number, turnId: string): string | null {
+  for (let index = taskCompleteIndex - 1; index >= 0; index -= 1) {
+    const line = lines[index]?.trim();
+    if (!line) {
+      continue;
+    }
+    let entry: any = null;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const payload = entry?.payload ?? null;
+    if (entry?.type === 'turn_context' && String(payload?.turn_id ?? '') === turnId) {
+      break;
+    }
+    if (entry?.type === 'event_msg' && payload?.type === 'task_started' && String(payload?.turn_id ?? '') === turnId) {
+      break;
+    }
+    if (entry?.type !== 'response_item') {
+      continue;
+    }
+    const suggestion = extractToolSuggestResponseItemText(payload);
+    if (suggestion) {
+      return suggestion;
+    }
+  }
+  return null;
+}
+
+function extractToolSuggestResponseItemText(payload: any): string | null {
+  if (String(payload?.type ?? '') !== 'function_call' || String(payload?.name ?? '') !== 'tool_suggest') {
+    return null;
+  }
+  let parsedArguments: any = null;
+  if (typeof payload?.arguments === 'string') {
+    try {
+      parsedArguments = JSON.parse(payload.arguments);
+    } catch {
+      parsedArguments = null;
+    }
+  } else if (payload?.arguments && typeof payload.arguments === 'object') {
+    parsedArguments = payload.arguments;
+  }
+  const reason = extractTextCandidate(parsedArguments?.suggest_reason)?.trim() || '';
+  const toolType = String(parsedArguments?.tool_type ?? '').trim().toLowerCase();
+  if (!reason) {
+    return null;
+  }
+  const prefix = toolType === 'connector'
+    ? '当前缺少所需连接。'
+    : toolType === 'plugin'
+      ? '当前缺少所需插件。'
+      : '当前缺少所需扩展能力。';
+  return `${prefix}\n${reason}\n请先完成对应的安装或认证，再重试原请求。`;
 }
 
 function findSessionRuntimeErrorForTurn(lines: string[], taskCompleteIndex: number, turnId: string): string | null {
@@ -3407,7 +3471,8 @@ function inspectSessionTurnArtifacts(lines, taskCompleteIndex, state) {
   }
   return {
     hasTaskComplete: state.hasTaskComplete,
-    lastAgentMessage: state.lastAgentMessage,
+    lastAgentMessage: state.lastAgentMessage || state.toolSuggestionMessage || null,
+    toolSuggestionMessage: state.toolSuggestionMessage ?? null,
     runtimeError: state.runtimeError ?? null,
     outputArtifacts,
   };

@@ -300,6 +300,26 @@ type ExplicitPluginTargetHint = {
   syntax: 'slash_use' | 'at_alias' | 'zh_alias' | 'inline_at_alias';
 };
 
+type ExplicitPluginTargetIssue =
+  | {
+    kind: 'plugin_not_installed';
+    target: ExplicitPluginTargetHint;
+    plugin: ProviderPluginSummary;
+  }
+  | {
+    kind: 'app_auth_required' | 'app_disabled' | 'app_unavailable';
+    target: ExplicitPluginTargetHint;
+    plugin: ProviderPluginSummary;
+    appToken: string;
+    appName: string;
+  }
+  | {
+    kind: 'mcp_auth_required' | 'mcp_disabled' | 'mcp_unavailable';
+    target: ExplicitPluginTargetHint;
+    plugin: ProviderPluginSummary;
+    serverName: string;
+  };
+
 type ParsedConversationPluginInvocation = {
   token: string;
   taskText: string;
@@ -560,6 +580,15 @@ export class BridgeCoordinator {
         activeTurn,
       });
       return this.buildActiveTurnBlockedResponse(effectiveEvent, activeTurn);
+    }
+    const explicitPluginIssueResponse = await this.buildExplicitPluginIssueResponse(effectiveEvent, providerProfile);
+    if (explicitPluginIssueResponse) {
+      debugCoordinator('conversation_turn_blocked_plugin_unavailable', {
+        platform: scopeRef.platform,
+        scopeId: scopeRef.externalScopeId,
+        textPreview: truncateCoordinatorText(effectiveEvent?.text, 160),
+      });
+      return explicitPluginIssueResponse;
     }
     this.activeTurns?.beginScopeTurn(scopeRef);
     let session = null;
@@ -4740,7 +4769,7 @@ export class BridgeCoordinator {
         this.t('coordinator.apps.notFound', { value: String(token ?? '').trim() || '?' }),
       ], this.buildScopedSessionMeta(event));
     }
-    if (resolved.app.isAccessible && !resolved.app.installUrl) {
+    if (resolved.app.isAccessible) {
       return messageResponse([
         this.t('coordinator.apps.authNonePending', { name: resolved.app.name }),
       ], this.buildScopedSessionMeta(event));
@@ -4755,6 +4784,9 @@ export class BridgeCoordinator {
       this.t('coordinator.apps.authUrl', {
         name: resolved.app.name,
         url: installUrl,
+      }),
+      this.t('coordinator.apps.authFollowupHint', {
+        value: resolved.app.id || resolved.app.name,
       }),
     ], this.buildScopedSessionMeta(event));
   }
@@ -5152,14 +5184,8 @@ export class BridgeCoordinator {
         this.t('coordinator.plugins.notFound', { value: String(token ?? '').trim() || '?' }),
       ], this.buildScopedSessionMeta(event));
     }
-    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
-    const detail = await providerPlugin.readPlugin({
-      providerProfile,
-      pluginName: resolved.plugin.name,
-      marketplaceName: resolved.plugin.marketplaceName,
-      marketplacePath: resolved.plugin.marketplacePath,
-    });
-    if (!detail) {
+    const detailContext = await this.loadPluginDetailContext(providerProfile, resolved.plugin);
+    if (!detailContext.detail) {
       return messageResponse([
         this.t('coordinator.plugins.notFound', { value: String(token ?? '').trim() || '?' }),
       ], this.buildScopedSessionMeta(event));
@@ -5174,10 +5200,10 @@ export class BridgeCoordinator {
         i18n: this.currentI18n,
         index: resolved.index,
         cwd: resolved.cwd,
-        detail,
+        detail: detailContext.detail,
         aliases,
-        apps: [],
-        mcpServers: [],
+        apps: detailContext.apps,
+        mcpServers: detailContext.mcpServers,
       }),
       this.buildScopedSessionMeta(event),
     );
@@ -6069,6 +6095,67 @@ export class BridgeCoordinator {
       apps,
       mcpServers,
     };
+  }
+
+  async buildExplicitPluginIssueResponse(event, providerProfile) {
+    const targets = resolveExplicitPluginTargetHints(event);
+    if (targets.length === 0) {
+      return null;
+    }
+    const catalog = await this.fetchPluginsForEvent(event, providerProfile);
+    const issues: ExplicitPluginTargetIssue[] = [];
+    for (const target of targets) {
+      const plugin = catalog.allPlugins.find((entry) => entry.id === target.pluginId) ?? null;
+      if (!plugin) {
+        continue;
+      }
+      const issue = await this.inspectExplicitPluginTargetIssue(providerProfile, target, plugin);
+      if (issue) {
+        issues.push(issue);
+      }
+    }
+    if (issues.length === 0) {
+      return null;
+    }
+    return messageResponse(
+      renderExplicitPluginIssueLines({
+        issues,
+        i18n: this.currentI18n,
+      }),
+      this.buildScopedSessionMeta(event),
+    );
+  }
+
+  async inspectExplicitPluginTargetIssue(providerProfile, target, plugin): Promise<ExplicitPluginTargetIssue | null> {
+    if (!plugin.installed) {
+      return {
+        kind: 'plugin_not_installed',
+        target,
+        plugin,
+      };
+    }
+    const detailContext = await this.loadPluginDetailContext(providerProfile, plugin);
+    if (
+      hasReadyPluginApp(detailContext.detail, detailContext.apps, plugin)
+      || hasReadyPluginMcp(detailContext.detail, detailContext.mcpServers)
+    ) {
+      return null;
+    }
+    const appIssue = resolvePluginAppIssue(detailContext.detail, detailContext.apps, target);
+    if (appIssue) {
+      return {
+        ...appIssue,
+        plugin,
+      };
+    }
+    const mcpIssue = resolvePluginMcpIssue(detailContext.detail, detailContext.mcpServers, target);
+    if (mcpIssue) {
+      return {
+        ...mcpIssue,
+        plugin,
+      };
+    }
+    return null;
   }
 
   async refreshPluginAfterMutation(event, providerProfile, plugin) {
@@ -13191,9 +13278,15 @@ function renderPluginDetailLines({
   }));
   if (detail.apps.length > 0) {
     lines.push(i18n.t('coordinator.plugins.appsLabel', { count: detail.apps.length }));
-    for (const app of detail.apps) {
-      const segments = [app.name];
-      if (app.needsAuth) {
+    for (const pluginApp of detail.apps) {
+      const runtimeApp = findMatchingProviderAppInfo(pluginApp, apps, plugin);
+      const segments = [pluginApp.name];
+      if (runtimeApp) {
+        segments.push(runtimeApp.isEnabled ? i18n.t('common.enabled') : i18n.t('common.disabled'));
+        segments.push(runtimeApp.isAccessible
+          ? i18n.t('coordinator.plugins.appAccessible')
+          : i18n.t('coordinator.plugins.appInaccessible'));
+      } else if (pluginApp.needsAuth) {
         segments.push(i18n.t('coordinator.plugins.appNeedsAuth'));
       }
       lines.push(`- ${segments.join(' | ')}`);
@@ -13357,6 +13450,209 @@ function renderPluginInstallFollowupLines(
     lines.push(`- ${app.name} | /apps auth ${app.id || app.name}`);
   }
   return lines;
+}
+
+function renderExplicitPluginIssueLines({
+  issues,
+  i18n,
+}: {
+  issues: ExplicitPluginTargetIssue[];
+  i18n: Translator;
+}): string[] {
+  const lines: string[] = [];
+  for (const [index, issue] of issues.entries()) {
+    if (index > 0) {
+      lines.push('');
+    }
+    const pluginName = getPluginDisplayName(issue.plugin);
+    lines.push(i18n.t('coordinator.use.pluginIssueTitle', { name: pluginName }));
+    switch (issue.kind) {
+      case 'plugin_not_installed':
+        lines.push(i18n.t('coordinator.use.pluginIssueNotInstalled'));
+        lines.push(i18n.t('coordinator.use.pluginIssueInstallAction', { value: issue.plugin.name }));
+        break;
+      case 'app_disabled':
+        lines.push(i18n.t('coordinator.use.pluginIssueAppDisabled', { name: issue.appName }));
+        lines.push(i18n.t('coordinator.use.pluginIssueAppEnableAction', { value: issue.appToken }));
+        break;
+      case 'app_auth_required':
+        lines.push(i18n.t('coordinator.use.pluginIssueAppAuth', { name: issue.appName }));
+        lines.push(i18n.t('coordinator.use.pluginIssueAppAuthAction', { value: issue.appToken }));
+        break;
+      case 'app_unavailable':
+        lines.push(i18n.t('coordinator.use.pluginIssueAppUnavailable', { name: issue.appName }));
+        lines.push(i18n.t('coordinator.use.pluginIssueAppAuthAction', { value: issue.appToken }));
+        break;
+      case 'mcp_disabled':
+        lines.push(i18n.t('coordinator.use.pluginIssueMcpDisabled', { name: issue.serverName }));
+        lines.push(i18n.t('coordinator.use.pluginIssueMcpEnableAction', { value: issue.serverName }));
+        break;
+      case 'mcp_auth_required':
+        lines.push(i18n.t('coordinator.use.pluginIssueMcpAuth', { name: issue.serverName }));
+        lines.push(i18n.t('coordinator.use.pluginIssueMcpAuthAction', { value: issue.serverName }));
+        break;
+      case 'mcp_unavailable':
+        lines.push(i18n.t('coordinator.use.pluginIssueMcpUnavailable', { name: issue.serverName }));
+        lines.push(i18n.t('coordinator.use.pluginIssueMcpAuthAction', { value: issue.serverName }));
+        break;
+      default:
+        break;
+    }
+    lines.push(i18n.t('coordinator.use.pluginIssueDetailsAction', { value: issue.plugin.name }));
+  }
+  lines.push(i18n.t('coordinator.use.pluginIssueRetryHint'));
+  return lines;
+}
+
+function resolvePluginAppIssue(
+  detail: ProviderPluginDetail,
+  apps: ProviderAppInfo[],
+  target: ExplicitPluginTargetHint,
+): Omit<Extract<ExplicitPluginTargetIssue, {
+  kind: 'app_auth_required' | 'app_disabled' | 'app_unavailable';
+}>, 'plugin'> | null {
+  if (!Array.isArray(detail.apps) || detail.apps.length === 0) {
+    return null;
+  }
+  const related = detail.apps.map((pluginApp) => buildPluginAppRelation(pluginApp, apps, detail.summary));
+  if (related.some(({ app }) => app?.isEnabled !== false && app?.isAccessible === true)) {
+    return null;
+  }
+  const disabled = related.find(({ app }) => app && app.isEnabled === false) ?? null;
+  if (disabled) {
+    return {
+      kind: 'app_disabled',
+      target,
+      appToken: disabled.app.id || disabled.app.name,
+      appName: disabled.app.name || disabled.pluginApp.name,
+    };
+  }
+  const authRequired = related.find(({ pluginApp, app }) => pluginApp.needsAuth || app?.isAccessible === false) ?? null;
+  if (authRequired) {
+    return {
+      kind: 'app_auth_required',
+      target,
+      appToken: authRequired.app?.id || authRequired.pluginApp.id || authRequired.pluginApp.name,
+      appName: authRequired.app?.name || authRequired.pluginApp.name,
+    };
+  }
+  const fallback = related[0] ?? null;
+  if (!fallback) {
+    return null;
+  }
+  return {
+    kind: 'app_unavailable',
+    target,
+    appToken: fallback.app?.id || fallback.pluginApp.id || fallback.pluginApp.name,
+    appName: fallback.app?.name || fallback.pluginApp.name,
+  };
+}
+
+function resolvePluginMcpIssue(
+  detail: ProviderPluginDetail,
+  mcpServers: ProviderMcpServerStatus[],
+  target: ExplicitPluginTargetHint,
+): Omit<Extract<ExplicitPluginTargetIssue, {
+  kind: 'mcp_auth_required' | 'mcp_disabled' | 'mcp_unavailable';
+}>, 'plugin'> | null {
+  if (!Array.isArray(detail.mcpServers) || detail.mcpServers.length === 0) {
+    return null;
+  }
+  const related = detail.mcpServers.map((serverName) => buildPluginMcpRelation(serverName, mcpServers));
+  if (related.some(({ server }) => server?.isEnabled === true && server.authStatus !== 'notLoggedIn')) {
+    return null;
+  }
+  const disabled = related.find(({ server }) => server && server.isEnabled === false) ?? null;
+  if (disabled) {
+    return {
+      kind: 'mcp_disabled',
+      target,
+      serverName: disabled.serverName,
+    };
+  }
+  const authRequired = related.find(({ server }) => server?.authStatus === 'notLoggedIn') ?? null;
+  if (authRequired) {
+    return {
+      kind: 'mcp_auth_required',
+      target,
+      serverName: authRequired.serverName,
+    };
+  }
+  const fallback = related[0] ?? null;
+  if (!fallback) {
+    return null;
+  }
+  return {
+    kind: 'mcp_unavailable',
+    target,
+    serverName: fallback.serverName,
+  };
+}
+
+function hasReadyPluginApp(
+  detail: ProviderPluginDetail,
+  apps: ProviderAppInfo[],
+  plugin: ProviderPluginSummary,
+): boolean {
+  if (!Array.isArray(detail.apps) || detail.apps.length === 0) {
+    return false;
+  }
+  return detail.apps
+    .map((pluginApp) => buildPluginAppRelation(pluginApp, apps, plugin))
+    .some(({ app }) => app?.isEnabled !== false && app?.isAccessible === true);
+}
+
+function hasReadyPluginMcp(
+  detail: ProviderPluginDetail,
+  mcpServers: ProviderMcpServerStatus[],
+): boolean {
+  if (!Array.isArray(detail.mcpServers) || detail.mcpServers.length === 0) {
+    return false;
+  }
+  return detail.mcpServers
+    .map((serverName) => buildPluginMcpRelation(serverName, mcpServers))
+    .some(({ server }) => server?.isEnabled === true && server.authStatus !== 'notLoggedIn');
+}
+
+function buildPluginAppRelation(
+  pluginApp: ProviderPluginDetail['apps'][number],
+  apps: ProviderAppInfo[],
+  plugin: ProviderPluginSummary,
+) {
+  return {
+    pluginApp,
+    app: findMatchingProviderAppInfo(pluginApp, apps, plugin),
+  };
+}
+
+function buildPluginMcpRelation(
+  serverName: string,
+  mcpServers: ProviderMcpServerStatus[],
+) {
+  return {
+    serverName,
+    server: mcpServers.find((entry) => entry.name === serverName) ?? null,
+  };
+}
+
+function findMatchingProviderAppInfo(
+  pluginApp: ProviderPluginDetail['apps'][number],
+  apps: ProviderAppInfo[],
+  plugin: ProviderPluginSummary,
+): ProviderAppInfo | null {
+  const pluginDisplayName = getPluginDisplayName(plugin);
+  const normalizedId = normalizeAppLookupToken(pluginApp.id);
+  const normalizedName = normalizeAppLookupToken(pluginApp.name);
+  return apps.find((app) => {
+    const pluginNames = Array.isArray(app.pluginDisplayNames) ? app.pluginDisplayNames : [];
+    const normalizedPluginNames = pluginNames.map((entry) => normalizeAppLookupToken(entry));
+    return (
+      (normalizedId && normalizeAppLookupToken(app.id) === normalizedId)
+      || (normalizedName && normalizeAppLookupToken(app.name) === normalizedName)
+      || normalizedPluginNames.includes(normalizeAppLookupToken(plugin.name))
+      || normalizedPluginNames.includes(normalizeAppLookupToken(pluginDisplayName))
+    );
+  }) ?? null;
 }
 
 function formatPluginMcpAuthStatusLabel(

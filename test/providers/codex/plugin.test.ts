@@ -137,7 +137,8 @@ test('CodexProviderPlugin uses per-profile clients and forwards default model in
   assert.equal(turn.outputText, 'done');
   assert.ok(calls.some((entry) => entry[0] === 'startThread' && entry[2] === 'gpt-5.4'));
   assert.ok(calls.some((entry) => entry[0] === 'startTurn' && entry[2] === 'gpt-5.4'));
-  assert.equal(seenDeveloperInstructions, '');
+  assert.match(String(seenDeveloperInstructions ?? ''), /CodexBridge runtime constraints/);
+  assert.match(String(seenDeveloperInstructions ?? ''), /Do not call tool_suggest/);
 });
 
 test('CodexProviderPlugin normalizes legacy service tier values before calling the app client', async () => {

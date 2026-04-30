@@ -5425,7 +5425,7 @@ test('/plugins shows featured plugins, category summaries, category items, and p
   assert.match(detailText, /插件详情/u);
   assert.match(detailText, /Google Drive/u);
   assert.match(detailText, /Apps \/ Connectors：1/u);
-  assert.match(detailText, /需要认证/u);
+  assert.match(detailText, /Google Drive \| 开启 \| 可访问/u);
 });
 
 test('/plugins search uses mixed semantic and fuzzy matching and updates numeric selection context', async () => {
@@ -6102,6 +6102,127 @@ test('explicit plugin targeting syntaxes rewrite the task text and attach plugin
   }
 });
 
+test('explicit plugin targeting returns a visible app auth hint instead of silently starting a turn', async () => {
+  const { runtime, openai } = makeRuntime({
+    defaultCwd: '/tmp/openai-default',
+  });
+  openai.pluginCatalog = {
+    featuredPluginIds: ['gmail@openai-curated'],
+    marketplaceLoadErrors: [],
+    marketplaces: [{
+      name: 'openai-curated',
+      path: null,
+      displayName: 'OpenAI Curated',
+      plugins: [{
+        id: 'gmail@openai-curated',
+        name: 'gmail',
+        installed: true,
+        enabled: true,
+        installPolicy: 'AVAILABLE',
+        authPolicy: 'ON_USE',
+        marketplaceName: 'openai-curated',
+        marketplacePath: null,
+        marketplaceDisplayName: 'OpenAI Curated',
+        displayName: 'Gmail',
+        shortDescription: 'Read and manage Gmail',
+      }],
+    }],
+  };
+  openai.pluginDetails.set('gmail', {
+    summary: openai.pluginCatalog.marketplaces[0].plugins[0],
+    marketplaceName: 'openai-curated',
+    marketplacePath: null,
+    description: 'Read and manage Gmail',
+    apps: [{
+      id: 'gmail',
+      name: 'Gmail',
+      needsAuth: true,
+      description: 'Gmail connector',
+    }],
+    mcpServers: [],
+    skills: [],
+  });
+  openai.appEntries = [{
+    id: 'gmail',
+    name: 'Gmail',
+    description: 'Gmail connector',
+    isAccessible: false,
+    isEnabled: true,
+    pluginDisplayNames: ['Gmail'],
+  }];
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-plugin-auth-hint-1',
+    text: '@gm 查询最近发送的邮件',
+  });
+
+  const responseText = result.messages.map((message) => message.text ?? '').join('\n');
+  assert.equal(openai.startTurnCalls.length, 0);
+  assert.match(responseText, /插件 Gmail 当前不能直接使用/u);
+  assert.match(responseText, /\/apps auth gmail/u);
+  assert.match(responseText, /\/pg show gmail/u);
+  assert.match(responseText, /重发原请求即可/u);
+});
+
+test('explicit plugin targeting returns a visible MCP auth hint instead of silently starting a turn', async () => {
+  const { runtime, openai } = makeRuntime({
+    defaultCwd: '/tmp/openai-default',
+  });
+  openai.pluginCatalog = {
+    featuredPluginIds: ['openai-docs@openai-curated'],
+    marketplaceLoadErrors: [],
+    marketplaces: [{
+      name: 'openai-curated',
+      path: null,
+      displayName: 'OpenAI Curated',
+      plugins: [{
+        id: 'openai-docs@openai-curated',
+        name: 'openai-docs',
+        installed: true,
+        enabled: true,
+        installPolicy: 'AVAILABLE',
+        authPolicy: 'ON_USE',
+        marketplaceName: 'openai-curated',
+        marketplacePath: null,
+        marketplaceDisplayName: 'OpenAI Curated',
+        displayName: 'OpenAI Docs',
+        shortDescription: 'Search official OpenAI docs',
+      }],
+    }],
+  };
+  openai.pluginDetails.set('openai-docs', {
+    summary: openai.pluginCatalog.marketplaces[0].plugins[0],
+    marketplaceName: 'openai-curated',
+    marketplacePath: null,
+    description: 'Search official OpenAI docs',
+    apps: [],
+    mcpServers: ['openai-docs'],
+    skills: [],
+  });
+  openai.mcpServerStatuses = [{
+    name: 'openai-docs',
+    isEnabled: true,
+    authStatus: 'notLoggedIn',
+    toolCount: 0,
+    resourceCount: 0,
+    resourceTemplateCount: 0,
+  }];
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-plugin-auth-hint-2',
+    text: '/use openai-docs 查最新模型',
+  });
+
+  const responseText = result.messages.map((message) => message.text ?? '').join('\n');
+  assert.equal(openai.startTurnCalls.length, 0);
+  assert.match(responseText, /插件 OpenAI Docs 当前不能直接使用/u);
+  assert.match(responseText, /\/mcp auth openai-docs/u);
+  assert.match(responseText, /\/pg show openai-docs/u);
+  assert.match(responseText, /重发原请求即可/u);
+});
+
 test('/use supports multiple plugin targets in order and forwards them as a hint list', async () => {
   const { runtime, openai } = makeRuntime({
     defaultCwd: '/tmp/openai-default',
@@ -6582,6 +6703,7 @@ test('/apps lists visible apps and manages show, enablement, and auth separately
   });
   const authText = auth.messages.map((message) => message.text ?? '').join('\n');
   assert.match(authText, /https:\/\/example\.com\/apps\/google-drive/u);
+  assert.match(authText, /只有显示“连接：可访问”才算真的接通/u);
 });
 
 test('/apps all and /apps search expose the full app catalog while keeping default view focused', async () => {
@@ -6704,6 +6826,13 @@ test('/apps all and /apps search expose the full app catalog while keeping defau
   });
   const detailText = detail.messages.map((message) => message.text ?? '').join('\n');
   assert.match(detailText, /App 详情 \| 1\. Google Calendar/u);
+
+  const alreadyConnectedAuth = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-apps-all-1',
+    text: '/apps auth gmail',
+  });
+  assert.match(alreadyConnectedAuth.messages[0]?.text ?? '', /当前没有待处理认证项/u);
 
   const enabled = await runtime.services.bridgeCoordinator.handleInboundEvent({
     platform: 'weixin',

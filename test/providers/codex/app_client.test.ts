@@ -1656,6 +1656,76 @@ test('CodexAppClient falls back to the session log task_complete message when th
   assert.equal(result.finalSource, 'session_task_complete');
 });
 
+test('CodexAppClient falls back to a tool suggestion message when task_complete has no final text', async () => {
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+  });
+  const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-session-log-tool-suggest-'));
+  const sessionPath = path.join(sessionDir, 'rollout.jsonl');
+  fs.writeFileSync(sessionPath, [
+    JSON.stringify({
+      timestamp: new Date().toISOString(),
+      type: 'response_item',
+      payload: {
+        type: 'function_call',
+        name: 'tool_suggest',
+        arguments: JSON.stringify({
+          tool_type: 'connector',
+          suggest_reason: 'Gmail 还没有完成认证，暂时无法读取你的邮件。',
+        }),
+      },
+    }),
+    JSON.stringify({
+      timestamp: new Date().toISOString(),
+      type: 'event_msg',
+      payload: {
+        type: 'task_complete',
+        turn_id: 'turn-1',
+        last_agent_message: null,
+      },
+    }),
+    '',
+  ].join('\n'), 'utf8');
+
+  client.request = async (method) => {
+    if (method === 'turn/start') {
+      return { turn: { id: 'turn-1' } };
+    }
+    if (method === 'thread/read') {
+      return {
+        thread: {
+          id: 'thread-1',
+          name: 'Thread 1',
+          path: sessionPath,
+          turns: [{
+            id: 'turn-1',
+            status: 'completed',
+            items: [{
+              type: 'userMessage',
+              text: '查询最近发送的邮件',
+            }],
+          }],
+        },
+      };
+    }
+    return {};
+  };
+
+  const result = await client.startTurn({
+    threadId: 'thread-1',
+    inputText: '查询最近发送的邮件',
+    model: 'gpt-5.4',
+    effort: null,
+    collaborationMode: 'default',
+    timeoutMs: 2500,
+  });
+
+  assert.match(result.outputText, /当前缺少所需连接/u);
+  assert.match(result.outputText, /Gmail 还没有完成认证/u);
+  assert.equal(result.outputState, 'complete');
+  assert.equal(result.finalSource, 'session_task_complete');
+});
+
 test('CodexAppClient falls back to session-log image generation artifacts when thread output stays empty', async () => {
   const client = new CodexAppClient({
     codexCliBin: 'codex',

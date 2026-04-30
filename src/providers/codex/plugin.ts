@@ -635,7 +635,7 @@ function describeAttachment(attachment: InboundAttachment): string {
 }
 
 function buildDeveloperInstructions(event: InboundTextEvent): string {
-  const parts: string[] = [];
+  const parts: string[] = [CODEXBRIDGE_NON_INTERACTIVE_INSTRUCTIONS];
   const artifactContext = resolveTurnArtifactContext(event);
   const artifactInstructions = buildTurnArtifactDeveloperInstructions(artifactContext);
   if (artifactInstructions) {
@@ -651,6 +651,13 @@ function buildDeveloperInstructions(event: InboundTextEvent): string {
   }
   return parts.filter(Boolean).join('\n\n');
 }
+
+const CODEXBRIDGE_NON_INTERACTIVE_INSTRUCTIONS = [
+  'CodexBridge runtime constraints:',
+  '- This turn is running inside a non-interactive chat bridge; the user cannot complete modal connector/plugin install prompts from here.',
+  '- Do not call tool_suggest or any interactive install/enable suggestion flow.',
+  '- If a requested app, connector, MCP server, or auth scope is missing, say that briefly in the final answer and continue only with available local context.',
+].join('\n');
 
 function normalizeCodexPersonality(value: unknown): 'friendly' | 'pragmatic' | 'none' | null {
   const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
