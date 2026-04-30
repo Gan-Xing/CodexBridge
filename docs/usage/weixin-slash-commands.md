@@ -200,7 +200,7 @@ Create a confirmed background Agent job for deeper multi-step work.
 
 - `/agent <task>` creates a draft instead of executing immediately
 - `/agent confirm` confirms the draft and queues the background job
-- `/agent edit <new description>` replaces the current draft
+- `/agent edit <change instruction>` refines the current draft by merging the new instruction back into the existing draft
 - `/agent list` lists jobs for the current WeChat chat
 - `/agent show <index>` shows the plan, status, attempts, and verifier result
 - `/agent result <index>` shows the full text result in pages

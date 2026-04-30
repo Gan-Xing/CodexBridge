@@ -3916,14 +3916,29 @@ export class BridgeCoordinator {
   }
 
   async handleAgentEditCommand(event) {
-    const replacement = extractAgentEditBody(event.text);
-    if (!replacement) {
+    const activeResponse = await this.rejectIfActiveTurnForCommand(event, 'agent');
+    if (activeResponse) {
+      return activeResponse;
+    }
+    const instruction = extractAgentEditBody(event.text);
+    if (!instruction) {
       return this.handleHelpsCommand(event, ['agent']);
     }
-    return this.handleAgentAddCommand({
-      ...event,
-      text: `/agent ${replacement}`,
-    }, replacement);
+    const scopeRef = toScopeRef(event);
+    const draft = this.getPendingAgentDraft(scopeRef);
+    if (!draft) {
+      return messageResponse([
+        this.t('coordinator.agent.noDraft'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const updatedDraft = await this.normalizeAgentDraftEdit(event, scopeRef, draft, instruction);
+    if (!updatedDraft) {
+      return messageResponse([
+        this.t('coordinator.agent.parseFailed'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    this.setPendingAgentDraft(scopeRef, updatedDraft);
+    return this.renderAgentDraftResponse(event, updatedDraft);
   }
 
   handleAgentCancelCommand(event) {
@@ -4205,6 +4220,70 @@ export class BridgeCoordinator {
     return this.buildPendingAgentDraft(event, scopeRef, buildLocalAgentDraftCandidate(rawInput), rawInput, 'local');
   }
 
+  async normalizeAgentDraftEdit(
+    event,
+    scopeRef: PlatformScopeRef,
+    draft: PendingAgentDraft,
+    instruction: string,
+  ): Promise<PendingAgentDraft | null> {
+    const locale = draft.locale ?? this.resolveScopeLocale(scopeRef, event);
+    const providerProfile = this.requireProviderProfile(draft.providerProfileId);
+    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+    const prompt = buildAgentDraftEditPrompt(draft, instruction, normalizeLocale(locale) ?? 'zh-CN');
+    if (providerPlugin && typeof providerPlugin.startThread === 'function' && typeof providerPlugin.startTurn === 'function') {
+      const thread = await providerPlugin.startThread({
+        providerProfile,
+        cwd: draft.cwd,
+        title: 'Agent Draft Editor',
+        metadata: {
+          sourcePlatform: event.platform,
+          source: 'agent-draft-editor',
+        },
+      });
+      const parserSession = {
+        id: crypto.randomUUID(),
+        providerProfileId: providerProfile.id,
+        codexThreadId: thread.threadId,
+        cwd: thread.cwd ?? draft.cwd,
+        title: thread.title ?? 'Agent Draft Editor',
+        createdAt: this.now(),
+        updatedAt: this.now(),
+      };
+      const result = await providerPlugin.startTurn({
+        providerProfile,
+        bridgeSession: parserSession,
+        sessionSettings: {
+          bridgeSessionId: parserSession.id,
+          model: draft.initialSettings.model ?? null,
+          reasoningEffort: draft.initialSettings.reasoningEffort ?? null,
+          serviceTier: draft.initialSettings.serviceTier ?? null,
+          collaborationMode: null,
+          personality: null,
+          accessPreset: 'read-only',
+          approvalPolicy: 'never',
+          sandboxMode: 'read-only',
+          locale,
+          metadata: {},
+          updatedAt: this.now(),
+        },
+        event: {
+          ...event,
+          text: prompt,
+          cwd: parserSession.cwd ?? null,
+          locale,
+          attachments: [],
+        },
+        inputText: prompt,
+      });
+      const candidate = parseAgentDraftCandidate(result.outputText);
+      if (candidate) {
+        return this.buildEditedPendingAgentDraft(draft, instruction, candidate, 'codex');
+      }
+    }
+    const agentsCandidate = await normalizeAgentDraftEditWithOpenAIAgents(draft, instruction, locale).catch(() => null);
+    return agentsCandidate ? this.buildEditedPendingAgentDraft(draft, instruction, agentsCandidate, 'agents-sdk') : null;
+  }
+
   buildPendingAgentDraft(
     event,
     scopeRef: PlatformScopeRef,
@@ -4246,6 +4325,27 @@ export class BridgeCoordinator {
         approvalPolicy: 'never',
         sandboxMode: 'danger-full-access',
       },
+    };
+  }
+
+  buildEditedPendingAgentDraft(
+    draft: PendingAgentDraft,
+    instruction: string,
+    candidate: AgentDraftCandidate,
+    normalizedBy: 'agents-sdk' | 'codex',
+  ): PendingAgentDraft {
+    return {
+      ...draft,
+      createdAt: this.now(),
+      rawInput: appendAgentDraftEditInput(draft.rawInput, instruction),
+      normalizedBy,
+      title: candidate.title,
+      goal: candidate.goal,
+      expectedOutput: candidate.expectedOutput,
+      plan: candidate.plan,
+      category: candidate.category,
+      riskLevel: candidate.riskLevel,
+      mode: candidate.mode,
     };
   }
 
@@ -8398,6 +8498,23 @@ async function normalizeAgentDraftWithOpenAIAgents(rawInput: string, locale: str
   return parseAgentDraftCandidate(output);
 }
 
+async function normalizeAgentDraftEditWithOpenAIAgents(
+  draft: PendingAgentDraft,
+  instruction: string,
+  locale: string | null,
+): Promise<AgentDraftCandidate | null> {
+  if (!resolveOpenAIAgentRuntimeConfig().apiKey) {
+    return null;
+  }
+  const normalizedLocale = normalizeLocale(locale) ?? 'zh-CN';
+  const output = await runOpenAIAgentJson({
+    name: 'CodexBridge Agent Draft Editor',
+    instructions: 'Merge agent draft edit instructions into the existing draft as strict JSON only. Do not use markdown.',
+    input: buildAgentDraftEditPrompt(draft, instruction, normalizedLocale),
+  });
+  return parseAgentDraftCandidate(output);
+}
+
 async function verifyAgentResultWithOpenAIAgents(job: AgentJob, result, locale: string | null): Promise<AgentVerificationResult | null> {
   if (!resolveOpenAIAgentRuntimeConfig().apiKey) {
     return null;
@@ -8617,6 +8734,62 @@ function buildAgentDraftPrompt(rawInput: string, locale: string | null): string 
     '用户请求：',
     rawInput,
   ].join('\n');
+}
+
+function buildAgentDraftEditPrompt(draft: PendingAgentDraft, instruction: string, locale: SupportedLocale): string {
+  const currentDraft = {
+    title: draft.title,
+    goal: draft.goal,
+    expectedOutput: draft.expectedOutput,
+    plan: draft.plan,
+    category: draft.category,
+    riskLevel: draft.riskLevel,
+    mode: draft.mode,
+  };
+  const localizedInstruction = locale === 'zh-CN'
+    ? `你是 CodexBridge 的 agent 草案编辑器。请把用户的“修改提示”合并到“当前草案”里，输出更新后的完整 agent 草案 JSON。
+只返回 JSON，不要 Markdown，不要解释。
+
+这是编辑已有草案，不是重新新建草案。
+
+返回格式：
+{"title":"短标题","goal":"明确目标","expectedOutput":"最终交付物","plan":["步骤1","步骤2"],"category":"code|research|ops|doc|media|mixed","riskLevel":"low|medium|high","mode":"codex|agents|hybrid"}
+
+编辑规则：
+- 修改提示只覆盖它明确提到的字段；没有提到的 title / goal / expectedOutput / plan / category / riskLevel / mode 必须从当前草案保留。
+- 如果用户说“只改计划”“只补一步”“任务目标不变”，必须保留未被明确修改的字段。
+- 如果用户只改执行边界，例如“只做方案，不改代码”，要在 mode / expectedOutput / plan 上反映这个变化，但不要丢掉原目标上下文。
+- plan 保持 3-6 步，步骤要具体。
+- 不要把当前草案丢掉后仅按修改提示重新生成。
+- 如果无法可靠合并，返回一个最接近当前草案且已应用明确修改的完整 JSON。
+
+当前草案 JSON：
+${JSON.stringify(currentDraft, null, 2)}
+
+修改提示：
+${instruction}`
+    : `You are the CodexBridge agent draft editor. Merge the user's edit instruction into the current draft and output the updated full agent draft JSON.
+Return JSON only. Do not use markdown or explanations.
+
+This edits an existing draft. It is not a new draft.
+
+Return format:
+{"title":"short title","goal":"clear goal","expectedOutput":"final deliverable","plan":["step 1","step 2"],"category":"code|research|ops|doc|media|mixed","riskLevel":"low|medium|high","mode":"codex|agents|hybrid"}
+
+Edit rules:
+- Only override fields explicitly mentioned by the edit instruction. Preserve title / goal / expectedOutput / plan / category / riskLevel / mode from the current draft when not mentioned.
+- If the user says to only adjust part of the draft, preserve everything else.
+- If the user only changes execution boundaries, such as "only write the plan and do not change code", reflect that in mode / expectedOutput / plan without dropping the original task context.
+- Keep plan to 3-6 concrete steps.
+- Do not discard the current draft and regenerate only from the edit instruction.
+- If the edit cannot be merged reliably, return the closest full JSON draft that preserves the current draft and applies the explicit changes.
+
+Current draft JSON:
+${JSON.stringify(currentDraft, null, 2)}
+
+Edit instruction:
+${instruction}`;
+  return localizedInstruction.trim();
 }
 
 function buildAgentExecutionPrompt(job: AgentJob, params: {
@@ -10253,6 +10426,15 @@ function appendAutomationDraftEditInput(rawInput: string, instruction: string): 
   return `${base}\nEdit: ${edit}`;
 }
 
+function appendAgentDraftEditInput(rawInput: string, instruction: string): string {
+  const base = String(rawInput ?? '').trim();
+  const edit = compactWhitespace(instruction);
+  if (!base) {
+    return edit;
+  }
+  return `${base}\nEdit: ${edit}`;
+}
+
 function extractFirstJsonObject(text: string): string | null {
   const raw = String(text ?? '').trim();
   if (!raw) {
@@ -11202,7 +11384,7 @@ function getCommandHelpSpecs(i18n: Translator) {
     usage: [
       '/agent <任务>',
       '/agent confirm',
-      '/agent edit <新的描述>',
+      '/agent edit <修改提示>',
       '/agent list',
       '/agent show <序号>',
       '/agent result <序号> [页码]',
