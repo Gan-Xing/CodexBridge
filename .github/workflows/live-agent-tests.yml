@@ -1,0 +1,45 @@
+name: Live Agent Tests
+
+on:
+  workflow_dispatch:
+
+jobs:
+  live-agent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CODEXBRIDGE_AGENT_API_KEY: ${{ secrets.CODEXBRIDGE_AGENT_API_KEY }}
+      CODEXBRIDGE_AGENT_BASE_URL: ${{ secrets.CODEXBRIDGE_AGENT_BASE_URL }}
+      CODEXBRIDGE_AGENT_API: ${{ secrets.CODEXBRIDGE_AGENT_API }}
+      CODEXBRIDGE_AGENT_MODEL: ${{ secrets.CODEXBRIDGE_AGENT_MODEL }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+      OPENAI_API_BASE_URL: ${{ secrets.OPENAI_API_BASE_URL }}
+      OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
+      MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Verify live-agent credentials are configured
+        run: |
+          if [ -z "${CODEXBRIDGE_AGENT_API_KEY}" ] && [ -z "${OPENAI_API_KEY}" ] && [ -z "${MINIMAX_API_KEY}" ]; then
+            echo "Missing live-agent credentials. Configure CODEXBRIDGE_AGENT_API_KEY, OPENAI_API_KEY, or MINIMAX_API_KEY as GitHub Actions secrets."
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Run live-agent test suite
+        run: npm run test:live-agent

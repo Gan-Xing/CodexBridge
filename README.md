@@ -311,6 +311,16 @@ npm test
 
 The validation suite is expected to pass on both Linux and Windows.
 
+`npm test` is the isolated default test entrypoint. It clears live agent provider variables such as `CODEXBRIDGE_AGENT_*`, `OPENAI_*`, and `MINIMAX_API_KEY` before starting `node --test`, so unit and integration tests stay deterministic even when the host shell, CI runner, or service manager exports real model credentials.
+
+When you intentionally want to keep live agent credentials and exercise the real external agent path, use the explicit opt-in script instead:
+
+```bash
+npm run test:live-agent
+```
+
+Keep `test:live-agent` separate from the main suite. It is for deliberate provider-backed verification, not for the default `npm test` gate.
+
 ## Deployment Quick Start
 
 ### Common Prerequisites
@@ -343,6 +353,7 @@ If `codex --version` still fails, fix that before attempting `weixin:login` or `
 npm install
 npm run typecheck
 npm test
+npm run test:live-agent
 codex --version
 npm run weixin:login
 npm run weixin:serve -- --cwd /absolute/path/to/workspace
@@ -358,6 +369,7 @@ Open PowerShell in the repo root and run:
 npm install
 npm run typecheck
 npm test
+npm run test:live-agent
 codex --version
 where codex
 npm run weixin:login
