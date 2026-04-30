@@ -40,8 +40,21 @@ function collectTestFiles(dir) {
   return files.sort();
 }
 
+const directCliArgs = process.argv.slice(2);
+const importedEntryArgs =
+  directCliArgs.length === 0
+    && process.argv.length === 2
+    && typeof process.argv[1] === 'string'
+    && process.argv[1].includes('.test.')
+    ? [process.argv[1]]
+    : [];
+
 const testArgs =
-  process.argv.length > 2 ? process.argv.slice(2) : collectTestFiles(path.join(process.cwd(), 'test'));
+  directCliArgs.length > 0
+    ? directCliArgs
+    : importedEntryArgs.length > 0
+      ? importedEntryArgs
+      : collectTestFiles(path.join(process.cwd(), 'test'));
 
 const result = spawnSync(process.execPath, ['--import', 'tsx', '--test', ...testArgs], {
   env: isolatedEnv,
