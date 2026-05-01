@@ -50,8 +50,7 @@ Bridge sends a prompt with a payload similar to:
       "instructions",
       "focus",
       "includePaths",
-      "excludePaths",
-      "outputLanguage"
+      "excludePaths"
     ]
   },
   "skillPath": "docs/command-skills/review.md"
@@ -144,8 +143,7 @@ Supported `target.type` values:
   ],
   "excludePaths": [
     "docs/"
-  ],
-  "outputLanguage": "zh-CN"
+  ]
 }
 ```
 
@@ -168,20 +166,13 @@ These fields define the structured custom review request:
   Files or directories to avoid unless necessary.
   Examples: `["docs/", "dist/"]`
 
-- `outputLanguage`: optional string
-  Allowed values:
-  - `zh-CN`
-  - `en`
-
-If `outputLanguage` is omitted for `custom`, Bridge should default it to the current CodexBridge command locale.
-
 ### Important custom-target limits
 
 - `custom` is prompt-driven. Use it when the user mainly wants a focused review instruction.
 - Do not pretend that `custom` can safely combine all diff selectors with all filters.
 - If the user clearly asks for a branch diff, prefer `baseBranch`.
 - If the user clearly asks for one commit, prefer `commit`.
-- Bridge language should stay in sync with review output. For `custom`, prefer `outputLanguage` equal to the invocation `locale` unless the user clearly asks for another output language.
+- Bridge language should stay in sync with review output. `/review` output language follows the invocation `locale`.
 - If the user asks for combinations that the underlying review path may not support reliably, such as:
   - "跟 main 比，只看测试目录"
   - "检查上一个提交，但忽略 docs"

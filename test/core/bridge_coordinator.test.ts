@@ -3556,6 +3556,113 @@ test('/as ok promotes a pending target to active when confirming an update draft
   assert.match(after?.content ?? '', /确认丹达第四期发票的提交情况/);
 });
 
+test('/note content edits that contain archive-like words do not change record status by mistake', async () => {
+  const defaultCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-assistant-note-status-false-positive-'));
+  const { runtime, openai } = makeRuntime({ defaultCwd });
+  const scopeId = 'wx-user-assistant-note-status-false-positive-1';
+  const originalStartTurn = openai.startTurn.bind(openai);
+  openai.startTurn = async (args: any) => {
+    openai.startTurnCalls.push(args);
+    const input = String(args.inputText ?? '');
+    if (input.includes('docs/command-skills/assistant-record.md') && input.includes('"operation": "classify_new_record"')) {
+      return {
+        outputText: JSON.stringify({
+          action: 'create',
+          type: 'note',
+          title: '旧邮箱入口说明',
+          content: '旧邮箱入口说明在 mail.example.com',
+          priority: 'normal',
+          dueAt: null,
+          remindAt: null,
+          recurrence: null,
+          project: null,
+          tags: [],
+          confidence: 0.94,
+        }),
+        turnId: `${args.bridgeSession.codexThreadId}-turn-1`,
+        threadId: args.bridgeSession.codexThreadId,
+        title: args.bridgeSession.title,
+      };
+    }
+    if (input.includes('docs/command-skills/assistant-record.md') && input.includes('"operation": "route_existing_record"')) {
+      return {
+        outputText: JSON.stringify({
+          action: 'update',
+          targetRecordId: null,
+          targetIndex: 1,
+          type: 'note',
+          reason: '用户要修改旧邮箱入口说明这条笔记。',
+          confidence: 0.95,
+        }),
+        turnId: `${args.bridgeSession.codexThreadId}-turn-1`,
+        threadId: args.bridgeSession.codexThreadId,
+        title: args.bridgeSession.title,
+      };
+    }
+    if (input.includes('docs/command-skills/assistant-record.md') && input.includes('"operation": "rewrite_record"')) {
+      return {
+        outputText: JSON.stringify({
+          action: 'update',
+          type: 'note',
+          title: '删除旧邮箱入口说明',
+          content: '删除旧邮箱入口说明在 mail.example.com',
+          status: 'pending',
+          priority: 'normal',
+          dueAt: null,
+          remindAt: null,
+          recurrence: null,
+          project: null,
+          tags: [],
+          changeSummary: '把标题改成删除旧邮箱入口说明。',
+          confidence: 0.94,
+        }),
+        turnId: `${args.bridgeSession.codexThreadId}-turn-1`,
+        threadId: args.bridgeSession.codexThreadId,
+        title: args.bridgeSession.title,
+      };
+    }
+    return originalStartTurn(args);
+  };
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: scopeId,
+    text: '/note 旧邮箱入口说明在 mail.example.com',
+  });
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: scopeId,
+    text: '/note ok',
+  });
+
+  const before = runtime.repositories.assistantRecords.list()[0];
+  assert.equal(before?.status, 'active');
+
+  const draft = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: scopeId,
+    text: '/note 把标题改成删除旧邮箱入口说明',
+  });
+  const draftText = draft.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(draftText, /找到可能相关的助理记录/);
+  assert.match(draftText, /动作：更新内容/);
+  assert.match(draftText, /状态：进行中/);
+  assert.doesNotMatch(draftText, /状态：已归档/);
+
+  const confirmed = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: scopeId,
+    text: '/note ok',
+  });
+  const confirmedText = confirmed.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(confirmedText, /助理记录已更新/);
+  assert.match(confirmedText, /状态：进行中/);
+
+  const after = runtime.repositories.assistantRecords.list()[0];
+  assert.equal(after?.status, 'active');
+  assert.equal(after?.title, '删除旧邮箱入口说明');
+});
+
 test('/as natural language can complete a matching assistant record after confirmation', async () => {
   const defaultCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-assistant-natural-complete-'));
   const { runtime, openai } = makeRuntime({ defaultCwd });
@@ -5904,7 +6011,6 @@ test('/review custom <instructions> targets the explicit custom review path with
   assert.deepEqual(openai.startReviewCalls[0]?.target, {
     type: 'custom',
     instructions: '只审查测试目录里的改动',
-    outputLanguage: 'zh-CN',
   });
   assert.match(result.messages[0]?.text ?? '', /代码审查 \| 自定义目标/);
   assert.match(result.messages[0]?.text ?? '', /已按当前语言输出代码审查结果/);
@@ -5919,6 +6025,7 @@ test('/review natural language uses the review command skill and preserves struc
     const parserInput = String(params?.inputText ?? '');
     if (parserInput.includes('docs/command-skills/review.md') && parserInput.includes('"command": "review"')) {
       assert.match(parserInput, /"customOptions": \[/);
+      assert.doesNotMatch(parserInput, /outputLanguage/);
       return {
         outputText: JSON.stringify({
           schemaVersion: 'codexbridge.review-command-skill.v1',
@@ -5932,7 +6039,6 @@ test('/review natural language uses the review command skill and preserves struc
             focus: ['状态流转', '回归风险'],
             includePaths: ['src/core/bridge_coordinator.ts', 'test/core/bridge_coordinator.test.ts'],
             excludePaths: ['docs/'],
-            outputLanguage: 'zh-CN',
           },
         }),
       };
@@ -5953,10 +6059,99 @@ test('/review natural language uses the review command skill and preserves struc
     focus: ['状态流转', '回归风险'],
     includePaths: ['src/core/bridge_coordinator.ts', 'test/core/bridge_coordinator.test.ts'],
     excludePaths: ['docs/'],
-    outputLanguage: 'zh-CN',
   });
   assert.match(result.messages[0]?.text ?? '', /代码审查 \| 自定义目标/);
   assert.match(result.messages[0]?.text ?? '', /已按当前语言输出代码审查结果/);
+});
+
+test('/review natural language does not silently downgrade malformed skill targets to uncommitted changes', async () => {
+  const { runtime, openai } = makeRuntime({
+    defaultCwd: '/tmp/openai-default',
+  });
+  const originalStartTurn = openai.startTurn.bind(openai);
+  openai.startTurn = async (params: any) => {
+    const parserInput = String(params?.inputText ?? '');
+    if (parserInput.includes('docs/command-skills/review.md') && parserInput.includes('"command": "review"')) {
+      return {
+        outputText: JSON.stringify({
+          schemaVersion: 'codexbridge.review-command-skill.v1',
+          ok: true,
+          action: 'run_review',
+          confidence: 0.91,
+          requiresConfirmation: false,
+          target: {
+            branch: 'main',
+          },
+        }),
+      };
+    }
+    return originalStartTurn(params);
+  };
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-review-natural-malformed-1',
+    text: '/review 跟 main 比一下',
+  });
+
+  assert.equal(openai.startReviewCalls.length, 1);
+  assert.deepEqual(openai.startReviewCalls[0]?.target, {
+    type: 'custom',
+    instructions: '跟 main 比一下',
+  });
+  assert.match(result.messages[0]?.text ?? '', /代码审查 \| 自定义目标/);
+});
+
+test('/review custom output follows locale and stays English when locale is en', async () => {
+  const { runtime, openai } = makeRuntime({
+    defaultCwd: '/tmp/openai-default',
+  });
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-review-explicit-zh-1',
+    text: '/lang en',
+  });
+
+  const originalStartTurn = openai.startTurn.bind(openai);
+  openai.startTurn = async (params: any) => {
+    const parserInput = String(params?.inputText ?? '');
+    if (parserInput.includes('docs/command-skills/review.md') && parserInput.includes('"command": "review"')) {
+      return {
+        outputText: JSON.stringify({
+          schemaVersion: 'codexbridge.review-command-skill.v1',
+          ok: true,
+          action: 'run_review',
+          confidence: 0.96,
+          requiresConfirmation: false,
+          target: {
+            type: 'custom',
+            instructions: 'Review Agent state-transition changes.',
+            focus: ['状态流转'],
+          },
+        }),
+      };
+    }
+    return originalStartTurn(params);
+  };
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-review-explicit-zh-1',
+    text: '/review Review Agent state-transition changes',
+  });
+
+  assert.equal(openai.startReviewCalls.length, 1);
+  assert.equal(openai.startReviewCalls[0]?.locale, 'en');
+  assert.deepEqual(openai.startReviewCalls[0]?.target, {
+    type: 'custom',
+    instructions: 'Review Agent state-transition changes.',
+    focus: ['状态流转'],
+  });
+  assert.equal(openai.startTurnCalls.some((call: any) =>
+    String(call.inputText ?? '').includes('CodexBridge review result localizer.'),
+  ), false);
+  assert.match(result.messages[0]?.text ?? '', /Code review \| Custom target/);
+  assert.match(result.messages[0]?.text ?? '', /openai review: custom/);
 });
 
 test('/review natural language can reject execution requests and avoids starting review', async () => {
@@ -6516,6 +6711,95 @@ test('/agent natural language proposes and confirms existing job management oper
       platform: 'weixin',
       externalScopeId: 'wx-agent-natural-manage-1',
     }).length, 0);
+  } finally {
+    if (originalOpenAiKey === undefined) {
+      delete process.env.OPENAI_API_KEY;
+    } else {
+      process.env.OPENAI_API_KEY = originalOpenAiKey;
+    }
+  }
+});
+
+test('/agent natural language rejects malformed update patch enums instead of silently coercing them', async () => {
+  const originalOpenAiKey = process.env.OPENAI_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+  try {
+    const { runtime, openai } = makeRuntime({ defaultCwd: '/repo' });
+    const originalStartTurn = openai.startTurn.bind(openai);
+    openai.startTurn = async (params: any) => {
+      const parserInput = String(params?.inputText ?? '');
+      if (parserInput.includes('docs/command-skills/agent.md') && parserInput.includes('"subcommand": "natural"')) {
+        if (parserInput.includes('"userInput": "写一份项目总结"')) {
+          return {
+            outputText: JSON.stringify({
+              action: 'create_draft',
+              draft: {
+                title: '项目总结',
+                goal: '写一份项目总结',
+                expectedOutput: '项目总结正文，并返回当前微信会话。',
+                plan: ['梳理项目背景', '整理关键进展', '输出总结和风险'],
+                category: 'doc',
+                riskLevel: 'low',
+                mode: 'agents',
+              },
+              confidence: 0.94,
+              requiresConfirmation: true,
+            }),
+          };
+        }
+        if (parserInput.includes('"userInput": "把项目总结风险改成中并把模式改成plan"')) {
+          return {
+            outputText: JSON.stringify({
+              action: 'propose_update_job',
+              target: {
+                index: 1,
+                matchText: '项目总结',
+              },
+              patch: {
+                riskLevel: '中',
+                mode: 'plan',
+              },
+              changes: ['Changed risk and mode.'],
+              confidence: 0.92,
+              requiresConfirmation: true,
+            }),
+          };
+        }
+      }
+      return originalStartTurn(params);
+    };
+
+    await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-invalid-update-1',
+      text: '/agent 写一份项目总结',
+    });
+    await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-invalid-update-1',
+      text: '/agent confirm',
+    });
+
+    const rejected = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-invalid-update-1',
+      text: '/agent 把项目总结风险改成中并把模式改成plan',
+    });
+    const rejectedText = rejected.messages.map((message) => message.text).join('\n');
+    assert.match(rejectedText, /这条 Agent 请求没有被大模型可靠整理成草案/);
+
+    const pendingOperation = runtime.services.bridgeCoordinator.getPendingAgentOperation({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-invalid-update-1',
+    });
+    assert.equal(pendingOperation, null);
+
+    const job = runtime.services.agentJobs.listForScope({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-invalid-update-1',
+    })[0];
+    assert.equal(job?.riskLevel, 'low');
+    assert.equal(job?.mode, 'agents');
   } finally {
     if (originalOpenAiKey === undefined) {
       delete process.env.OPENAI_API_KEY;

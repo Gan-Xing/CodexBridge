@@ -296,7 +296,6 @@ export type ProviderReviewTarget =
     focus?: string[];
     includePaths?: string[];
     excludePaths?: string[];
-    outputLanguage?: 'zh-CN' | 'en' | null;
   };
 
 export interface ProviderPluginContract {

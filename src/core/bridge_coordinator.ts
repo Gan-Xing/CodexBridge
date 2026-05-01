@@ -374,6 +374,7 @@ type AgentCommandSkillResult =
     target: AgentOperationTarget;
     patch: AgentJobPatch;
     changes: string[];
+    invalidFields: string[];
   }
   | {
     action: 'propose_stop_job' | 'propose_retry_job' | 'propose_delete_job';
@@ -4082,7 +4083,6 @@ export class BridgeCoordinator {
         };
       }
     }
-    target = syncReviewTargetOutputLanguage(target, this.currentI18n.locale);
     const currentSession = this.bridgeSessions.resolveScopeSession(scopeRef);
     const providerProfile = currentSession
       ? this.requireProviderProfile(currentSession.providerProfileId)
@@ -4341,18 +4341,14 @@ export class BridgeCoordinator {
     };
     locale: string | null;
   }) {
-    const explicitOutputLanguage = target.type === 'custom' ? target.outputLanguage : null;
-    if (explicitOutputLanguage && explicitOutputLanguage !== 'zh-CN') {
-      return result;
-    }
-    const normalizedLocale = normalizeLocale(locale);
-    if (normalizedLocale !== 'zh-CN' || typeof providerPlugin?.startThread !== 'function' || typeof providerPlugin?.startTurn !== 'function') {
+    const requestedOutputLanguage = normalizeLocale(locale);
+    if (requestedOutputLanguage !== 'zh-CN' || typeof providerPlugin?.startThread !== 'function' || typeof providerPlugin?.startTurn !== 'function') {
       return result;
     }
     const outputText = String(result?.outputText ?? '').trim();
     const previewText = String(result?.previewText ?? '').trim();
     const sourceText = outputText || previewText;
-    if (!sourceText || !shouldTranslateReviewOutput(sourceText, normalizedLocale)) {
+    if (!sourceText || !shouldTranslateReviewOutput(sourceText, requestedOutputLanguage)) {
       return result;
     }
     const translated = await this.translateReviewResultWithCodex(
@@ -4365,7 +4361,7 @@ export class BridgeCoordinator {
       cwd,
       target,
       sourceText,
-      normalizedLocale,
+      requestedOutputLanguage,
     ).catch(() => null);
     if (!translated) {
       return result;
@@ -4929,6 +4925,11 @@ export class BridgeCoordinator {
     if (result.action === 'reject' || result.action === 'local_only') {
       return messageResponse([
         result.reason || this.t('coordinator.agent.parseFailed'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    if (result.action === 'propose_update_job' && result.invalidFields.length > 0) {
+      return messageResponse([
+        this.t('coordinator.agent.parseFailed'),
       ], this.buildScopedSessionMeta(event));
     }
     const operation = this.buildPendingAgentOperationFromSkillResult(rawInput, result);
@@ -9819,7 +9820,6 @@ function buildReviewCommandSkillPrompt({
         'focus',
         'includePaths',
         'excludePaths',
-        'outputLanguage',
       ],
       unsupportedCombinations: [
         'baseBranch plus custom focus filters in one request',
@@ -9875,22 +9875,6 @@ function parseReviewTargetArgs(args: readonly string[]): ReviewTargetParseResult
   return { status: 'unknown' };
 }
 
-function syncReviewTargetOutputLanguage(target: ProviderReviewTarget, locale: string | null): ProviderReviewTarget {
-  if (target.type !== 'custom') {
-    return target;
-  }
-  if (target.outputLanguage) {
-    return target;
-  }
-  const outputLanguage = normalizeReviewOutputLanguage(locale);
-  return outputLanguage
-    ? {
-      ...target,
-      outputLanguage,
-    }
-    : target;
-}
-
 function parseReviewCommandSkillResult(value: unknown): ReviewCommandSkillResult | null {
   const parsed = parseJsonObject(value);
   if (!parsed) {
@@ -9938,10 +9922,13 @@ function parseReviewTargetFromSkill(value: unknown): ProviderReviewTarget | null
     ? value as Record<string, unknown>
     : {};
   const type = compactWhitespace(parsed.type).toLowerCase();
-  if (!type || type === 'uncommittedchanges' || type === 'uncommitted_changes' || type === 'uncommitted') {
+  if (type === 'uncommittedchanges' || type === 'uncommitted_changes' || type === 'uncommitted') {
     return {
       type: 'uncommittedChanges',
     };
+  }
+  if (!type) {
+    return null;
   }
   if (type === 'basebranch' || type === 'base_branch' || type === 'base') {
     const branch = compactWhitespace(parsed.branch ?? parsed.baseBranch ?? parsed.base_branch ?? '');
@@ -9971,29 +9958,13 @@ function parseReviewTargetFromSkill(value: unknown): ProviderReviewTarget | null
     const focus = normalizeStringArray(parsed.focus);
     const includePaths = normalizeStringArray(parsed.includePaths ?? parsed.include_paths ?? parsed.paths);
     const excludePaths = normalizeStringArray(parsed.excludePaths ?? parsed.exclude_paths ?? parsed.ignoredPaths ?? parsed.ignored_paths);
-    const outputLanguage = normalizeReviewOutputLanguage(parsed.outputLanguage ?? parsed.output_language);
     return {
       type: 'custom',
       instructions,
       ...(focus.length > 0 ? { focus } : {}),
       ...(includePaths.length > 0 ? { includePaths } : {}),
       ...(excludePaths.length > 0 ? { excludePaths } : {}),
-      ...(outputLanguage ? { outputLanguage } : {}),
     };
-  }
-  return null;
-}
-
-function normalizeReviewOutputLanguage(value: unknown): 'zh-CN' | 'en' | null {
-  const raw = String(value ?? '').trim().toLowerCase();
-  if (!raw) {
-    return null;
-  }
-  if (raw === 'zh-cn' || raw === 'zh' || raw === 'zh-hans') {
-    return 'zh-CN';
-  }
-  if (raw === 'en' || raw === 'en-us') {
-    return 'en';
   }
   return null;
 }
@@ -10475,14 +10446,15 @@ function parseAgentCommandSkillResult(value: unknown): AgentCommandSkillResult |
   }
   if (action === 'propose_update_job') {
     const target = parseAgentOperationTarget(parsed.target ?? parsed);
-    const patch = parseAgentJobPatch(parsed.patch ?? parsed.jobPatch ?? parsed);
-    return target && Object.keys(patch).length > 0
+    const patchResult = parseAgentJobPatch(parsed.patch ?? parsed.jobPatch ?? parsed);
+    return target && (Object.keys(patchResult.patch).length > 0 || patchResult.invalidFields.length > 0)
       ? {
         action,
         confidence,
         target,
-        patch,
+        patch: patchResult.patch,
         changes: normalizeStringArray(parsed.changes),
+        invalidFields: patchResult.invalidFields,
       }
       : null;
   }
@@ -10537,11 +10509,12 @@ function parseAgentOperationTarget(value: unknown): AgentOperationTarget | null 
   };
 }
 
-function parseAgentJobPatch(value: unknown): AgentJobPatch {
+function parseAgentJobPatch(value: unknown): { patch: AgentJobPatch; invalidFields: string[] } {
   const parsed = value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {} as Record<string, unknown>;
   const patch: AgentJobPatch = {};
+  const invalidFields: string[] = [];
   const title = compactWhitespace(parsed.title ?? '');
   if (title) {
     patch.title = truncateText(title, 40);
@@ -10561,16 +10534,34 @@ function parseAgentJobPatch(value: unknown): AgentJobPatch {
     patch.plan = plan;
   }
   if (parsed.category !== undefined) {
-    patch.category = normalizeAgentCategory(parsed.category);
+    const category = parseAgentCategoryValue(parsed.category);
+    if (category) {
+      patch.category = category;
+    } else {
+      invalidFields.push('category');
+    }
   }
   const riskValue = parsed.riskLevel ?? parsed.risk_level;
   if (riskValue !== undefined) {
-    patch.riskLevel = normalizeAgentRisk(riskValue);
+    const riskLevel = parseAgentRiskValue(riskValue);
+    if (riskLevel) {
+      patch.riskLevel = riskLevel;
+    } else {
+      invalidFields.push('riskLevel');
+    }
   }
   if (parsed.mode !== undefined) {
-    patch.mode = normalizeAgentMode(parsed.mode);
+    const mode = parseAgentModeValue(parsed.mode);
+    if (mode) {
+      patch.mode = mode;
+    } else {
+      invalidFields.push('mode');
+    }
   }
-  return patch;
+  return {
+    patch,
+    invalidFields,
+  };
 }
 
 function parseAgentDraftCandidate(value: unknown): AgentDraftCandidate | null {
@@ -11104,27 +11095,39 @@ function inferAgentMode(text: string): AgentJobMode {
 }
 
 function normalizeAgentCategory(value: unknown): AgentJobCategory {
+  return parseAgentCategoryValue(value) ?? 'mixed';
+}
+
+function normalizeAgentRisk(value: unknown): AgentJobRiskLevel {
+  return parseAgentRiskValue(value) ?? 'medium';
+}
+
+function normalizeAgentMode(value: unknown): AgentJobMode {
+  return parseAgentModeValue(value) ?? 'hybrid';
+}
+
+function parseAgentCategoryValue(value: unknown): AgentJobCategory | null {
   const normalized = String(value ?? '').trim().toLowerCase();
   if (['code', 'research', 'ops', 'doc', 'media', 'mixed'].includes(normalized)) {
     return normalized as AgentJobCategory;
   }
-  return 'mixed';
+  return null;
 }
 
-function normalizeAgentRisk(value: unknown): AgentJobRiskLevel {
+function parseAgentRiskValue(value: unknown): AgentJobRiskLevel | null {
   const normalized = String(value ?? '').trim().toLowerCase();
   if (normalized === 'low' || normalized === 'medium' || normalized === 'high') {
     return normalized;
   }
-  return 'medium';
+  return null;
 }
 
-function normalizeAgentMode(value: unknown): AgentJobMode {
+function parseAgentModeValue(value: unknown): AgentJobMode | null {
   const normalized = String(value ?? '').trim().toLowerCase();
   if (normalized === 'codex' || normalized === 'agents' || normalized === 'hybrid') {
     return normalized;
   }
-  return 'hybrid';
+  return null;
 }
 
 function normalizeAgentNextAction(value: unknown): 'complete' | 'retry' | 'fail' {
@@ -11913,23 +11916,22 @@ function resolveAssistantStatusTimestamp(
 
 function inferExplicitAssistantStatusUpdate(input: string): AssistantRecordStatus | null {
   const value = compactWhitespace(input).toLowerCase();
-  if (!value || !/(?:状态|改成|改为|设为|设置为|变成|标记为|置为)/u.test(value)) {
+  if (!value) {
     return null;
   }
-  if (/(?:进行中|处理中|未完成|未结束|active|in\s*progress)/iu.test(value)) {
-    return 'active';
-  }
-  if (/(?:待确认|pending)/iu.test(value)) {
-    return 'pending';
-  }
-  if (/(?:已完成|完成|做完|done|complete|completed)/iu.test(value)) {
-    return 'done';
-  }
-  if (/(?:已取消|取消|作废|不用了|cancelled|canceled|cancel)/iu.test(value)) {
-    return 'cancelled';
-  }
-  if (/(?:已归档|归档|删除|删掉|archive|archived)/iu.test(value)) {
-    return 'archived';
+  const directivePrefix = String.raw`(?:状态(?:修改)?(?:为|成)?|(?:设为|设置为|置为|标记为|改成|改为|变成)(?:状态(?:为)?\s*)?)`;
+  const directiveSuffix = String.raw`(?=$|[\s，。！？；,.!?;]|吧|呀|啊|呢|吗|并(?:且)?|然后)`;
+  const patterns: Array<[AssistantRecordStatus, RegExp]> = [
+    ['active', new RegExp(`${directivePrefix}\\s*(?:进行中|处理中|未完成|未结束|active|in\\s*progress)${directiveSuffix}`, 'iu')],
+    ['pending', new RegExp(`${directivePrefix}\\s*(?:待确认|pending)${directiveSuffix}`, 'iu')],
+    ['done', new RegExp(`${directivePrefix}\\s*(?:已完成|完成|做完|done|complete|completed)${directiveSuffix}`, 'iu')],
+    ['cancelled', new RegExp(`${directivePrefix}\\s*(?:已取消|取消|作废|不用了|cancelled|canceled|cancel)${directiveSuffix}`, 'iu')],
+    ['archived', new RegExp(`${directivePrefix}\\s*(?:已归档|归档|删除|删掉|archive|archived)${directiveSuffix}`, 'iu')],
+  ];
+  for (const [status, pattern] of patterns) {
+    if (pattern.test(value)) {
+      return status;
+    }
   }
   return null;
 }

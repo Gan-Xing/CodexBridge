@@ -37,7 +37,6 @@ test('CodexCliReviewRunner appends a locale-aware Chinese review prompt only for
       focus: ['测试', '回归风险'],
       includePaths: ['test/'],
       excludePaths: ['docs/'],
-      outputLanguage: 'zh-CN',
     },
     locale: 'zh-CN',
   });

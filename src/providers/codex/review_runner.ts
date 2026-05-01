@@ -273,7 +273,7 @@ function buildCodexReviewArgs({
     case 'custom':
       args.push(mergeReviewInstructions(
         renderCustomReviewInstructions(target),
-        buildLocaleAwareReviewPrompt(target.outputLanguage ?? locale),
+        buildLocaleAwareReviewPrompt(locale),
       ));
       break;
     default:
