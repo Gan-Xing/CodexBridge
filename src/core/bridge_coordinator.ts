@@ -79,6 +79,7 @@ const FAST_SERVICE_TIER = 'fast';
 const NORMAL_SERVICE_TIER = 'flex';
 const CODEX_BACKED_PROVIDER_KIND_SET = new Set(['openai-native', 'minimax-via-cliproxy']);
 const AUTO_COMMAND_SKILL_PATH = path.resolve('docs/command-skills/auto.md');
+const ASSISTANT_RECORD_COMMAND_SKILL_PATH = path.resolve('docs/command-skills/assistant-record.md');
 const REVIEW_PROGRESS_HEARTBEAT_MS = 20_000;
 const REVIEW_PROGRESS_HEARTBEAT_MAX_RUNS = 1;
 
@@ -1280,6 +1281,22 @@ export class BridgeCoordinator {
     return this.pendingAssistantUpdateDraftsByScope.get(buildAssistantUpdateDraftKey(scopeRef)) ?? null;
   }
 
+  getPendingAssistantUpdateDraftForType(
+    scopeRef: PlatformScopeRef,
+    typeFilter: AssistantRecordType | null,
+  ): PendingAssistantRecordUpdateDraft | null {
+    const draft = this.getPendingAssistantUpdateDraft(scopeRef);
+    if (!draft) {
+      return null;
+    }
+    if (!typeFilter) {
+      return draft;
+    }
+    return draft.updatedRecord.type === typeFilter || draft.matchedRecord.type === typeFilter
+      ? draft
+      : null;
+  }
+
   setPendingAssistantUpdateDraft(scopeRef: PlatformScopeRef, draft: PendingAssistantRecordUpdateDraft) {
     this.pendingAssistantUpdateDraftsByScope.set(buildAssistantUpdateDraftKey(scopeRef), draft);
   }
@@ -1545,35 +1562,35 @@ export class BridgeCoordinator {
     if (!rawInput) {
       return this.renderAssistantList(event, typeFilter);
     }
+    const localQuery = resolveAssistantRecordLocalQueryIntent(rawInput, forcedType);
+    if (localQuery?.kind === 'list') {
+      return this.renderAssistantList(event, localQuery.typeFilter);
+    }
     const uploadContext = this.resolveActiveUploadContext(scopeRef);
-    if (!uploadContext.state?.active && forcedType === null) {
-      const updateDraft = await this.buildAssistantRecordUpdateDraft(event, scopeRef, rawInput);
+    if (!uploadContext.state?.active) {
+      const updateDraft = await this.buildAssistantRecordUpdateDraft(event, scopeRef, rawInput, forcedType);
       if (updateDraft) {
         this.setPendingAssistantUpdateDraft(scopeRef, updateDraft);
-        return messageResponse(this.renderAssistantUpdateDraftLines(updateDraft), this.buildScopedSessionMeta(event));
+        return messageResponse(this.renderAssistantUpdateDraftLines(updateDraft, commandName), this.buildScopedSessionMeta(event));
       }
     }
     const localDraft = this.assistantRecords.parseDraft(rawInput, forcedType);
     const draft = await this.normalizeAssistantRecordDraft(event, scopeRef, rawInput, forcedType, localDraft);
-    const shouldConfirm = this.assistantRecords.shouldConfirmDraft(draft, forcedType);
     const record = await this.assistantRecords.createRecord({
       scopeRef,
       source: event.platform === 'telegram' ? 'telegram' : 'weixin',
       contextThreadId: uploadContext.session?.codexThreadId ?? this.bridgeSessions.resolveScopeSession(scopeRef)?.codexThreadId ?? null,
       timezone: extractEventTimezone(event),
       draft,
-      status: shouldConfirm ? 'pending' : 'active',
-      parseStatus: shouldConfirm ? 'auto' : forcedType ? 'confirmed' : 'auto',
+      status: 'pending',
+      parseStatus: 'auto',
       uploadItems: uploadContext.state?.active ? uploadContext.state.items : [],
     });
     if (uploadContext.session && uploadContext.state?.active) {
       await this.removeUploadBatchFiles(uploadContext.session, uploadContext.state);
       this.setUploadsStateForSession(uploadContext.session.id, null);
     }
-    if (record.status === 'pending') {
-      return messageResponse(this.renderAssistantPendingLines(record, commandName), this.buildScopedSessionMeta(event));
-    }
-    return messageResponse(this.renderAssistantSavedLines(record, commandName), this.buildScopedSessionMeta(event));
+    return messageResponse(this.renderAssistantPendingLines(record, commandName), this.buildScopedSessionMeta(event));
   }
 
   async normalizeAssistantRecordDraft(
@@ -1641,10 +1658,12 @@ export class BridgeCoordinator {
     const thread = await providerPlugin.startThread({
       providerProfile,
       cwd,
-      title: 'Assistant Record Classifier',
+      title: 'Assistant Record Command Skill',
       metadata: {
         sourcePlatform: event.platform,
-        source: 'assistant-record-classifier',
+        source: 'assistant-record-command-skill',
+        command: assistantCommandNameForType(forcedType),
+        operation: 'classify_new_record',
       },
     });
     const parserSession = {
@@ -1652,11 +1671,22 @@ export class BridgeCoordinator {
       providerProfileId: providerProfile.id,
       codexThreadId: thread.threadId,
       cwd: thread.cwd ?? cwd,
-      title: thread.title ?? 'Assistant Record Classifier',
+      title: thread.title ?? 'Assistant Record Command Skill',
       createdAt: this.now(),
       updatedAt: this.now(),
     };
-    const prompt = buildAssistantRecordDraftPrompt(rawInput, forcedType, locale, this.now(), timezone);
+    const prompt = buildAssistantRecordCommandSkillPrompt({
+      event,
+      command: assistantCommandNameForType(forcedType),
+      subcommand: 'natural',
+      operation: 'classify_new_record',
+      userInput: rawInput,
+      forcedType,
+      locale,
+      now: this.now(),
+      timezone,
+      localDraft,
+    });
     const result = await providerPlugin.startTurn({
       providerProfile,
       bridgeSession: parserSession,
@@ -1737,16 +1767,17 @@ export class BridgeCoordinator {
 
   async handleAssistantConfirmCommand(event, typeFilter: AssistantRecordType | null) {
     const scopeRef = toScopeRef(event);
-    if (!typeFilter) {
-      const updateDraft = this.getPendingAssistantUpdateDraft(scopeRef);
-      if (updateDraft) {
-        const updated = this.applyAssistantRecordUpdateDraft(updateDraft);
-        this.clearPendingAssistantUpdateDraft(scopeRef);
-        if (!updated) {
-          return messageResponse([this.t('coordinator.assistant.notFound')], this.buildScopedSessionMeta(event));
-        }
-        return messageResponse(this.renderAssistantUpdateAppliedLines(updateDraft, updated), this.buildScopedSessionMeta(event));
+    const updateDraft = this.getPendingAssistantUpdateDraftForType(scopeRef, typeFilter);
+    if (updateDraft) {
+      const updated = this.applyAssistantRecordUpdateDraft(updateDraft);
+      this.clearPendingAssistantUpdateDraft(scopeRef);
+      if (!updated) {
+        return messageResponse([this.t('coordinator.assistant.notFound')], this.buildScopedSessionMeta(event));
       }
+      return messageResponse(
+        this.renderAssistantUpdateAppliedLines(updateDraft, updated, assistantCommandNameForType(typeFilter)),
+        this.buildScopedSessionMeta(event),
+      );
     }
     const record = this.assistantRecords.getLatestPendingForScope(scopeRef, typeFilter);
     if (!record) {
@@ -1764,14 +1795,12 @@ export class BridgeCoordinator {
 
   async handleAssistantCancelPendingCommand(event, typeFilter: AssistantRecordType | null) {
     const scopeRef = toScopeRef(event);
-    if (!typeFilter) {
-      const updateDraft = this.getPendingAssistantUpdateDraft(scopeRef);
-      if (updateDraft) {
-        this.clearPendingAssistantUpdateDraft(scopeRef);
-        return messageResponse([
-          this.t('coordinator.assistant.updateDraftCancelled'),
-        ], this.buildScopedSessionMeta(event));
-      }
+    const updateDraft = this.getPendingAssistantUpdateDraftForType(scopeRef, typeFilter);
+    if (updateDraft) {
+      this.clearPendingAssistantUpdateDraft(scopeRef);
+      return messageResponse([
+        this.t('coordinator.assistant.updateDraftCancelled'),
+      ], this.buildScopedSessionMeta(event));
     }
     const record = this.assistantRecords.getLatestPendingForScope(scopeRef, typeFilter);
     if (!record) {
@@ -1791,43 +1820,52 @@ export class BridgeCoordinator {
       ], this.buildScopedSessionMeta(event));
     }
     const scopeRef = toScopeRef(event);
-    if (!forcedType) {
-      const updateDraft = this.getPendingAssistantUpdateDraft(scopeRef);
-      if (updateDraft) {
-        if (shouldCreateAssistantRecordInsteadOfUpdating(input)) {
-          this.clearPendingAssistantUpdateDraft(scopeRef);
-          return this.handleAssistantCommand(event, [input], null);
-        }
-        const instructions = [...updateDraft.instructions, input];
-        const baseRecord = this.assistantRecords.getById(updateDraft.targetRecordId) ?? updateDraft.matchedRecord;
-        const updatedRecord = await this.previewAssistantRecordAction(event, scopeRef, baseRecord, instructions, updateDraft.action);
-        const updatedDraft: PendingAssistantRecordUpdateDraft = {
-          ...updateDraft,
-          rawInput: instructions.join('\n'),
-          instructions,
-          matchedRecord: cloneAssistantRecord(baseRecord),
-          updatedRecord: updatedRecord.record,
-          normalizedBy: updatedRecord.normalizedBy,
-          changeSummary: updatedRecord.changeSummary,
-        };
-        this.setPendingAssistantUpdateDraft(scopeRef, updatedDraft);
-        return messageResponse(this.renderAssistantUpdateDraftLines(updatedDraft), this.buildScopedSessionMeta(event));
+    const updateDraft = this.getPendingAssistantUpdateDraftForType(scopeRef, forcedType);
+    if (updateDraft) {
+      if (shouldCreateAssistantRecordInsteadOfUpdating(input)) {
+        this.clearPendingAssistantUpdateDraft(scopeRef);
+        return this.handleAssistantCommand(event, [input], forcedType);
       }
+      const instructions = [...updateDraft.instructions, input];
+      const baseRecord = this.assistantRecords.getById(updateDraft.targetRecordId) ?? updateDraft.matchedRecord;
+      const updatedRecord = await this.previewAssistantRecordAction(event, scopeRef, baseRecord, instructions, updateDraft.action, forcedType);
+      const updatedDraft: PendingAssistantRecordUpdateDraft = {
+        ...updateDraft,
+        rawInput: instructions.join('\n'),
+        instructions,
+        matchedRecord: cloneAssistantRecord(baseRecord),
+        updatedRecord: updatedRecord.record,
+        normalizedBy: updatedRecord.normalizedBy,
+        changeSummary: updatedRecord.changeSummary,
+      };
+      this.setPendingAssistantUpdateDraft(scopeRef, updatedDraft);
+      return messageResponse(
+        this.renderAssistantUpdateDraftLines(updatedDraft, assistantCommandNameForType(forcedType)),
+        this.buildScopedSessionMeta(event),
+      );
     }
     const record = this.assistantRecords.getLatestPendingForScope(scopeRef, forcedType ?? null);
     if (!record) {
       return messageResponse([this.t('coordinator.assistant.noPending')], this.buildScopedSessionMeta(event));
     }
-    const updated = this.assistantRecords.updatePendingFromInstruction(record, input, forcedType);
+    const preview = await this.previewAssistantRecordAction(event, scopeRef, record, [input], 'update', forcedType);
+    const updated = this.saveAssistantRecordPreview(record, preview.record, {
+      status: 'pending',
+    });
     return messageResponse(this.renderAssistantPendingLines(updated, assistantCommandNameForType(forcedType)), this.buildScopedSessionMeta(event));
   }
 
-  async buildAssistantRecordUpdateDraft(event, scopeRef: PlatformScopeRef, rawInput: string): Promise<PendingAssistantRecordUpdateDraft | null> {
-    const records = this.assistantRecords.listForScope(scopeRef, null);
+  async buildAssistantRecordUpdateDraft(
+    event,
+    scopeRef: PlatformScopeRef,
+    rawInput: string,
+    forcedType: AssistantRecordType | null,
+  ): Promise<PendingAssistantRecordUpdateDraft | null> {
+    const records = this.assistantRecords.listForScope(scopeRef, forcedType);
     if (records.length === 0) {
       return null;
     }
-    const route = await this.resolveAssistantRecordRoute(event, scopeRef, rawInput, records).catch(() => null);
+    const route = await this.resolveAssistantRecordRoute(event, scopeRef, rawInput, records, forcedType).catch(() => null);
     if (route) {
       if (route.action === 'create' || route.action === 'none') {
         return null;
@@ -1840,7 +1878,7 @@ export class BridgeCoordinator {
         ? 'update'
         : route.action;
       const instructions = [rawInput];
-      const updatedRecord = await this.previewAssistantRecordAction(event, scopeRef, routedRecord, instructions, resolvedAction);
+      const updatedRecord = await this.previewAssistantRecordAction(event, scopeRef, routedRecord, instructions, resolvedAction, forcedType);
       return {
         createdAt: this.now(),
         rawInput,
@@ -1854,34 +1892,7 @@ export class BridgeCoordinator {
         changeSummary: updatedRecord.changeSummary ?? route.reason,
       };
     }
-    if (shouldCreateAssistantRecordInsteadOfUpdating(rawInput)) {
-      return null;
-    }
-    const action = inferAssistantRecordNaturalAction(rawInput);
-    if (!action) {
-      return null;
-    }
-    const match = findBestAssistantRecordMatch(records, rawInput);
-    if (!match) {
-      return null;
-    }
-    const resolvedAction = action === 'complete' && shouldTreatAssistantCompletionAsPartialUpdate(match.record, rawInput)
-      ? 'update'
-      : action;
-    const instructions = [rawInput];
-    const updatedRecord = await this.previewAssistantRecordAction(event, scopeRef, match.record, instructions, resolvedAction);
-    return {
-      createdAt: this.now(),
-      rawInput,
-      instructions,
-      targetRecordId: match.record.id,
-      matchedRecord: cloneAssistantRecord(match.record),
-      action: resolvedAction,
-      updatedRecord: updatedRecord.record,
-      matchedScore: match.score,
-      normalizedBy: updatedRecord.normalizedBy,
-      changeSummary: updatedRecord.changeSummary,
-    };
+    return null;
   }
 
   async resolveAssistantRecordRoute(
@@ -1889,6 +1900,7 @@ export class BridgeCoordinator {
     scopeRef: PlatformScopeRef,
     rawInput: string,
     records: AssistantRecord[],
+    forcedType: AssistantRecordType | null,
   ): Promise<AssistantRecordRouteDecision | null> {
     const candidates = records
       .filter((record) => record.status !== 'archived')
@@ -1896,7 +1908,7 @@ export class BridgeCoordinator {
     if (candidates.length === 0) {
       return null;
     }
-    const codexRoute = await this.resolveAssistantRecordRouteWithCodex(event, scopeRef, rawInput, candidates).catch(() => null);
+    const codexRoute = await this.resolveAssistantRecordRouteWithCodex(event, scopeRef, rawInput, candidates, forcedType).catch(() => null);
     if (codexRoute) {
       return codexRoute;
     }
@@ -1914,6 +1926,7 @@ export class BridgeCoordinator {
     scopeRef: PlatformScopeRef,
     rawInput: string,
     records: AssistantRecord[],
+    forcedType: AssistantRecordType | null,
   ): Promise<AssistantRecordRouteDecision | null> {
     const boundSession = this.bridgeSessions.resolveScopeSession(scopeRef);
     const providerProfile = boundSession
@@ -1928,13 +1941,16 @@ export class BridgeCoordinator {
       : null;
     const locale = inheritedSettings?.locale ?? this.resolveScopeLocale(scopeRef, event);
     const cwd = normalizeCwd(boundSession?.cwd) ?? this.resolveEventCwd(event) ?? null;
+    const commandName = assistantCommandNameForType(forcedType);
     const thread = await providerPlugin.startThread({
       providerProfile,
       cwd,
-      title: 'Assistant Record Router',
+      title: 'Assistant Record Command Skill',
       metadata: {
         sourcePlatform: event.platform,
-        source: 'assistant-record-router',
+        source: 'assistant-record-command-skill',
+        command: commandName,
+        operation: 'route_existing_record',
       },
     });
     const routerSession = {
@@ -1942,11 +1958,22 @@ export class BridgeCoordinator {
       providerProfileId: providerProfile.id,
       codexThreadId: thread.threadId,
       cwd: thread.cwd ?? cwd,
-      title: thread.title ?? 'Assistant Record Router',
+      title: thread.title ?? 'Assistant Record Command Skill',
       createdAt: this.now(),
       updatedAt: this.now(),
     };
-    const prompt = buildAssistantRecordRoutePrompt(rawInput, records, locale, this.now());
+    const prompt = buildAssistantRecordCommandSkillPrompt({
+      event,
+      command: commandName,
+      subcommand: 'natural',
+      operation: 'route_existing_record',
+      userInput: rawInput,
+      forcedType,
+      locale,
+      now: this.now(),
+      timezone: extractEventTimezone(event),
+      records,
+    });
     const result = await providerPlugin.startTurn({
       providerProfile,
       bridgeSession: routerSession,
@@ -1982,25 +2009,42 @@ export class BridgeCoordinator {
     record: AssistantRecord,
     instructions: string[],
     action: AssistantRecordUpdateAction,
+    forcedType: AssistantRecordType | null = null,
   ): Promise<{ record: AssistantRecord; normalizedBy: 'codex' | 'agents-sdk' | 'local'; changeSummary: string | null }> {
     const rawInput = instructions.join('\n');
     if (action === 'update') {
-      const codexRecord = await this.previewAssistantRecordUpdateWithCodex(event, scopeRef, record, instructions).catch(() => null);
+      const codexRecord = await this.previewAssistantRecordUpdateWithCodex(event, scopeRef, record, instructions, forcedType).catch(() => null);
       if (codexRecord) {
-        return codexRecord;
+        return {
+          ...codexRecord,
+          record: preserveAssistantRecordStatusForContentUpdate(record, codexRecord.record, instructions),
+        };
       }
       const agentsRecord = await normalizeAssistantRecordUpdateWithOpenAIAgents(
         record,
         instructions,
-        this.currentI18n.locale,
-        this.now(),
-        record.timezone,
-      ).catch(() => null);
+          this.currentI18n.locale,
+          this.now(),
+          record.timezone,
+        ).catch(() => null);
       if (agentsRecord) {
-        return agentsRecord;
+        const nextRecord = forcedType
+          ? {
+            ...agentsRecord.record,
+            type: forcedType,
+          }
+          : agentsRecord.record;
+        return {
+          ...agentsRecord,
+          record: preserveAssistantRecordStatusForContentUpdate(record, nextRecord, instructions),
+        };
       }
       return {
-        record: this.assistantRecords.previewUpdate(record, rawInput, null),
+        record: preserveAssistantRecordStatusForContentUpdate(
+          record,
+          this.assistantRecords.previewUpdate(record, rawInput, forcedType),
+          instructions,
+        ),
         normalizedBy: 'local',
         changeSummary: null,
       };
@@ -2061,6 +2105,7 @@ export class BridgeCoordinator {
     scopeRef: PlatformScopeRef,
     record: AssistantRecord,
     instructions: string[],
+    forcedType: AssistantRecordType | null = null,
   ): Promise<{ record: AssistantRecord; normalizedBy: 'codex'; changeSummary: string | null } | null> {
     const boundSession = this.bridgeSessions.resolveScopeSession(scopeRef);
     const providerProfile = boundSession
@@ -2078,10 +2123,12 @@ export class BridgeCoordinator {
     const thread = await providerPlugin.startThread({
       providerProfile,
       cwd,
-      title: 'Assistant Record Rewriter',
+      title: 'Assistant Record Command Skill',
       metadata: {
         sourcePlatform: event.platform,
-        source: 'assistant-record-rewriter',
+        source: 'assistant-record-command-skill',
+        command: assistantCommandNameForType(forcedType),
+        operation: 'rewrite_record',
       },
     });
     const parserSession = {
@@ -2089,11 +2136,24 @@ export class BridgeCoordinator {
       providerProfileId: providerProfile.id,
       codexThreadId: thread.threadId,
       cwd: thread.cwd ?? cwd,
-      title: thread.title ?? 'Assistant Record Rewriter',
+      title: thread.title ?? 'Assistant Record Command Skill',
       createdAt: this.now(),
       updatedAt: this.now(),
     };
-    const prompt = buildAssistantRecordRewritePrompt(record, instructions, locale, this.now(), extractEventTimezone(event) ?? record.timezone);
+    const prompt = buildAssistantRecordCommandSkillPrompt({
+      event,
+      command: assistantCommandNameForType(forcedType),
+      subcommand: 'edit',
+      operation: 'rewrite_record',
+      userInput: instructions.join('\n'),
+      forcedType,
+      locale,
+      now: this.now(),
+      timezone: extractEventTimezone(event) ?? record.timezone,
+      pendingRecord: record.status === 'pending' ? record : null,
+      targetRecord: record,
+      instructions,
+    });
     const result = await providerPlugin.startTurn({
       providerProfile,
       bridgeSession: parserSession,
@@ -2120,7 +2180,7 @@ export class BridgeCoordinator {
       },
       inputText: prompt,
     });
-    const candidate = parseAssistantRecordRewriteCandidate(result.outputText, record);
+    const candidate = parseAssistantRecordRewriteCandidate(result.outputText, record, forcedType);
     if (!candidate) {
       return null;
     }
@@ -2135,15 +2195,45 @@ export class BridgeCoordinator {
     };
   }
 
+  saveAssistantRecordPreview(
+    original: AssistantRecord,
+    preview: AssistantRecord,
+    overrides: Partial<Pick<AssistantRecord, 'status'>> = {},
+  ): AssistantRecord {
+    return this.assistantRecords.updateRecord(original.id, {
+      type: preview.type,
+      title: preview.title,
+      content: preview.content,
+      status: overrides.status ?? preview.status,
+      priority: preview.priority,
+      project: preview.project,
+      tags: preview.tags,
+      dueAt: preview.dueAt,
+      remindAt: preview.remindAt,
+      recurrence: preview.recurrence,
+      originalText: preview.originalText,
+      confidence: preview.confidence,
+      parsedJson: preview.parsedJson,
+      parseStatus: preview.parseStatus,
+      completedAt: preview.completedAt,
+      cancelledAt: preview.cancelledAt,
+      archivedAt: preview.archivedAt,
+    });
+  }
+
   applyAssistantRecordUpdateDraft(draft: PendingAssistantRecordUpdateDraft): AssistantRecord | null {
     const existing = this.assistantRecords.getById(draft.targetRecordId);
     if (!existing) {
       return null;
     }
     const record = draft.updatedRecord;
+    const now = this.now();
+    const status = draft.action === 'update'
+      ? resolveAssistantUpdateDraftStatus(existing, record, draft.instructions)
+      : record.status;
     return this.assistantRecords.updateRecord(existing.id, {
       type: record.type,
-      status: record.status,
+      status,
       title: record.title,
       content: record.content,
       originalText: record.originalText,
@@ -2158,9 +2248,9 @@ export class BridgeCoordinator {
       confidence: record.confidence,
       parsedJson: record.parsedJson,
       lastRemindedAt: record.lastRemindedAt,
-      completedAt: record.completedAt,
-      cancelledAt: record.cancelledAt,
-      archivedAt: record.archivedAt,
+      completedAt: resolveAssistantStatusTimestamp(status, 'done', existing.completedAt, record.completedAt, now),
+      cancelledAt: resolveAssistantStatusTimestamp(status, 'cancelled', existing.cancelledAt, record.cancelledAt, now),
+      archivedAt: resolveAssistantStatusTimestamp(status, 'archived', existing.archivedAt, record.archivedAt, now),
     });
   }
 
@@ -2247,7 +2337,7 @@ export class BridgeCoordinator {
     return lines;
   }
 
-  renderAssistantUpdateDraftLines(draft: PendingAssistantRecordUpdateDraft): string[] {
+  renderAssistantUpdateDraftLines(draft: PendingAssistantRecordUpdateDraft, commandName = '/as'): string[] {
     const record = draft.updatedRecord;
     const lines = [
       this.t('coordinator.assistant.updateDraftTitle'),
@@ -2268,13 +2358,13 @@ export class BridgeCoordinator {
         lines.push(timeLine);
       }
     }
-    lines.push(this.t('coordinator.assistant.confirmHint', { command: '/as' }));
-    lines.push(this.t('coordinator.assistant.editHint', { command: '/as' }));
-    lines.push(this.t('coordinator.assistant.cancelHint', { command: '/as' }));
+    lines.push(this.t('coordinator.assistant.confirmHint', { command: commandName }));
+    lines.push(this.t('coordinator.assistant.editHint', { command: commandName }));
+    lines.push(this.t('coordinator.assistant.cancelHint', { command: commandName }));
     return lines;
   }
 
-  renderAssistantUpdateAppliedLines(draft: PendingAssistantRecordUpdateDraft, record: AssistantRecord): string[] {
+  renderAssistantUpdateAppliedLines(draft: PendingAssistantRecordUpdateDraft, record: AssistantRecord, commandName = '/as'): string[] {
     const lines = [
       this.t('coordinator.assistant.updateApplied'),
       this.t('coordinator.assistant.updateDraftTarget', { title: draft.matchedRecord.title }),
@@ -2293,7 +2383,7 @@ export class BridgeCoordinator {
         lines.push(timeLine);
       }
     }
-    lines.push(this.t('coordinator.assistant.showHint', { command: '/as' }));
+    lines.push(this.t('coordinator.assistant.showHint', { command: commandName }));
     return lines;
   }
 
@@ -9397,12 +9487,15 @@ function parseAssistantRecordRouteDecision(value: unknown, records: AssistantRec
   if (!parsed) {
     return null;
   }
-  const action = normalizeAssistantRecordRouteAction(parsed.action);
+  const route = parsed.route && typeof parsed.route === 'object' && !Array.isArray(parsed.route)
+    ? parsed.route as Record<string, unknown>
+    : parsed;
+  const action = normalizeAssistantRecordRouteAction(route.action);
   if (!action) {
     return null;
   }
-  const confidence = clampAssistantConfidence(Number(parsed.confidence ?? 0.8));
-  const targetRecordId = resolveAssistantRouteTargetRecordId(parsed, records);
+  const confidence = clampAssistantConfidence(Number(route.confidence ?? 0.8));
+  const targetRecordId = resolveAssistantRouteTargetRecordId(route, records);
   if (['update', 'complete', 'cancel', 'archive'].includes(action) && !targetRecordId) {
     return null;
   }
@@ -9410,8 +9503,8 @@ function parseAssistantRecordRouteDecision(value: unknown, records: AssistantRec
     action,
     targetRecordId: action === 'create' || action === 'none' ? null : targetRecordId,
     confidence,
-    reason: truncateText(compactWhitespace(parsed.reason ?? ''), 120),
-    type: normalizeAssistantRecordType(parsed.type),
+    reason: truncateText(compactWhitespace(route.reason ?? ''), 120),
+    type: normalizeAssistantRecordType(route.type),
   };
 }
 
@@ -9478,31 +9571,40 @@ function buildAssistantRecordRewritePrompt(
   ].join('\n');
 }
 
-function parseAssistantRecordRewriteCandidate(value: unknown, fallbackRecord: AssistantRecord): AssistantRecordRewriteCandidate | null {
+function parseAssistantRecordRewriteCandidate(
+  value: unknown,
+  fallbackRecord: AssistantRecord,
+  forcedType: AssistantRecordType | null = null,
+): AssistantRecordRewriteCandidate | null {
   const parsed = parseJsonObject(value);
   if (!parsed) {
     return null;
   }
-  const content = normalizeMultilineText(parsed.content ?? parsed.updatedContent ?? parsed.updated_content);
+  const record = parsed.record && typeof parsed.record === 'object' && !Array.isArray(parsed.record)
+    ? parsed.record as Record<string, unknown>
+    : parsed.updatedRecord && typeof parsed.updatedRecord === 'object' && !Array.isArray(parsed.updatedRecord)
+      ? parsed.updatedRecord as Record<string, unknown>
+      : parsed;
+  const content = normalizeMultilineText(record.content ?? record.updatedContent ?? record.updated_content);
   if (!content || isAssistantRecordRewriteSchemaPlaceholder(content)) {
     return null;
   }
-  const type = normalizeAssistantRecordType(parsed.type) ?? fallbackRecord.type;
-  const title = truncateText(compactWhitespace(parsed.title ?? '') || compactWhitespace(content), 80);
+  const type = forcedType ?? normalizeAssistantRecordType(record.type) ?? fallbackRecord.type;
+  const title = truncateText(compactWhitespace(record.title ?? '') || compactWhitespace(content), 80);
   return {
-    action: normalizeAssistantRecordUpdateAction(parsed.action) ?? 'update',
+    action: normalizeAssistantRecordUpdateAction(record.action ?? parsed.action) ?? 'update',
     type,
     title: title || fallbackRecord.title,
     content,
-    status: normalizeAssistantRecordStatus(parsed.status) ?? fallbackRecord.status,
-    priority: normalizeAssistantRecordPriority(parsed.priority) ?? fallbackRecord.priority,
-    dueAt: readAssistantTimestampField(parsed, ['dueAt', 'due_at'], fallbackRecord.dueAt),
-    remindAt: readAssistantTimestampField(parsed, ['remindAt', 'remind_at'], fallbackRecord.remindAt),
-    recurrence: readAssistantNullableStringField(parsed, ['recurrence'], fallbackRecord.recurrence),
-    project: readAssistantNullableStringField(parsed, ['project'], fallbackRecord.project),
-    tags: readAssistantStringArrayField(parsed, ['tags'], fallbackRecord.tags),
-    changeSummary: truncateText(compactWhitespace(parsed.changeSummary ?? parsed.change_summary ?? ''), 120),
-    confidence: clampAssistantConfidence(Number(parsed.confidence ?? fallbackRecord.confidence ?? 0.8)),
+    status: normalizeAssistantRecordStatus(record.status) ?? fallbackRecord.status,
+    priority: normalizeAssistantRecordPriority(record.priority) ?? fallbackRecord.priority,
+    dueAt: readAssistantTimestampField(record, ['dueAt', 'due_at'], fallbackRecord.dueAt),
+    remindAt: readAssistantTimestampField(record, ['remindAt', 'remind_at'], fallbackRecord.remindAt),
+    recurrence: readAssistantNullableStringField(record, ['recurrence'], fallbackRecord.recurrence),
+    project: readAssistantNullableStringField(record, ['project'], fallbackRecord.project),
+    tags: readAssistantStringArrayField(record, ['tags'], fallbackRecord.tags),
+    changeSummary: truncateText(compactWhitespace(record.changeSummary ?? record.change_summary ?? parsed.changeSummary ?? parsed.change_summary ?? ''), 120),
+    confidence: clampAssistantConfidence(Number(record.confidence ?? parsed.confidence ?? fallbackRecord.confidence ?? 0.8)),
   };
 }
 
@@ -10369,6 +10471,180 @@ function normalizeAssistantPromptTimezone(timezone: string | null): string {
   return normalized || 'Etc/UTC';
 }
 
+function buildAssistantRecordCommandSkillPrompt({
+  event,
+  command,
+  subcommand,
+  operation,
+  userInput,
+  forcedType,
+  locale,
+  now,
+  timezone,
+  localDraft = null,
+  pendingRecord = null,
+  targetRecord = null,
+  records = [],
+  instructions = [],
+}: {
+  event: InboundTextEvent;
+  command: string;
+  subcommand: 'natural' | 'edit';
+  operation: 'classify_new_record' | 'route_existing_record' | 'rewrite_record';
+  userInput: string;
+  forcedType: AssistantRecordType | null;
+  locale: string | null;
+  now: number;
+  timezone: string | null;
+  localDraft?: AssistantRecordDraft | null;
+  pendingRecord?: AssistantRecord | null;
+  targetRecord?: AssistantRecord | null;
+  records?: AssistantRecord[];
+  instructions?: string[];
+}): string {
+  const payload = {
+    command: command.replace(/^\//u, ''),
+    subcommand,
+    operation,
+    rawText: String(event.text ?? ''),
+    userInput,
+    forcedType,
+    now: new Date(now).toISOString(),
+    locale: normalizeLocale(locale) ?? 'zh-CN',
+    timezone: normalizeAssistantPromptTimezone(timezone),
+    localTime: formatAssistantPromptLocalDateTime(now, normalizeAssistantPromptTimezone(timezone)),
+    scope: {
+      platform: event.platform,
+      externalScopeId: event.externalScopeId,
+    },
+    localDraft: localDraft ? assistantDraftToCommandSkillJson(localDraft) : null,
+    pendingRecord: pendingRecord ? assistantRecordToCommandSkillJson(pendingRecord, null) : null,
+    targetRecord: targetRecord ? assistantRecordToCommandSkillJson(targetRecord, null) : null,
+    records: records.map((record, index) => assistantRecordToCommandSkillJson(record, index + 1)),
+    instructions,
+    skillPath: ASSISTANT_RECORD_COMMAND_SKILL_PATH,
+  };
+  return [
+    'CodexBridge command skill invocation.',
+    '',
+    `Please read and follow this command skill file: ${ASSISTANT_RECORD_COMMAND_SKILL_PATH}`,
+    'Use it to interpret the assistant-record slash command request below.',
+    'Return exactly one JSON object that matches the selected operation contract.',
+    'Do not use Markdown. Do not explain. Do not create, update, complete, cancel, archive, or persist records yourself.',
+    '',
+    'Invocation payload:',
+    JSON.stringify(payload, null, 2),
+  ].join('\n');
+}
+
+function assistantDraftToCommandSkillJson(draft: AssistantRecordDraft): Record<string, unknown> {
+  return {
+    type: draft.type,
+    title: draft.title,
+    content: draft.content,
+    originalText: draft.originalText,
+    priority: draft.priority,
+    project: draft.project,
+    tags: draft.tags,
+    dueAt: draft.dueAt,
+    remindAt: draft.remindAt,
+    recurrence: draft.recurrence,
+    confidence: draft.confidence,
+  };
+}
+
+function assistantRecordToCommandSkillJson(record: AssistantRecord, index: number | null): Record<string, unknown> {
+  return {
+    index,
+    id: record.id,
+    type: record.type,
+    title: record.title,
+    content: truncateText(record.content, 1000),
+    status: record.status,
+    priority: record.priority,
+    project: record.project,
+    tags: record.tags,
+    dueAt: record.dueAt,
+    remindAt: record.remindAt,
+    recurrence: record.recurrence,
+    timezone: record.timezone,
+    updatedAt: record.updatedAt,
+  };
+}
+
+function preserveAssistantRecordStatusForContentUpdate(
+  source: AssistantRecord,
+  preview: AssistantRecord,
+  instructions: string[] = [],
+): AssistantRecord {
+  const explicitStatus = inferExplicitAssistantStatusUpdate(instructions.join('\n'));
+  const status = explicitStatus ?? source.status;
+  return {
+    ...preview,
+    status,
+    completedAt: status === source.status
+      ? source.completedAt
+      : status === 'done' ? preview.completedAt : null,
+    cancelledAt: status === source.status
+      ? source.cancelledAt
+      : status === 'cancelled' ? preview.cancelledAt : null,
+    archivedAt: status === source.status
+      ? source.archivedAt
+      : status === 'archived' ? preview.archivedAt : null,
+  };
+}
+
+function resolveAssistantUpdateDraftStatus(
+  existing: AssistantRecord,
+  preview: AssistantRecord,
+  instructions: string[],
+): AssistantRecordStatus {
+  const explicitStatus = inferExplicitAssistantStatusUpdate(instructions.join('\n'));
+  if (explicitStatus) {
+    return explicitStatus;
+  }
+  if (existing.status === 'pending') {
+    return 'active';
+  }
+  return existing.status || preview.status;
+}
+
+function resolveAssistantStatusTimestamp(
+  status: AssistantRecordStatus,
+  targetStatus: AssistantRecordStatus,
+  existingTimestamp: number | null,
+  previewTimestamp: number | null,
+  now: number,
+): number | null {
+  if (status !== targetStatus) {
+    return null;
+  }
+  return previewTimestamp ?? existingTimestamp ?? now;
+}
+
+function inferExplicitAssistantStatusUpdate(input: string): AssistantRecordStatus | null {
+  const value = compactWhitespace(input).toLowerCase();
+  if (!value || !/(?:状态|改成|改为|设为|设置为|变成|标记为|置为)/u.test(value)) {
+    return null;
+  }
+  if (/(?:进行中|处理中|未完成|未结束|active|in\s*progress)/iu.test(value)) {
+    return 'active';
+  }
+  if (/(?:待确认|pending)/iu.test(value)) {
+    return 'pending';
+  }
+  if (/(?:已完成|完成|做完|done|complete|completed)/iu.test(value)) {
+    return 'done';
+  }
+  if (/(?:已取消|取消|作废|不用了|cancelled|canceled|cancel)/iu.test(value)) {
+    return 'cancelled';
+  }
+  if (/(?:已归档|归档|删除|删掉|archive|archived)/iu.test(value)) {
+    return 'archived';
+  }
+  return null;
+}
+
 function buildAssistantRecordDraftPrompt(
   rawInput: string,
   forcedType: AssistantRecordType | null,
@@ -10427,31 +10703,36 @@ function parseAssistantRecordDraftCandidate(
   if (!parsed) {
     return null;
   }
-  const content = normalizeMultilineText(parsed.content ?? parsed.text ?? parsed.body);
+  const draft = parsed.draft && typeof parsed.draft === 'object' && !Array.isArray(parsed.draft)
+    ? parsed.draft as Record<string, unknown>
+    : parsed.record && typeof parsed.record === 'object' && !Array.isArray(parsed.record)
+      ? parsed.record as Record<string, unknown>
+      : parsed;
+  const content = normalizeMultilineText(draft.content ?? draft.text ?? draft.body);
   if (!content || isAssistantRecordDraftSchemaPlaceholder(content)) {
     return null;
   }
-  const parsedType = normalizeAssistantRecordType(parsed.type);
+  const parsedType = normalizeAssistantRecordType(draft.type);
   const type = forcedType ?? parsedType ?? fallbackDraft.type;
-  const title = truncateText(compactWhitespace(parsed.title ?? '') || compactWhitespace(content), 80) || fallbackDraft.title;
-  const priority = normalizeAssistantRecordPriority(parsed.priority) ?? fallbackDraft.priority;
-  const confidence = clampAssistantConfidence(Number(parsed.confidence ?? fallbackDraft.confidence ?? 0.8));
+  const title = truncateText(compactWhitespace(draft.title ?? '') || compactWhitespace(content), 80) || fallbackDraft.title;
+  const priority = normalizeAssistantRecordPriority(draft.priority) ?? fallbackDraft.priority;
+  const confidence = clampAssistantConfidence(Number(draft.confidence ?? parsed.confidence ?? fallbackDraft.confidence ?? 0.8));
   return {
     type,
     title,
     content,
     originalText: rawInput,
     priority,
-    project: readAssistantNullableStringField(parsed, ['project'], fallbackDraft.project),
-    tags: readAssistantStringArrayField(parsed, ['tags'], fallbackDraft.tags),
+    project: readAssistantNullableStringField(draft, ['project'], fallbackDraft.project),
+    tags: readAssistantStringArrayField(draft, ['tags'], fallbackDraft.tags),
     dueAt: type === 'todo'
-      ? readAssistantTimestampField(parsed, ['dueAt', 'due_at'], fallbackDraft.dueAt)
+      ? readAssistantTimestampField(draft, ['dueAt', 'due_at'], fallbackDraft.dueAt)
       : null,
     remindAt: type === 'reminder'
-      ? readAssistantTimestampField(parsed, ['remindAt', 'remind_at'], fallbackDraft.remindAt)
+      ? readAssistantTimestampField(draft, ['remindAt', 'remind_at'], fallbackDraft.remindAt)
       : null,
     recurrence: type === 'reminder'
-      ? readAssistantNullableStringField(parsed, ['recurrence'], fallbackDraft.recurrence)
+      ? readAssistantNullableStringField(draft, ['recurrence'], fallbackDraft.recurrence)
       : null,
     confidence,
     parsedJson: {
@@ -11645,6 +11926,72 @@ function assistantCommandNameForType(type: AssistantRecordType | null): string {
     default:
       return '/as';
   }
+}
+
+type AssistantRecordLocalQueryIntent = {
+  kind: 'list';
+  typeFilter: AssistantRecordType | null;
+};
+
+function resolveAssistantRecordLocalQueryIntent(
+  input: string,
+  forcedType: AssistantRecordType | null,
+): AssistantRecordLocalQueryIntent | null {
+  const value = compactWhitespace(input).toLowerCase();
+  if (!value || hasAssistantRecordCreateRequestPrefix(value)) {
+    return null;
+  }
+  const inferredType = inferAssistantRecordTypeFromQueryText(value);
+  const typeFilter = forcedType ?? inferredType;
+  if (!isAssistantRecordListQuery(value, forcedType, inferredType)) {
+    return null;
+  }
+  return { kind: 'list', typeFilter };
+}
+
+function isAssistantRecordListQuery(
+  value: string,
+  forcedType: AssistantRecordType | null,
+  inferredType: AssistantRecordType | null,
+): boolean {
+  if (forcedType && /^(?:给我)?(?:查看|看看|看一下|查一下|列出|显示)(?:一下)?$/u.test(value)) {
+    return true;
+  }
+  const hasViewVerb = /(?:查看|看看|看一下|查一下|列出|列一下|显示|给我看|给我看看|打开)/u.test(value);
+  const hasListCue = /(?:有哪些|还有哪些|都有哪些|有哪(?:些|几|几个)|有什么|有啥|当前|现在|目前|所有|全部|还(?:有|剩)|剩下|列表|清单)/u.test(value);
+  const mentionsSpecificType = inferredType !== null;
+  const mentionsGenericRecords = /(?:助理记录|记录|事项|条目|清单|列表)/u.test(value);
+  const hasTarget = mentionsSpecificType || mentionsGenericRecords;
+  if (/(?:有哪些|还有哪些|都有哪些|有哪(?:些|几|几个)|有什么|有啥|还(?:有|剩)(?:哪些|什么)|剩下哪些)/u.test(value)) {
+    return hasTarget || forcedType !== null;
+  }
+  if (!hasViewVerb) {
+    return false;
+  }
+  if (hasTarget) {
+    return true;
+  }
+  return forcedType !== null && hasListCue;
+}
+
+function hasAssistantRecordCreateRequestPrefix(value: string): boolean {
+  return /^(?:新增|新建|添加|增加|创建|保存|记下|记一条|记一个|帮我(?:新增|新建|添加|增加|创建|保存|记下|记一条|记一个)|提醒我|安排)/u.test(value);
+}
+
+function inferAssistantRecordTypeFromQueryText(value: string): AssistantRecordType | null {
+  if (/(?:待办|todo|todos|任务|要做的事|待处理事项)/iu.test(value)) {
+    return 'todo';
+  }
+  if (/(?:提醒|remind|reminder|reminders|通知)/iu.test(value)) {
+    return 'reminder';
+  }
+  if (/(?:日志|log|logs|日记)/iu.test(value)) {
+    return 'log';
+  }
+  if (/(?:笔记|note|notes|备忘)/iu.test(value)) {
+    return 'note';
+  }
+  return null;
 }
 
 function renderAssistantRecordTimeLine(record: AssistantRecord, i18n: Translator): string {
