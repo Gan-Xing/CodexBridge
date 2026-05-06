@@ -1,13 +1,14 @@
 # @codexbridge/mission-control
 
-Internal package for the CodexBridge Mission Control runtime.
+Mission Control runtime package, currently developed inside the CodexBridge
+repository.
 
 Immutable target:
 
-> `@codexbridge/mission-control` gives CodexBridge a durable, goal-driven
-> runtime that can keep a mission moving through plan, execute, verify,
-> repair/retry, and handoff states until the requested outcome is actually
-> complete, explicitly blocked, or needs human input.
+> `@codexbridge/mission-control` provides a durable, goal-driven runtime that
+> can keep a mission moving through plan, execute, verify, repair/retry, and
+> handoff states until the requested outcome is actually complete, explicitly
+> blocked, or needs human input.
 
 This package is intended to own only mission-runtime behavior:
 
@@ -31,10 +32,11 @@ It must not own bridge behavior:
 
 Current phase:
 
-- `phase-3-workspace-lease-foundations`: package boundary plus durable mission
+- `phase-4-provider-foundations`: package boundary plus durable mission
   domain, repository-backed persistence, typed workflow loading, canonical
   attempt prompt contract, workpad status rendering helpers, deterministic
-  workspace assignment, and recovery-safe lease coordination
+  workspace assignment, recovery-safe lease coordination, provider port, and
+  `CodexMissionProvider` adapter shell
 
 This package should preserve the Symphony-style separation between:
 
@@ -44,5 +46,5 @@ This package should preserve the Symphony-style separation between:
 - execution
 - status surfaces
 
-CodexBridge may depend on this package. This package must not import from
-CodexBridge platform/runtime/store/i18n modules.
+CodexBridge may depend on this package as its first host surface. This package
+must not import from CodexBridge platform/runtime/store/i18n modules.

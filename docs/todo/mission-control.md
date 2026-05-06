@@ -82,8 +82,8 @@ Rules for references:
 
 - [ ] Record *why* each reference matters before copying any implementation idea
 - [ ] Do not vendor external runtime code unless there is a clear local ownership reason
-- [ ] Prefer adapting concepts into CodexBridge-native abstractions over mirroring upstream APIs
-- [ ] Keep the current product target primary: CodexBridge chat-first mission execution
+- [ ] Prefer adapting concepts into Mission Control abstractions over mirroring upstream APIs
+- [ ] Keep the current product target primary: a Codex-first, provider-pluggable runtime
 - [ ] Keep the final product/package name as `Mission Control`; treat
   `codex-mission-control` as a predecessor prototype, not the target identity
 - [ ] Do not rely on a local `reference/symphony` copy existing; upstream spec is
@@ -106,8 +106,7 @@ constraints, not just as vague inspiration:
 
 ## Packaging Direction
 
-The package should start as an internal package inside the CodexBridge
-repository:
+The package should start as a package inside the CodexBridge repository:
 
 ```text
 packages/mission-control/
@@ -120,6 +119,7 @@ Rules:
 - No workspace/monorepo conversion is required yet.
 - Follow the same internal-package pattern already used by
   `packages/codex-gateway`.
+- Treat CodexBridge as the first host, not the final product boundary.
 
 Package bootstrap target:
 
@@ -157,7 +157,7 @@ This backlog follows the route below:
   references
 - [ ] Reuse only the prototype pieces from local `codex-mission-control` that
   survive the provider-pluggable package boundary
-- [ ] Converge the result into one provider-pluggable internal package:
+- [ ] Converge the result into one provider-pluggable package:
   `@codexbridge/mission-control`
 
 ## Phase 0: Baseline Current `/agent` Behavior
@@ -290,24 +290,31 @@ Phase 3 source-of-truth tests:
 
 The first real provider is current Codex app-server execution.
 
-- [ ] Add `MissionProvider` port
-- [ ] Add `CodexMissionProvider`
-- [ ] Reuse provider profile + Codex thread binding safely
+- [x] Add `MissionProvider` port
+- [x] Add `CodexMissionProvider`
+- [x] Reuse provider profile + Codex thread binding safely
 - [ ] Support:
   - start
   - continue
   - wait
   - interrupt
-- [ ] Persist provider run/thread ids at the attempt level
-- [ ] Map Codex-native interrupted/blocking/completed outcomes into mission
+- [x] Persist provider run/thread ids at the attempt level
+- [x] Map Codex-native interrupted/blocking/completed outcomes into mission
   status
-- [ ] Treat normal provider exit as eligible for continuation when the mission
+- [x] Treat normal provider exit as eligible for continuation when the mission
   is still active and budget remains
 
 Completion criteria:
 
 - [ ] Mission Control can drive a real Codex run without importing WeChat code
 - [ ] Stop/retry behavior remains chat-visible through CodexBridge integration
+
+Phase 4 source-of-truth tests:
+
+- `packages/mission-control/test/provider_and_codex_adapter.test.ts`
+  - `provider helpers persist provider ids on attempts and map terminal outcomes into mission states`
+  - `continuation scheduling only applies to active missions with remaining budget`
+  - `CodexMissionProvider reuses provider profile, thread binding, and workspace assignment safely`
 
 ## Phase 5: Verification Loop
 
@@ -347,7 +354,7 @@ Completion criteria:
   - stop
   - retry
   - result
-- [ ] Keep WeChat as the first-class notification/control surface
+- [ ] Keep CodexBridge WeChat as the first-class notification/control surface
 - [ ] Preserve current user-facing behavior as much as possible during migration
 
 Completion criteria:
@@ -397,5 +404,5 @@ Mission Control is ready for broader extraction when:
 - [ ] Restart recovery works for queued/running/verifying missions
 - [ ] `/agent` and `/auto` both use the same mission runtime
 - [ ] The package has no imports from platform/runtime/i18n command code
-- [ ] A later Telegram or web surface can integrate without changing mission
+- [ ] A later Telegram, web, or other host surface can integrate without changing mission
   core behavior

@@ -1,10 +1,13 @@
 # Mission Control
 
-Mission Control is the next orchestration layer above CodexBridge chat commands.
+Mission Control is a general-purpose orchestration runtime for long-running
+agent work.
 It should turn user intent, schedules, and tracker items into observable Codex
 work runs instead of treating every request as an isolated chat turn.
+CodexBridge is the first embedding host and control surface, not the long-term
+product boundary of the runtime itself.
 
-This design follows the parts of OpenAI Symphony that fit CodexBridge:
+This design follows the parts of OpenAI Symphony that fit a Codex-first runtime:
 
 - a repository-owned workflow contract
 - isolated workspaces for long-running work
@@ -53,12 +56,12 @@ Reference stack to study and map into this design:
     heartbeat recovery, checkpoint/workpad seed ideas
 
 These projects are references only. Mission Control should not vendor their
-runtime code blindly. The product goal is still a CodexBridge-native,
-goal-driven runtime.
+runtime code blindly. The product goal is a provider-pluggable, goal-driven
+runtime for agent-class executors, with Codex as the first concrete provider.
 
 ## Product Goal
 
-Mission Control should let a WeChat user say:
+Mission Control should support a surface like CodexBridge letting a user say:
 
 ```text
 /agent 帮我修复 CodexBridge 微信 preview 卡死问题，完成后给我测试结果
@@ -75,8 +78,9 @@ and get a managed work item with:
 - retry / stop / delete controls
 - final delivery through the normal CodexBridge SendGate
 
-The user should not need to understand Linear, GitHub, worktrees, app-server
-protocols, or artifact manifests to operate the system.
+The operator should not need to understand Linear, GitHub, worktrees,
+app-server protocols, or artifact manifests to operate the system. Mission
+Control should remain reusable from other control surfaces besides WeChat.
 
 ## What Symphony Contributes
 
@@ -97,8 +101,8 @@ Patterns not copied directly:
 - Linear-only issue polling as the only input source.
 - Elixir/OTP implementation details.
 - PR landing workflow as the only successful outcome.
-- No rich UI. CodexBridge needs a chat-first status surface, and may later add a
-  web control plane.
+- No rich UI. The runtime should be UI-agnostic; CodexBridge can remain the
+  first chat-first status surface and may later add a web control plane.
 
 ## Symphony Essence To Preserve
 
@@ -130,8 +134,8 @@ The most important parts to preserve are:
    - A provider run can end normally and still require continuation.
    - Retry policy must cover both failure retries and continuation retries.
 6. Success can be a handoff state, not only a terminal done state.
-   - For CodexBridge, `needs_human`, `waiting_approval`, and similar mission
-     outcomes should be first-class states, not awkward failures.
+   - For Mission Control, `needs_human`, `waiting_approval`, and similar
+     mission outcomes should be first-class states, not awkward failures.
 7. Status surfaces observe the orchestrator; they do not own execution.
    - WeChat, Telegram, CLI, and any future web page should expose state and
      controls, but not become the place where run ownership actually lives.
@@ -183,14 +187,14 @@ The route should be:
    `CodexMissionProvider`.
 4. Use `LangGraph.js`, `Inngest`, and `DBOS` as references for durability,
    resumability, leases, and restart recovery.
-5. Converge all of that into one provider-pluggable internal package:
+5. Converge all of that into one provider-pluggable package:
    `@codexbridge/mission-control`.
 
 One-sentence summary:
 
 - Symphony answers: "how should long-running agent work be orchestrated?"
-- Mission Control answers: "how does CodexBridge productize that orchestration
-  as a reusable runtime?"
+- Mission Control answers: "how do we productize that orchestration as a
+  reusable runtime for Codex-class agents?"
 
 ## Required Layering
 
@@ -213,10 +217,10 @@ portable:
    - verifier
    - lifecycle hooks
 5. `Status Surface Layer`
-   - WeChat `/agent`
-   - `/auto`
+   - CodexBridge WeChat `/agent`
+   - CodexBridge `/auto`
    - CLI
-   - future Telegram / web views
+   - future Telegram / web / API adapters
 
 If Mission Control starts collapsing these layers back into command handlers or
 platform runtime code, it is drifting away from Symphony's core value.
@@ -301,8 +305,8 @@ behind them.
 ## Product Shape
 
 Mission Control should be developed **inside** the CodexBridge repository first,
-but it should still be treated as an internal package with a stable ownership
-boundary:
+but it should still be treated as a package with a stable ownership boundary so
+it can later serve non-CodexBridge control surfaces:
 
 ```text
 packages/mission-control/
@@ -332,13 +336,15 @@ This means:
   workspace or multi-package release flow yet.
 - The first public-facing product can still be `/agent` and `/auto`; package
   extraction is an implementation boundary, not a UX change.
+- The long-term runtime target is broader than CodexBridge, even if the first
+  host remains CodexBridge.
 
 ## Core Product Definition
 
 Mission Control is not "a dashboard for Codex sessions". It is a
 goal-driven execution runtime.
 
-The target user experience is:
+The target runtime experience is:
 
 1. The user gives one goal.
 2. Mission Control turns it into a bounded mission.
@@ -356,6 +362,7 @@ The system should therefore optimize for:
 - resumability after restart or disconnect
 - human-visible status and control
 - provider-pluggable execution
+- host/surface independence
 
 ## Target Architecture
 
@@ -363,13 +370,13 @@ The system should therefore optimize for:
 
 Mission sources normalize incoming work into the same domain model.
 
-Initial sources:
+Initial control surfaces and sources:
 
-- WeChat slash commands: `/agent`, `/auto`, future `/mission`
+- CodexBridge slash commands: `/agent`, `/auto`, future `/mission`
 - assistant records: todos/reminders promoted to work
 - local scheduled automation
 
-Later sources:
+Later surfaces and sources:
 
 - GitHub issues
 - Linear issues
@@ -653,7 +660,8 @@ Rules:
 ### 5. Workpad
 
 Each mission needs a single persistent workpad. This is the equivalent of
-Symphony's issue comment, adapted for WeChat.
+Symphony's issue comment, adapted first for CodexBridge chat surfaces and later
+for other hosts.
 
 The workpad should store:
 
@@ -671,8 +679,8 @@ Rendering rules:
 - `/agent show <n>` or future `/mission show <n>` shows the compact workpad.
 - `/agent result <n>` shows only the final result text.
 - `/agent result <n> file` exports full result as `.txt`.
-- WeChat auto-delivery should send concise progress and final summaries, not the
-  entire workpad unless requested.
+- Host adapters such as CodexBridge WeChat delivery should send concise
+  progress and final summaries, not the entire workpad unless requested.
 
 ### 5.5 Verification Contract
 
@@ -853,8 +861,10 @@ should not own mission state.
 
 ### Phase 5: Add control adapters and external sources
 
-- Keep WeChat as the first control and notification surface.
+- Keep CodexBridge WeChat as the first control and notification surface.
 - Add a clean integration path for `/auto` and future Telegram reuse.
+- Keep the runtime host-agnostic so other surfaces can embed it without
+  changing mission core behavior.
 - GitHub issues first if GitHub auth is available.
 - Linear second, because Symphony already proves the shape.
 - Only after chat control is solid, add a read/write web control plane against
@@ -882,5 +892,5 @@ The immediate useful next step is not copying Symphony's Elixir code. It is:
 6. Add `packages/mission-control` as the internal runtime boundary before
    attempting a broader npm extraction.
 
-That gives CodexBridge the core Mission Control behavior while keeping WeChat as
-the primary control surface.
+That gives Mission Control a real Codex-first runtime while keeping CodexBridge
+as the primary initial control surface.
