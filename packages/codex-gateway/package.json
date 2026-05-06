@@ -11,12 +11,16 @@
     },
     "./package.json": "./package.json"
   },
+  "bin": {
+    "codex-gateway-server": "./dist/cli.js"
+  },
   "files": [
     "dist",
     "README.md"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "serve": "node ./dist/cli.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test test/*.test.ts"
   },

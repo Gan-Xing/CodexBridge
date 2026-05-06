@@ -23,6 +23,7 @@ test('codex gateway package exposes the migration boundary contract', () => {
 test('codex gateway package metadata stays internal-only while the boundary stabilizes', () => {
   const packageJsonPath = path.resolve(import.meta.dirname, '../package.json');
   const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8')) as {
+    bin?: Record<string, string>;
     private?: boolean;
     exports?: Record<string, unknown>;
     files?: string[];
@@ -30,6 +31,7 @@ test('codex gateway package metadata stays internal-only while the boundary stab
 
   assert.equal(packageJson.private, true);
   assert.deepEqual(Object.keys(packageJson.exports ?? {}).sort(), ['.', './package.json']);
+  assert.equal(packageJson.bin?.['codex-gateway-server'], './dist/cli.js');
   assert.deepEqual(packageJson.files, ['dist', 'README.md']);
 });
 
@@ -37,6 +39,7 @@ test('codex gateway package metadata and build layout stay aligned', () => {
   const packageJsonPath = path.resolve(import.meta.dirname, '../package.json');
   const tsconfigPath = path.resolve(import.meta.dirname, '../tsconfig.json');
   const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8')) as {
+    bin?: Record<string, string>;
     exports?: Record<string, { types?: string; default?: string } | string>;
     files?: string[];
   };
@@ -48,5 +51,6 @@ test('codex gateway package metadata and build layout stay aligned', () => {
   assert.equal(tsconfig.compilerOptions?.outDir, 'dist');
   assert.equal((packageJson.exports?.['.'] as { types?: string })?.types, './dist/index.d.ts');
   assert.equal((packageJson.exports?.['.'] as { default?: string })?.default, './dist/index.js');
+  assert.equal(packageJson.bin?.['codex-gateway-server'], './dist/cli.js');
   assert.deepEqual(packageJson.files, ['dist', 'README.md']);
 });

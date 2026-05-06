@@ -257,6 +257,7 @@ Current Phase 5 decision:
 - keep `@codexbridge/codex-gateway` internal-only (`private: true`) for now
 - keep the package export surface minimal while live-provider coverage and CodexBridge integration contracts are still settling
 - keep package-local build output under `packages/codex-gateway/dist` so `package.json` exports and files describe real artifacts
+- allow an internal-only standalone launcher for the local `/v1/responses` adapter server, as long as it stays inside the package boundary and does not pull bridge runtime concerns back in
 - only revisit publication after the protocol boundary is demonstrably stable
 
 Target dependency direction:

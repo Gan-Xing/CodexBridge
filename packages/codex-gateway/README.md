@@ -9,6 +9,41 @@ Current release policy:
 - keep package-local build output in `packages/codex-gateway/dist` so `package.json` export paths describe real artifacts
 - only revisit npm publication after live-provider coverage and CodexBridge integration contracts are stable
 
+## Internal standalone server
+
+This package now includes an internal-only launcher for the local Responses
+adapter server. Build the package, then run:
+
+```bash
+pnpm --dir packages/codex-gateway run serve
+```
+
+or:
+
+```bash
+node packages/codex-gateway/dist/cli.js
+```
+
+Supported env knobs:
+
+- `CODEX_GATEWAY_CAPABILITY_PRESET`
+- `CODEX_GATEWAY_API_KEY`
+- `CODEX_GATEWAY_BASE_URL`
+- `CODEX_GATEWAY_MODEL`
+- `CODEX_GATEWAY_HOST`
+- `CODEX_GATEWAY_PORT`
+- `CODEX_GATEWAY_PROVIDER_NAME`
+- `CODEX_GATEWAY_PROVIDER_KIND`
+- `CODEX_GATEWAY_OWNED_BY`
+- `CODEX_GATEWAY_UPSTREAM_CHAT_PATH`
+- `CODEX_GATEWAY_CAPABILITY_OVERRIDES_JSON`
+- `CODEX_GATEWAY_MODEL_CATALOG_JSON`
+- `CODEX_GATEWAY_MODEL_CATALOG_PATH`
+
+Preset-native envs such as `OPENROUTER_*`, `DEEPSEEK_*`, `MINIMAX_*`, `QWEN_*`,
+and the Qwen/DashScope aliases are also accepted as fallbacks for API key/base
+URL/model resolution.
+
 Immutable target:
 
 > `@codexbridge/codex-gateway` lets Codex run on non-OpenAI and

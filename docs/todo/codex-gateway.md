@@ -62,7 +62,7 @@ Avoid frequent edits here unless the change is truly cross-cutting:
 
 ## Current Active Focus
 
-- [ ] Finish live-provider smoke coverage for OpenRouter once credentials are available
+- [x] Stop treating OpenRouter live smoke as an active Phase 4 blocker; defer it until credentials are available again
 - [x] Keep new provider onboarding config-first and capability-driven instead of adding one-off provider classes
 - [x] Keep package ownership strictly at protocol/gateway level
 - [x] Decide whether Phase 5 should remain internal-only or move toward publishable package form
@@ -79,6 +79,8 @@ Latest progress:
 - [x] `scripts/check-codex-gateway-boundary.mjs` now enforces that legacy bridge-side shim files stay pure re-exports into `packages/codex-gateway`
 - [x] Package public-surface tests now lock `@codexbridge/codex-gateway` to an internal-only release channel (`private: true` + minimal exports/files) until the API boundary and live-provider matrix are stable
 - [x] Package `tsconfig` now emits into `packages/codex-gateway/dist`, and public-surface tests lock that build layout to the `package.json` exports/files contract
+- [x] OpenRouter live smoke is no longer treated as a current phase blocker; it is deferred until credentials are available again
+- [x] `codex-gateway` now ships an internal-only standalone server launcher that can boot the local `/v1/responses` adapter directly from env, without pulling in CodexBridge runtime code
 
 ## Packaging Direction
 
@@ -97,6 +99,7 @@ Rules:
 - Legacy CodexBridge provider paths may remain re-export shims during migration
 - Phase 5 decision on 2026-05-06: keep the package internal-only for now; do not widen npm/public surface until live-provider coverage and integration contracts are stable
 - Keep package-local build output aligned with `package.json` exports/files so the internal package can still be consumed exactly as declared
+- Standalone server launch is allowed as an internal validation/tooling aid, but it is still not positioned as a public gateway product
 
 ## Migration Plan
 
@@ -189,13 +192,14 @@ Frozen migration surface:
 - [x] Profile-based live smoke harness verification run on 2026-05-06: default test path skips safely; gated path also skips when current shell has no DeepSeek, MiniMax, Qwen/DashScope, or OpenRouter profile env
 - [x] Added `CODEXBRIDGE_TEST_ENV_FILE` support to the test runner so gated live tests can load a service env file without printing secrets
 - [x] Live profile smoke run on 2026-05-06 with `/home/ubuntu/.config/codexbridge/weixin.service.env`: DeepSeek, MiniMax, and Qwen passed through real CodexBridge profiles
-- [ ] Live provider smoke remains pending for OpenRouter until credentials are available
+- [x] OpenRouter live smoke is explicitly deferred because credentials will not be provided in the near term; Phase 4 now closes with DeepSeek, MiniMax, and Qwen verified
 
 ### Phase 5: Publish decision
 
 - [x] Decide whether to publish as `@codexbridge/codex-gateway`; keep it private/internal until the API boundary is stable
 - [x] Keep package metadata and package-local build output aligned so `exports` and `files` point at real artifacts
-- [ ] Optionally add a standalone HTTP proxy binary only after the package is stable. The first product target remains CodexBridge integration, not a public gateway
+- [x] Add an internal-only standalone launcher for the local `/v1/responses` adapter server without widening the package into a public gateway product
+- [ ] If publication ever becomes a goal later, decide whether to promote the standalone launcher into a supported standalone HTTP proxy binary
 
 ## Reference Usage
 
