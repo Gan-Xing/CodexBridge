@@ -89,8 +89,23 @@ test('adapter server exposes model metadata from package boundary', async () => 
       capabilities: {
         tools: true,
         vision: false,
+        reasoning: {
+          supportedReasoningEfforts: ['low', 'high'],
+          defaultReasoningEffort: 'high',
+        },
+        parallelToolCalls: false,
+        maxOutputTokens: 4096,
       },
     }],
+    providerCapabilities: {
+      supportsBuiltinWebSearchTool: false,
+      supportsResponsesCompact: false,
+      multimodal: {
+        supportsImageInput: true,
+        supportsFileInput: false,
+        unsupportedInputPartStrategy: 'text-placeholder',
+      },
+    },
   });
 
   await server.start();
@@ -107,6 +122,43 @@ test('adapter server exposes model metadata from package boundary', async () => 
     assert.deepEqual(body.data[0].capabilities, {
       tools: true,
       vision: false,
+      reasoning: {
+        supportedReasoningEfforts: ['low', 'high'],
+        defaultReasoningEffort: 'high',
+      },
+      parallelToolCalls: false,
+      maxOutputTokens: 4096,
+    });
+    assert.deepEqual(body.data[0].protocol, {
+      tools: {
+        supported: true,
+        builtinWebSearch: false,
+        parallelToolCalls: false,
+      },
+      multimodal: {
+        imageInput: false,
+        imageUrlInput: null,
+        imageBase64Input: null,
+        fileInput: false,
+        fileDataInput: null,
+        fileIdInput: null,
+        fileUrlInput: null,
+        unsupportedInputPartStrategy: 'text-placeholder',
+      },
+      reasoning: {
+        supported: true,
+        supportedReasoningEfforts: ['low', 'high'],
+        defaultReasoningEffort: 'high',
+      },
+      structuredOutput: {
+        jsonSchema: true,
+      },
+      responses: {
+        supportsCompact: false,
+      },
+      limits: {
+        maxOutputTokens: 4096,
+      },
     });
   } finally {
     await server.stop();

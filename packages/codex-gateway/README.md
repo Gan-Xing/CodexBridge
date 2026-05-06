@@ -78,6 +78,12 @@ This package owns only protocol behavior:
 - a local Responses adapter server with `/responses` and `/v1/responses`
   compatibility routes
 
+The package `/models` and `/v1/models` output now preserves raw catalog
+metadata such as `contextWindow`, `pricing`, and model `capabilities`, and
+also exposes a normalized `protocol` block for effective adapter behavior such
+as tools, web search, multimodal input, reasoning support, compact support,
+structured output, and output-token limits.
+
 It must not own bridge behavior:
 
 - WeChat or Telegram transports

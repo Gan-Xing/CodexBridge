@@ -6,7 +6,10 @@ import {
   responsesRequestToChatCompletions,
   translateChatCompletionsSseStreamToResponsesSse,
 } from '../converters/responses_adapter.js';
-import type {
+import {
+  getProviderThinkingSupport,
+  resolveOpenAICompatibleProviderCapabilitiesForModel,
+  type OpenAICompatibleModelCapabilities,
   OpenAICompatibleProviderCapabilities,
   OpenAICompatibleRetryCapabilities,
 } from '../capabilities/thinking_policy.js';
@@ -90,7 +93,13 @@ export class OpenAICompatibleResponsesAdapterServer {
       : null;
     this.upstreamChatCompletionsPath = normalizePath(upstreamChatCompletionsPath) || '/chat/completions';
     this.ownedBy = normalizeString(ownedBy) || this.providerKind;
-    this.models = normalizeModels(models, this.defaultModel, this.ownedBy);
+    this.models = normalizeModels(
+      models,
+      this.defaultModel,
+      this.ownedBy,
+      this.providerKind,
+      this.providerCapabilities,
+    );
     this.fetchImpl = fetchImpl;
     this.host = host;
     this.requestedPort = port;
@@ -459,6 +468,8 @@ function normalizeModels(
   models: OpenAICompatibleResponsesAdapterServerOptions['models'],
   defaultModel: string,
   ownedBy: string,
+  providerKind: string,
+  providerCapabilities: OpenAICompatibleProviderCapabilities | null,
 ) {
   const now = Math.floor(Date.now() / 1000);
   const entries = (Array.isArray(models) ? models : [])
@@ -474,6 +485,12 @@ function normalizeModels(
         object: normalizeString(model?.object) || 'model',
         created: Number.isFinite(Number(model?.created)) ? Number(model.created) : now,
         owned_by: normalizeString(model?.owned_by) || ownedBy,
+        protocol: buildProtocolMetadataForModel({
+          modelId: id,
+          modelEntry: model,
+          providerKind,
+          providerCapabilities,
+        }),
       };
     })
     .filter(Boolean);
@@ -493,7 +510,93 @@ function normalizeModels(
     object: 'model',
     created: now,
     owned_by: ownedBy,
+    protocol: buildProtocolMetadataForModel({
+      modelId: defaultModel,
+      modelEntry: null,
+      providerKind,
+      providerCapabilities,
+    }),
   }];
+}
+
+function buildProtocolMetadataForModel({
+  modelId,
+  modelEntry,
+  providerKind,
+  providerCapabilities,
+}: {
+  modelId: string;
+  modelEntry: Record<string, any> | null | undefined;
+  providerKind: string;
+  providerCapabilities: OpenAICompatibleProviderCapabilities | null;
+}): JsonRecord {
+  const modelCapabilities = modelEntry?.capabilities && typeof modelEntry.capabilities === 'object'
+    ? modelEntry.capabilities as OpenAICompatibleModelCapabilities
+    : null;
+  const effectiveCapabilities = resolveOpenAICompatibleProviderCapabilitiesForModel(
+    modelCapabilities
+      ? {
+        ...(providerCapabilities ?? {}),
+        modelCapabilities: {
+          ...(providerCapabilities?.modelCapabilities ?? {}),
+          [modelId]: modelCapabilities,
+        },
+      }
+      : providerCapabilities,
+    modelId,
+  );
+  const reasoning = getProviderThinkingSupport(providerKind, effectiveCapabilities);
+  const multimodal = effectiveCapabilities?.multimodal ?? null;
+
+  return {
+    tools: {
+      supported: effectiveCapabilities?.supportsTools !== false,
+      builtinWebSearch: effectiveCapabilities?.supportsBuiltinWebSearchTool !== false,
+      parallelToolCalls: typeof modelCapabilities?.parallelToolCalls === 'boolean'
+        ? modelCapabilities.parallelToolCalls
+        : !payloadBlocksPath(effectiveCapabilities?.payload, 'parallel_tool_calls'),
+    },
+    multimodal: {
+      imageInput: normalizeNullableBoolean(multimodal?.supportsImageInput),
+      imageUrlInput: normalizeNullableBoolean(multimodal?.supportsImageUrlInput),
+      imageBase64Input: normalizeNullableBoolean(multimodal?.supportsImageBase64Input),
+      fileInput: normalizeNullableBoolean(multimodal?.supportsFileInput),
+      fileDataInput: normalizeNullableBoolean(multimodal?.supportsFileDataInput),
+      fileIdInput: normalizeNullableBoolean(multimodal?.supportsFileIdInput),
+      fileUrlInput: normalizeNullableBoolean(multimodal?.supportsFileUrlInput),
+      unsupportedInputPartStrategy: normalizeString(multimodal?.unsupportedInputPartStrategy) || null,
+    },
+    reasoning: {
+      supported: reasoning.supportedReasoningEfforts.length > 0,
+      supportedReasoningEfforts: reasoning.supportedReasoningEfforts,
+      defaultReasoningEffort: reasoning.defaultReasoningEffort,
+    },
+    structuredOutput: {
+      jsonSchema: typeof modelCapabilities?.jsonSchema === 'boolean'
+        ? modelCapabilities.jsonSchema
+        : !payloadBlocksPath(effectiveCapabilities?.payload, 'response_format'),
+    },
+    responses: {
+      supportsCompact: effectiveCapabilities?.supportsResponsesCompact === true,
+    },
+    limits: {
+      maxOutputTokens: normalizePositiveNumber(modelCapabilities?.maxOutputTokens),
+    },
+  };
+}
+
+function payloadBlocksPath(
+  payload: OpenAICompatibleProviderCapabilities['payload'] | null | undefined,
+  path: string,
+): boolean {
+  const normalizedPath = normalizeString(path);
+  if (!normalizedPath) {
+    return false;
+  }
+  return Boolean(payload?.filter?.some((rule) => (
+    Array.isArray(rule?.paths)
+    && rule.paths.some((entry) => normalizeString(entry) === normalizedPath)
+  )));
 }
 
 function resolveModelMetadata(
@@ -738,6 +841,15 @@ function clampInteger(value: unknown, min: number, max: number, fallback: number
 
 function normalizeString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
+}
+
+function normalizePositiveNumber(value: unknown): number | null {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
+function normalizeNullableBoolean(value: unknown): boolean | null {
+  return typeof value === 'boolean' ? value : null;
 }
 
 function normalizePath(value: unknown): string {

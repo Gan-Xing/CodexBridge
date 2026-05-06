@@ -424,15 +424,16 @@ function convertModelCapabilitiesToProviderCapabilities(
     overrides.supportsBuiltinWebSearchTool = Boolean(modelCapabilities.webSearch);
   }
   if (modelCapabilities.vision !== undefined || modelCapabilities.fileInput !== undefined || modelCapabilities.multimodal) {
-    overrides.multimodal = {
+    const multimodalOverrides: OpenAICompatibleMultimodalCapabilities = {
       ...(modelCapabilities.multimodal ?? {}),
-      supportsImageInput: modelCapabilities.vision === undefined
-        ? modelCapabilities.multimodal?.supportsImageInput
-        : Boolean(modelCapabilities.vision),
-      supportsFileInput: modelCapabilities.fileInput === undefined
-        ? modelCapabilities.multimodal?.supportsFileInput
-        : Boolean(modelCapabilities.fileInput),
     };
+    if (modelCapabilities.vision !== undefined) {
+      multimodalOverrides.supportsImageInput = Boolean(modelCapabilities.vision);
+    }
+    if (modelCapabilities.fileInput !== undefined) {
+      multimodalOverrides.supportsFileInput = Boolean(modelCapabilities.fileInput);
+    }
+    overrides.multimodal = multimodalOverrides;
   }
   if (modelCapabilities.reasoning === false) {
     overrides.thinking = {
