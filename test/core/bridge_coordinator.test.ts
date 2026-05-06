@@ -10604,6 +10604,56 @@ test('/auto cancel clears the pending automation draft', async () => {
   assert.match(confirmed.messages[0]?.text ?? '', /当前没有待确认的自动化草案/);
 });
 
+test('/auto scheduled runs delegate into Mission Control and persist automation mission state', async () => {
+  const { runtime, openai } = makeRuntime({
+    defaultCwd: '/tmp/codexbridge-auto-mission-run',
+  });
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-mission-run',
+    text: '/auto add every 30m | 检查部署状态并发给我',
+  });
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-mission-run',
+    text: '/auto confirm',
+  });
+
+  const [job] = runtime.services.automationJobs.listForScope({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-mission-run',
+  });
+  assert.ok(job);
+
+  openai.startTurn = async ({ bridgeSession, onTurnStarted }) => {
+    const turnId = `${bridgeSession.codexThreadId}-turn-auto-mission-1`;
+    await onTurnStarted?.({
+      turnId,
+      threadId: bridgeSession.codexThreadId,
+    });
+    return {
+      outputText: '部署状态正常，未发现异常。',
+      turnId,
+      threadId: bridgeSession.codexThreadId,
+      title: bridgeSession.title,
+    };
+  };
+
+  const response = await runtime.services.bridgeCoordinator.runAutomationJob(job);
+  const liveJob = runtime.services.automationJobs.getById(job.id);
+  const mission = liveJob?.missionRuntimeState?.mission as Record<string, unknown> | null | undefined;
+
+  assert.match(response.messages[0]?.text ?? '', /部署状态正常，未发现异常/);
+  assert.equal(mission?.status, 'completed');
+  assert.equal(liveJob?.missionAttemptHistory?.length, 1);
+  assert.equal(liveJob?.missionAttemptHistory?.[0]?.status, 'completed');
+  assert.equal(
+    liveJob?.missionWorkpadLatestVerifierSummary,
+    'Scheduled automation produced a deliverable result.',
+  );
+});
+
 test('ordinary messages after /stop do not eagerly resume the thread when startTurn succeeds', async () => {
   const { runtime, openai } = makeRuntime();
 

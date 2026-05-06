@@ -58,6 +58,12 @@ export class AutomationJobService {
       .sort((left, right) => left.createdAt - right.createdAt);
   }
 
+  listAllJobs(): AutomationJob[] {
+    return this.automationJobs
+      .list()
+      .sort((left, right) => left.createdAt - right.createdAt);
+  }
+
   getById(id: string): AutomationJob | null {
     return this.automationJobs.getById(id);
   }
@@ -117,6 +123,13 @@ export class AutomationJobService {
       lastDeliveredAt: null,
       lastResultPreview: null,
       lastError: null,
+      missionWorkflowPath: null,
+      missionWorkflowSourceLabel: null,
+      missionWorkpadLatestBlocker: null,
+      missionWorkpadLatestVerifierSummary: null,
+      missionWorkpadFinalResultSummary: null,
+      missionAttemptHistory: [],
+      missionRuntimeState: null,
       createdAt: now,
       updatedAt: now,
     };

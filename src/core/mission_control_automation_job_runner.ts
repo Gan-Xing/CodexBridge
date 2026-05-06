@@ -14,31 +14,21 @@ import {
   type MissionProviderResult,
   type MissionRepository,
   type MissionRunResult,
-  type MissionStatus,
   type MissionVerifier,
   type MissionVerifierResult,
 } from '../../packages/mission-control/src/index.js';
-import { AgentJobService } from './agent_job_service.js';
+import { AutomationJobService } from './automation_job_service.js';
 import type {
-  AgentJob,
-  AgentJobAttemptHistoryEntry,
-  AgentJobMissionRuntimeState,
-  AgentJobStatus,
+  AutomationJob,
   BridgeSession,
+  MissionAttemptHistoryEntry,
+  MissionRuntimeStateSnapshot,
   PlatformScopeRef,
-  TurnArtifactDeliveredItem,
 } from '../types/core.js';
 import type { OutputArtifact, ProviderApprovalRequest, ProviderTurnProgress } from '../types/provider.js';
 
 type ProgressHandler = ((progress: ProviderTurnProgress) => Promise<void> | void) | null;
 type ApprovalHandler = ((request: ProviderApprovalRequest) => Promise<void> | void) | null;
-
-type AgentVerificationResultLike = {
-  pass: boolean;
-  summary: string;
-  issues: string[];
-  nextAction: 'complete' | 'retry' | 'fail';
-};
 
 type BridgeMissionTurnResult = {
   result: {
@@ -56,16 +46,16 @@ type BridgeMissionTurnResult = {
   session: BridgeSession;
 };
 
-type MissionControlAgentJobRunProgressText = {
+type MissionControlAutomationJobRunProgressText = {
   running: (attempt: number, maxAttempts: number) => string;
   verifying: () => string;
   retrying: () => string;
 };
 
-export interface RunAgentJobWithMissionControlOptions {
-  job: AgentJob;
-  agentJobs: AgentJobService;
-  resolveSession: (job: AgentJob) => BridgeSession | null;
+export interface RunAutomationJobWithMissionControlOptions {
+  job: AutomationJob;
+  automationJobs: AutomationJobService;
+  resolveSession: (job: AutomationJob) => BridgeSession | null;
   startTurnWithRecovery: (
     scopeRef: PlatformScopeRef,
     session: BridgeSession,
@@ -84,20 +74,15 @@ export interface RunAgentJobWithMissionControlOptions {
     },
   ) => Promise<BridgeMissionTurnResult>;
   stopSession: (scopeRef: PlatformScopeRef, session: BridgeSession) => Promise<void>;
-  verifyJob: (
-    job: AgentJob,
-    result: BridgeMissionTurnResult['result'],
-    session: BridgeSession | null,
-  ) => Promise<AgentVerificationResultLike>;
-  progressText: MissionControlAgentJobRunProgressText;
+  progressText?: Partial<MissionControlAutomationJobRunProgressText>;
   now?: () => number;
   onProgress?: ProgressHandler;
   onApprovalRequest?: ApprovalHandler;
 }
 
-export interface MissionControlAgentJobRunOutput {
+export interface MissionControlAutomationJobRunOutput {
   runResult: MissionRunResult;
-  finalJob: AgentJob;
+  finalJob: AutomationJob;
   finalSession: BridgeSession | null;
   finalBridgeResult: BridgeMissionTurnResult['result'] | null;
 }
@@ -112,11 +97,11 @@ type BridgeMissionExecutionRecord = BridgeMissionTurnResult & {
   normalizedResult: MissionProviderResult;
 };
 
-export async function runAgentJobWithMissionControl(
-  options: RunAgentJobWithMissionControlOptions,
-): Promise<MissionControlAgentJobRunOutput> {
+export async function runAutomationJobWithMissionControl(
+  options: RunAutomationJobWithMissionControlOptions,
+): Promise<MissionControlAutomationJobRunOutput> {
   const now = options.now ?? (() => Date.now());
-  const repository = new AgentJobMissionRepository(options.agentJobs, now);
+  const repository = new AutomationJobMissionRepository(options.automationJobs);
   const scopeRef = {
     platform: options.job.platform,
     externalScopeId: options.job.externalScopeId,
@@ -129,9 +114,9 @@ export async function runAgentJobWithMissionControl(
     now,
   });
   const syncBridgeSession = (nextSession: BridgeSession) => {
-    const currentJob = options.agentJobs.getById(options.job.id);
+    const currentJob = options.automationJobs.getById(options.job.id);
     if (currentJob && currentJob.bridgeSessionId !== nextSession.id) {
-      options.agentJobs.updateJob(currentJob.id, {
+      options.automationJobs.updateJob(currentJob.id, {
         bridgeSessionId: nextSession.id,
       });
     }
@@ -151,24 +136,25 @@ export async function runAgentJobWithMissionControl(
       });
     }
   };
+  const progressText: MissionControlAutomationJobRunProgressText = {
+    running: options.progressText?.running ?? (() => ''),
+    verifying: options.progressText?.verifying ?? (() => ''),
+    retrying: options.progressText?.retrying ?? (() => ''),
+  };
   const provider = new BridgeMissionProvider({
     jobId: options.job.id,
     scopeRef,
-    resolveJob: () => options.agentJobs.getById(options.job.id) ?? options.job,
-    resolveSession: () => options.resolveSession(options.agentJobs.getById(options.job.id) ?? options.job),
+    resolveJob: () => options.automationJobs.getById(options.job.id) ?? options.job,
+    resolveSession: () => options.resolveSession(options.automationJobs.getById(options.job.id) ?? options.job),
     startTurnWithRecovery: options.startTurnWithRecovery,
     stopSession: options.stopSession,
-    progressText: options.progressText,
+    progressText,
     onProgress: options.onProgress ?? null,
     onApprovalRequest: options.onApprovalRequest ?? null,
     syncBridgeSession,
   });
   const verifier = new BridgeMissionVerifier({
-    jobId: options.job.id,
-    agentJobs: options.agentJobs,
-    provider,
-    verifyJob: options.verifyJob,
-    progressText: options.progressText,
+    progressText,
     onProgress: options.onProgress ?? null,
   });
 
@@ -179,11 +165,11 @@ export async function runAgentJobWithMissionControl(
     now,
   });
   const runResult = await runtime.runMission(mission.id, {
-    ownerId: `agent-job:${options.job.id}`,
+    ownerId: `automation-job:${options.job.id}`,
     readOnly: true,
     allowSharedCwd: true,
   });
-  const finalJob = options.agentJobs.getById(options.job.id) ?? options.job;
+  const finalJob = options.automationJobs.getById(options.job.id) ?? options.job;
   const finalRunId = runResult.attempt?.providerRunId ?? null;
   const finalExecution = finalRunId ? provider.getExecutionRecord(finalRunId) : provider.getLastExecutionRecord();
 
@@ -195,19 +181,18 @@ export async function runAgentJobWithMissionControl(
   };
 }
 
-class AgentJobMissionRepository implements MissionRepository {
+class AutomationJobMissionRepository implements MissionRepository {
   constructor(
-    private readonly agentJobs: AgentJobService,
-    private readonly now: () => number,
+    private readonly automationJobs: AutomationJobService,
   ) {}
 
   getMissionById(id: string): Mission | null {
-    const job = this.agentJobs.getById(id);
+    const job = this.automationJobs.getById(id);
     return job ? loadMissionRuntimeState(job).mission : null;
   }
 
   listMissions(): Mission[] {
-    return this.agentJobs
+    return this.automationJobs
       .listAllJobs()
       .map((job) => loadMissionRuntimeState(job).mission)
       .filter(Boolean) as Mission[];
@@ -218,7 +203,7 @@ class AgentJobMissionRepository implements MissionRepository {
   }
 
   saveMission(mission: Mission): Mission {
-    const currentJob = this.agentJobs.requireById(mission.id);
+    const currentJob = this.automationJobs.requireById(mission.id);
     const currentState = loadMissionRuntimeState(currentJob);
     const nextState: MissionRuntimeState = {
       ...currentState,
@@ -229,7 +214,7 @@ class AgentJobMissionRepository implements MissionRepository {
   }
 
   getAttemptById(id: string): MissionAttempt | null {
-    for (const job of this.agentJobs.listAllJobs()) {
+    for (const job of this.automationJobs.listAllJobs()) {
       const state = loadMissionRuntimeState(job);
       const attempt = state.attempts.find((entry) => entry.id === id);
       if (attempt) {
@@ -240,12 +225,12 @@ class AgentJobMissionRepository implements MissionRepository {
   }
 
   listAttempts(missionId: string): MissionAttempt[] {
-    const job = this.agentJobs.getById(missionId);
+    const job = this.automationJobs.getById(missionId);
     return job ? loadMissionRuntimeState(job).attempts : [];
   }
 
   saveAttempt(attempt: MissionAttempt): MissionAttempt {
-    const currentJob = this.agentJobs.requireById(attempt.missionId);
+    const currentJob = this.automationJobs.requireById(attempt.missionId);
     const currentState = loadMissionRuntimeState(currentJob);
     const nextState: MissionRuntimeState = {
       ...currentState,
@@ -256,12 +241,12 @@ class AgentJobMissionRepository implements MissionRepository {
   }
 
   listEvents(missionId: string): MissionEvent[] {
-    const job = this.agentJobs.getById(missionId);
+    const job = this.automationJobs.getById(missionId);
     return job ? loadMissionRuntimeState(job).events : [];
   }
 
   appendEvent(event: MissionEvent): MissionEvent {
-    const currentJob = this.agentJobs.requireById(event.missionId);
+    const currentJob = this.automationJobs.requireById(event.missionId);
     const currentState = loadMissionRuntimeState(currentJob);
     const nextState: MissionRuntimeState = {
       ...currentState,
@@ -272,7 +257,7 @@ class AgentJobMissionRepository implements MissionRepository {
   }
 
   resetMission(mission: Mission): Mission {
-    const currentJob = this.agentJobs.requireById(mission.id);
+    const currentJob = this.automationJobs.requireById(mission.id);
     this.persistState(currentJob, {
       mission: cloneValue(mission),
       attempts: [],
@@ -281,14 +266,14 @@ class AgentJobMissionRepository implements MissionRepository {
     return mission;
   }
 
-  private persistState(job: AgentJob, state: MissionRuntimeState): AgentJob {
-    const patch = buildAgentJobMissionPatch(job, state);
-    return this.agentJobs.updateJob(job.id, patch);
+  private persistState(job: AutomationJob, state: MissionRuntimeState): AutomationJob {
+    const patch = buildAutomationJobMissionPatch(job, state);
+    return this.automationJobs.updateJob(job.id, patch);
   }
 }
 
 class BridgeMissionProvider implements MissionProvider {
-  readonly kind = 'codexbridge-agent-job';
+  readonly kind = 'codexbridge-automation-job';
 
   private runCounter = 0;
 
@@ -301,11 +286,11 @@ class BridgeMissionProvider implements MissionProvider {
   constructor(private readonly options: {
     jobId: string;
     scopeRef: PlatformScopeRef;
-    resolveJob: () => AgentJob;
+    resolveJob: () => AutomationJob;
     resolveSession: () => BridgeSession | null;
-    startTurnWithRecovery: RunAgentJobWithMissionControlOptions['startTurnWithRecovery'];
-    stopSession: RunAgentJobWithMissionControlOptions['stopSession'];
-    progressText: MissionControlAgentJobRunProgressText;
+    startTurnWithRecovery: RunAutomationJobWithMissionControlOptions['startTurnWithRecovery'];
+    stopSession: RunAutomationJobWithMissionControlOptions['stopSession'];
+    progressText: MissionControlAutomationJobRunProgressText;
     onProgress: ProgressHandler;
     onApprovalRequest: ApprovalHandler;
     syncBridgeSession: (session: BridgeSession) => void;
@@ -346,7 +331,7 @@ class BridgeMissionProvider implements MissionProvider {
     const liveJob = this.options.resolveJob();
     const session = this.options.resolveSession();
     if (!session) {
-      throw new Error('Agent mission session is missing.');
+      throw new Error('Automation mission session is missing.');
     }
     if (!this.runningAttempts.has(input.attempt.id)) {
       this.runningAttempts.add(input.attempt.id);
@@ -363,15 +348,16 @@ class BridgeMissionProvider implements MissionProvider {
       {
         platform: input.mission.platform,
         externalScopeId: input.mission.externalScopeId,
-        text: buildAgentMissionExecutionPrompt(input.promptText, liveJob.locale),
+        text: buildAutomationMissionExecutionPrompt(input.promptText, liveJob.locale),
         cwd: liveJob.cwd ?? input.mission.cwd,
         locale: liveJob.locale,
         attachments: [],
         metadata: {
           codexbridge: {
             overrideBridgeSessionId: session.id,
-            agentJobId: this.options.jobId,
-            agentAttempt: input.attempt.index,
+            automationJobId: this.options.jobId,
+            automationMode: liveJob.mode,
+            automationAttempt: input.attempt.index,
             missionId: input.mission.id,
             missionAttemptId: input.attempt.id,
           },
@@ -386,7 +372,7 @@ class BridgeMissionProvider implements MissionProvider {
     const normalizedResult = normalizeBridgeMissionProviderResult(execution.result);
     const record: BridgeMissionExecutionRecord = {
       ...execution,
-      normalizedResult: normalizedResult.outcome === 'interrupted' && !liveJob.stopRequested
+      normalizedResult: normalizedResult.outcome === 'interrupted'
         ? {
           ...normalizedResult,
           outcome: 'completed',
@@ -414,54 +400,53 @@ class BridgeMissionProvider implements MissionProvider {
 
 class BridgeMissionVerifier implements MissionVerifier {
   constructor(private readonly options: {
-    jobId: string;
-    agentJobs: AgentJobService;
-    provider: BridgeMissionProvider;
-    verifyJob: RunAgentJobWithMissionControlOptions['verifyJob'];
-    progressText: MissionControlAgentJobRunProgressText;
+    progressText: MissionControlAutomationJobRunProgressText;
     onProgress: ProgressHandler;
   }) {}
 
   async verify(input: {
     mission: Mission;
     attempt: MissionAttempt;
+    workflow: unknown;
     providerResult: MissionProviderResult;
+    attemptCount: number;
+    turnCount: number;
+    runtimeMs: number | null;
+    artifactBytes: number | null;
   }): Promise<MissionVerifierResult> {
     await emitProgress(this.options.onProgress, this.options.progressText.verifying());
-    const currentJob = this.options.agentJobs.getById(this.options.jobId);
-    if (!currentJob) {
+    const hardFailure = resolveAutomationHardFailure(input.providerResult);
+    if (hardFailure) {
+      await emitProgress(this.options.onProgress, this.options.progressText.retrying());
       return createMissionVerifierResult({
-        verdict: 'failed',
-        summary: 'Agent job was deleted before verification finished.',
+        verdict: 'repair',
+        summary: hardFailure,
+        missingAcceptanceCriteria: [hardFailure],
       });
     }
-    const execution = input.attempt.providerRunId
-      ? this.options.provider.getExecutionRecord(input.attempt.providerRunId)
-      : this.options.provider.getLastExecutionRecord();
-    const verification = await this.options.verifyJob(
-      currentJob,
-      execution?.result ?? missionProviderResultToBridgeResult(input.providerResult),
-      execution?.session ?? null,
-    );
-    if (!verification.pass && verification.nextAction === 'retry') {
+    const hasDeliverable = Boolean(compactString(input.providerResult.text)) || input.providerResult.artifacts.length > 0;
+    if (!hasDeliverable) {
+      const summary = 'Scheduled automation did not produce a final deliverable yet.';
       await emitProgress(this.options.onProgress, this.options.progressText.retrying());
+      return createMissionVerifierResult({
+        verdict: 'repair',
+        summary,
+        missingAcceptanceCriteria: [
+          'Produce a final user-deliverable result for the scheduled automation task.',
+        ],
+      });
     }
     return createMissionVerifierResult({
-      verdict: verification.pass || verification.nextAction === 'complete'
-        ? 'complete'
-        : verification.nextAction === 'retry'
-          ? 'repair'
-          : 'failed',
-      summary: verification.summary,
-      missingAcceptanceCriteria: verification.issues,
+      verdict: 'complete',
+      summary: 'Scheduled automation produced a deliverable result.',
     });
   }
 }
 
 function prepareMissionSnapshot(input: {
-  job: AgentJob;
+  job: AutomationJob;
   session: BridgeSession | null;
-  repository: AgentJobMissionRepository;
+  repository: AutomationJobMissionRepository;
   now: () => number;
 }): Mission {
   const existing = input.repository.getMissionById(input.job.id);
@@ -471,48 +456,53 @@ function prepareMissionSnapshot(input: {
   if (existing.status === 'draft') {
     const queued = transitionMission(existing, 'queued', {
       at: input.now(),
-      reason: 'Agent mission re-queued through the bridge adapter.',
+      reason: 'Scheduled automation mission re-queued through the bridge adapter.',
     });
     return input.repository.saveMission(queued);
   }
   if (
-    existing.status === 'running'
-    || existing.status === 'planning'
-    || (!isMissionResumable(existing, input.now()) && input.job.status === 'queued' && !input.job.running)
+    existing.status === 'planning'
+    || existing.status === 'running'
+    || !isMissionResumable(existing, input.now())
   ) {
     return input.repository.resetMission(buildFreshMission(input.job, input.session, input.now));
   }
   return existing;
 }
 
-function buildFreshMission(job: AgentJob, session: BridgeSession | null, now: () => number): Mission {
+function buildFreshMission(job: AutomationJob, session: BridgeSession | null, now: () => number): Mission {
   return transitionMission(createMission({
     id: job.id,
-    source: mapPlatformToMissionSource(job.platform),
+    source: 'automation',
     sourceRef: job.id,
     platform: job.platform,
     externalScopeId: job.externalScopeId,
     title: job.title,
-    goal: job.goal,
-    expectedOutput: job.expectedOutput,
-    acceptanceCriteria: job.expectedOutput ? [job.expectedOutput] : [],
-    plan: [...job.plan],
-    riskLevel: job.riskLevel,
+    goal: job.prompt,
+    expectedOutput: 'A final scheduled-task result that can be delivered back to the user.',
+    acceptanceCriteria: [
+      'Produce a final user-deliverable result for the scheduled automation task.',
+    ],
+    plan: [
+      'Execute the scheduled automation task.',
+      'Verify the result is ready for delivery back to the user.',
+    ],
+    riskLevel: 'low',
     cwd: job.cwd,
     workflowPath: job.missionWorkflowPath ?? null,
     providerProfileId: job.providerProfileId,
     bridgeSessionId: job.bridgeSessionId,
     codexThreadId: session?.codexThreadId ?? null,
-    maxAttempts: job.maxAttempts,
-    maxTurns: 8,
+    maxAttempts: 2,
+    maxTurns: 6,
     now: now(),
   }), 'queued', {
     at: now(),
-    reason: 'Agent mission queued through the bridge adapter.',
+    reason: 'Scheduled automation mission queued through the bridge adapter.',
   });
 }
 
-function buildAgentJobMissionPatch(job: AgentJob, state: MissionRuntimeState): Partial<AgentJob> {
+function buildAutomationJobMissionPatch(job: AutomationJob, state: MissionRuntimeState): Partial<AutomationJob> {
   const mission = state.mission;
   if (!mission) {
     return {
@@ -522,23 +512,13 @@ function buildAgentJobMissionPatch(job: AgentJob, state: MissionRuntimeState): P
   }
   const attempts = [...state.attempts].sort((left, right) => left.index - right.index);
   return {
-    status: mapMissionStatusToAgentJobStatus(mission.status),
-    running: ACTIVE_MISSION_JOB_STATUS_SET.has(mission.status),
-    stopRequested: mission.status === 'stopped',
-    attemptCount: mission.attemptCount,
     lastRunAt: mission.lastRunAt,
-    completedAt: TERMINAL_MISSION_JOB_STATUS_SET.has(mission.status)
-      ? (mission.completedAt ?? mission.stoppedAt ?? mission.updatedAt)
-      : null,
-    lastResultPreview: summarizeMissionPreview(mission.lastResultPreview, mission.resultArtifacts),
-    resultText: mission.resultText,
-    resultArtifacts: mapMissionArtifactsToAgentArtifacts(mission.resultArtifacts),
-    lastError: mission.lastError ?? mission.statusReason,
-    verificationSummary: mission.workpad.latestVerifierSummary ?? mission.statusReason,
+    lastResultPreview: summarizeMissionPreview(mission.lastResultPreview, mission.resultArtifacts) ?? job.lastResultPreview,
+    lastError: mission.status === 'completed' ? null : (mission.lastError ?? mission.statusReason),
     missionWorkflowPath: mission.workflowPath,
     missionWorkflowSourceLabel: mission.workflowPath
       ? `configured workflow (${mission.workflowPath})`
-      : job.missionWorkflowSourceLabel,
+      : job.missionWorkflowSourceLabel ?? null,
     missionWorkpadLatestBlocker: mission.workpad.latestBlocker,
     missionWorkpadLatestVerifierSummary: mission.workpad.latestVerifierSummary,
     missionWorkpadFinalResultSummary: mission.workpad.finalResultSummary ?? mission.lastResultPreview,
@@ -547,10 +527,10 @@ function buildAgentJobMissionPatch(job: AgentJob, state: MissionRuntimeState): P
   };
 }
 
-function buildAttemptHistory(attempts: MissionAttempt[]): AgentJobAttemptHistoryEntry[] {
+function buildAttemptHistory(attempts: MissionAttempt[]): MissionAttemptHistoryEntry[] {
   return attempts.map((attempt) => ({
     attempt: attempt.index,
-    status: mapMissionAttemptStatusToAgentJobStatus(attempt.status),
+    status: mapMissionAttemptStatusToHistoryStatus(attempt.status),
     verifierSummary: attempt.verifierSummary,
     outputPreview: attempt.outputPreview,
     error: attempt.error,
@@ -558,85 +538,33 @@ function buildAttemptHistory(attempts: MissionAttempt[]): AgentJobAttemptHistory
   }));
 }
 
+function mapMissionAttemptStatusToHistoryStatus(status: MissionAttempt['status']): MissionAttemptHistoryEntry['status'] {
+  switch (status) {
+    case 'queued':
+    case 'running':
+    case 'verifying':
+    case 'repairing':
+    case 'waiting_user':
+    case 'needs_human':
+    case 'handoff':
+    case 'blocked':
+    case 'completed':
+    case 'failed':
+    case 'stopped':
+      return status;
+  }
+}
+
 function summarizeMissionPreview(value: string | null, artifacts: unknown[]): string | null {
   const text = compactString(value);
   if (text) {
-    return text.length > 180 ? `${text.slice(0, 179)}…` : text;
+    return text.length > 180 ? `${text.slice(0, 179)}...` : text;
   }
   const artifactCount = Array.isArray(artifacts) ? artifacts.length : 0;
   return artifactCount > 0 ? `attachments: ${artifactCount}` : null;
 }
 
-function mapMissionStatusToAgentJobStatus(status: MissionStatus): AgentJobStatus {
-  switch (status) {
-    case 'draft':
-      return 'queued';
-    case 'queued':
-    case 'planning':
-    case 'running':
-    case 'verifying':
-    case 'repairing':
-    case 'waiting_user':
-    case 'needs_human':
-    case 'handoff':
-    case 'blocked':
-    case 'completed':
-    case 'failed':
-    case 'stopped':
-      return status;
-    case 'archived':
-      return 'completed';
-  }
-}
-
-function mapMissionAttemptStatusToAgentJobStatus(status: MissionAttempt['status']): AgentJobStatus {
-  switch (status) {
-    case 'queued':
-    case 'running':
-    case 'verifying':
-    case 'repairing':
-    case 'waiting_user':
-    case 'needs_human':
-    case 'handoff':
-    case 'blocked':
-    case 'completed':
-    case 'failed':
-    case 'stopped':
-      return status;
-  }
-}
-
-function mapPlatformToMissionSource(platform: string): Mission['source'] {
-  if (platform === 'weixin' || platform === 'telegram') {
-    return platform;
-  }
-  return 'manual';
-}
-
-function mapMissionArtifactsToAgentArtifacts(value: unknown[]): TurnArtifactDeliveredItem[] | null {
-  const normalized = value
-    .map((artifact) => {
-      const type = compactString((artifact as MissionProviderArtifact | null)?.type);
-      const path = compactString((artifact as MissionProviderArtifact | null)?.path);
-      if (!type || !path) {
-        return null;
-      }
-      return {
-        kind: type === 'other' ? 'file' : (type as TurnArtifactDeliveredItem['kind']),
-        path,
-        displayName: compactString((artifact as MissionProviderArtifact | null)?.name),
-        mimeType: compactString((artifact as MissionProviderArtifact | null)?.mimeType),
-        sizeBytes: null,
-        caption: compactString((artifact as MissionProviderArtifact | null)?.caption),
-        source: 'provider_native' as const,
-        turnId: null,
-      };
-    })
-    .filter(Boolean) as TurnArtifactDeliveredItem[];
-  return normalized.length > 0 ? normalized : null;
-}
-
-function loadMissionRuntimeState(job: AgentJob): MissionRuntimeState {
+function loadMissionRuntimeState(job: AutomationJob): MissionRuntimeState {
   const raw = job.missionRuntimeState;
   return {
     mission: raw?.mission ? cloneValue(raw.mission as unknown as Mission) : null,
@@ -649,7 +577,7 @@ function loadMissionRuntimeState(job: AgentJob): MissionRuntimeState {
   };
 }
 
-function serializeMissionRuntimeState(state: MissionRuntimeState): AgentJobMissionRuntimeState {
+function serializeMissionRuntimeState(state: MissionRuntimeState): MissionRuntimeStateSnapshot {
   return {
     mission: state.mission ? (cloneValue(state.mission) as unknown as Record<string, unknown>) : null,
     attempts: state.attempts.map((attempt) => cloneValue(attempt) as unknown as Record<string, unknown>),
@@ -669,28 +597,10 @@ function normalizeBridgeMissionProviderResult(
   });
 }
 
-function missionProviderResultToBridgeResult(result: MissionProviderResult): BridgeMissionTurnResult['result'] {
-  return {
-    outputText: result.text,
-    previewText: result.previewText,
-    errorMessage: result.errorMessage,
-    outputState: result.rawState,
-    outputArtifacts: result.artifacts.map((artifact) => ({
-      kind: artifact.type === 'other' ? 'file' : (artifact.type as OutputArtifact['kind']),
-      path: artifact.path ?? '',
-      displayName: artifact.name ?? null,
-      mimeType: artifact.mimeType ?? null,
-      caption: artifact.caption ?? null,
-      source: 'provider_native',
-    })),
-    finalSource: 'mission_control_runtime',
-  };
-}
-
-function buildAgentMissionExecutionPrompt(promptText: string, locale: string | null): string {
+function buildAutomationMissionExecutionPrompt(promptText: string, locale: string | null): string {
   const prefix = locale === 'zh-CN'
-    ? '你正在执行 CodexBridge 后台 Agent 任务。请用中文回复最终结果。\n最终回复必须包含：摘要、验证结果、产物或后续动作。'
-    : 'You are executing a CodexBridge background Agent task. Reply with the final result in English.';
+    ? '你正在执行 CodexBridge 定时自动化任务。请直接完成任务，并返回适合发送给用户的最终结果。'
+    : 'You are executing a CodexBridge scheduled automation task. Complete the task and return a final user-deliverable result.';
   return [
     prefix,
     '',
@@ -721,6 +631,16 @@ function normalizeBridgeArtifacts(result: BridgeMissionTurnResult['result']): Mi
       } satisfies MissionProviderArtifact;
     })
     .filter(Boolean) as MissionProviderArtifact[];
+}
+
+function resolveAutomationHardFailure(result: MissionProviderResult): string | null {
+  if (result.rawState === 'interrupted') {
+    return 'The scheduled automation run was interrupted before it finished.';
+  }
+  if (result.errorMessage && !compactString(result.text) && result.artifacts.length === 0) {
+    return result.errorMessage;
+  }
+  return null;
 }
 
 function upsertById<T extends { id: string }>(items: T[], value: T): T[] {
@@ -757,21 +677,3 @@ function compactString(value: unknown): string | null {
 function cloneValue<T>(value: T): T {
   return structuredClone(value);
 }
-
-const ACTIVE_MISSION_JOB_STATUS_SET = new Set<MissionStatus>([
-  'planning',
-  'running',
-  'verifying',
-  'repairing',
-]);
-
-const TERMINAL_MISSION_JOB_STATUS_SET = new Set<MissionStatus>([
-  'waiting_user',
-  'needs_human',
-  'handoff',
-  'blocked',
-  'completed',
-  'failed',
-  'stopped',
-  'archived',
-]);

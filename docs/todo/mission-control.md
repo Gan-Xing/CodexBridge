@@ -371,7 +371,7 @@ Phase 5 source-of-truth tests:
 ## Phase 6: CodexBridge Integration
 
 - [x] Make `/agent` call Mission Control instead of owning the runner directly
-- [ ] Make `/auto` schedule Mission Control runs instead of separate background
+- [x] Make `/auto` schedule Mission Control runs instead of separate background
   job logic
 - [ ] Reuse the same mission state for:
   - list
@@ -393,6 +393,16 @@ Control through a bridge-side adapter that:
   behavior on the real `/agent` execution path without introducing a new
   `/mission` command yet
 
+Phase 6b landed: scheduled `/auto` sweeps now delegate execution into Mission
+Control through a bridge-side adapter that:
+
+- persists mission/attempt/event snapshot state on the `AutomationJob`
+  compatibility record
+- reuses existing CodexBridge turn recovery, auto-rebind, approval, and WeChat
+  SendGate delivery paths as the first host/control surface
+- persists rebound bridge-session identity back onto the compatibility record so
+  continuation turns stay on the live session instead of stale session ids
+
 Completion criteria:
 
 - [x] `/agent` remains the Mission v0 surface
@@ -409,6 +419,11 @@ Phase 6 source-of-truth tests:
   - `/agent runAgentJob continues the same attempt after a normal partial provider exit`
   - `/agent runAgentJob loads WORKFLOW.md and routes it into the mission-controlled execution prompt`
   - `/agent runAgentJob forwards provider approval requests to the supplied approval callback`
+  - `/auto scheduled runs delegate into Mission Control and persist automation mission state`
+- `test/core/mission_control_automation_job_runner.test.ts`
+  - `automation mission runner persists rebound bridge sessions across continuation turns`
+- `test/runtime/weixin_bridge_runtime.test.ts`
+  - `WeixinBridgeRuntime runs due automation jobs against the same WeChat scope and records completion`
 
 ## Phase 7: Optional Web Surface
 

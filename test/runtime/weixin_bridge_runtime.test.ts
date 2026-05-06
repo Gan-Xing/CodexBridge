@@ -634,11 +634,20 @@ test('WeixinBridgeRuntime runs due automation jobs against the same WeChat scope
     locale: 'zh-CN',
     prompt: '检查部署是否完成',
   };
-  const seenEvents: any[] = [];
+  const seenJobs: any[] = [];
   const runtime = makeRuntime({
     automationJobs: {
       claimDueJobs() {
         return [job];
+      },
+      getById(id: string) {
+        return id === job.id
+          ? {
+            ...job,
+            lastResultPreview: '自动化执行完成。',
+            lastError: null,
+          }
+          : null;
       },
       updateJob(id: string, payload: any) {
         updatedCalls.push({ id, bridgeSessionId: payload.bridgeSessionId });
@@ -661,13 +670,8 @@ test('WeixinBridgeRuntime runs due automation jobs against the same WeChat scope
       async reconcileActiveTurn() {
         return null;
       },
-      async handleInboundEvent(event: any, options: any = {}) {
-        seenEvents.push(event);
-        await options.onProgress?.({
-          text: '正在读取助理记录。',
-          delta: '正在读取助理记录。',
-          outputKind: 'commentary',
-        });
+      async runAutomationJob(liveJob: any) {
+        seenJobs.push(liveJob);
         return {
           ...completeResponse('自动化执行完成。'),
           session: {
@@ -677,6 +681,9 @@ test('WeixinBridgeRuntime runs due automation jobs against the same WeChat scope
           },
         };
       },
+      async handleInboundEvent() {
+        throw new Error('handleInboundEvent should not run when automation Mission Control is available');
+      },
     },
   });
 
@@ -684,9 +691,9 @@ test('WeixinBridgeRuntime runs due automation jobs against the same WeChat scope
   await runtime.waitForIdle();
 
   assert.equal(deferredCalls.length, 0);
-  assert.equal(seenEvents.length, 1);
-  assert.equal(seenEvents[0]?.metadata?.codexbridge?.overrideBridgeSessionId, 'session-auto-1');
-  assert.equal(seenEvents[0]?.metadata?.codexbridge?.automationJobId, 'auto-1');
+  assert.equal(seenJobs.length, 1);
+  assert.equal(seenJobs[0]?.bridgeSessionId, 'session-auto-1');
+  assert.equal(seenJobs[0]?.id, 'auto-1');
   assert.deepEqual(sent, [
     { externalScopeId: 'wxid_1', content: '自动化执行完成。' },
   ]);

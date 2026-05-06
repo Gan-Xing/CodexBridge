@@ -16,6 +16,7 @@ import {
   loadMissionWorkflowForAgentJob,
 } from './mission_control_agent_job_adapter.js';
 import { runAgentJobWithMissionControl } from './mission_control_agent_job_runner.js';
+import { runAutomationJobWithMissionControl } from './mission_control_automation_job_runner.js';
 import { computeNextRunAt as computeAutomationNextRunAt } from './automation_job_service.js';
 import {
   createPendingTurnArtifactDeliveryState,
@@ -45,6 +46,7 @@ import type {
   AssistantRecordPriority,
   AssistantRecordStatus,
   AssistantRecordType,
+  AutomationJob,
   AutomationMode,
   AutomationSchedule,
   BridgeSession,
@@ -10611,6 +10613,109 @@ export class BridgeCoordinator {
     ], buildSessionMeta(finalSession));
   }
 
+  async runAutomationJob(job: AutomationJob, options: StartTurnOptions = {}): Promise<CoordinatorResponse> {
+    if (!this.automationJobs) {
+      return messageResponse([
+        this.t('coordinator.auto.unsupported'),
+      ]);
+    }
+    const current = this.automationJobs.getById(job.id) ?? job;
+    const scopeRef = {
+      platform: current.platform,
+      externalScopeId: current.externalScopeId,
+    };
+    const session = this.automationJobs.getSession(current);
+    if (!session) {
+      const message = this.t('coordinator.auto.sessionMissing');
+      this.automationJobs.updateJob(current.id, {
+        lastError: message,
+        missionWorkpadLatestBlocker: message,
+        missionWorkpadLatestVerifierSummary: message,
+      });
+      return messageResponse([
+        message,
+      ], this.buildScopedSessionMeta({
+        platform: current.platform,
+        externalScopeId: current.externalScopeId,
+      }));
+    }
+    let missionRun;
+    try {
+      missionRun = await runAutomationJobWithMissionControl({
+        job: current,
+        automationJobs: this.automationJobs,
+        resolveSession: (liveJob) => this.automationJobs.getSession(liveJob),
+        startTurnWithRecovery: (nextScopeRef, nextSession, event, turnOptions) => {
+          this.activeTurns?.beginScopeTurn(nextScopeRef, {
+            bridgeSessionId: nextSession.id,
+            providerProfileId: nextSession.providerProfileId,
+            threadId: nextSession.codexThreadId,
+          });
+          return this.startTurnWithRecovery(nextScopeRef, nextSession, event, turnOptions)
+            .finally(() => this.releaseActiveTurnIfStillRunning(nextScopeRef));
+        },
+        stopSession: async (nextScopeRef, nextSession) => {
+          await this.stopThreadForSession(nextScopeRef, nextSession, { waitForSettleMs: 0 });
+        },
+        now: this.now,
+        onProgress: options.onProgress ?? null,
+        onApprovalRequest: options.onApprovalRequest ?? null,
+      });
+    } catch (error) {
+      const message = formatUserError(error);
+      this.automationJobs.updateJob(current.id, {
+        lastError: message,
+        missionWorkpadLatestBlocker: message,
+        missionWorkpadLatestVerifierSummary: message,
+      });
+      return messageResponse([
+        this.t('runtime.error.automationFailed', {
+          title: current.title,
+          error: message,
+        }),
+      ], buildSessionMeta(session));
+    }
+
+    const completed = missionRun.finalJob;
+    const finalSession = missionRun.finalSession ?? session;
+    const finalBridgeResult = missionRun.finalBridgeResult;
+    const verificationSummary = completed.missionWorkpadLatestVerifierSummary
+      ?? completed.lastError
+      ?? missionRun.runResult.mission.statusReason
+      ?? completed.lastResultPreview
+      ?? current.title;
+
+    if (missionRun.runResult.mission.status === 'completed') {
+      const resultText = finalBridgeResult?.outputText
+        ?? completed.lastResultPreview
+        ?? completed.missionWorkpadFinalResultSummary
+        ?? '';
+      const response = messageResponse([], buildSessionMeta(finalSession));
+      response.messages = [
+        ...(resultText ? [{ text: resultText }] : []),
+        ...mapMissionArtifactsToResponseMessages(missionRun.runResult.providerResult?.artifacts ?? []),
+      ];
+      response.meta = {
+        ...(response.meta ?? {}),
+        codexTurn: {
+          outputState: finalBridgeResult?.outputState ?? 'complete',
+          previewText: finalBridgeResult?.previewText ?? completed.lastResultPreview ?? resultText,
+          finalSource: finalBridgeResult?.finalSource ?? 'automation_job_mission_control',
+          errorMessage: finalBridgeResult?.errorMessage ?? '',
+        },
+      };
+      return response;
+    }
+
+    return messageResponse([
+      this.t('coordinator.auto.title', { value: completed.title }),
+      this.t('coordinator.agent.status', {
+        value: formatMissionRuntimeStatusLabel(missionRun.runResult.mission.status, this.currentI18n),
+      }),
+      this.t('coordinator.agent.verification', { value: verificationSummary }),
+    ], buildSessionMeta(finalSession));
+  }
+
   async verifyAgentJob(job: AgentJob, result, session): Promise<AgentVerificationResult> {
     const hardFailure = resolveAgentHardFailure(result);
     if (hardFailure) {
@@ -14594,6 +14699,68 @@ function formatAutomationStatusLabel(status: string, running: boolean, i18n: Tra
     return i18n.t('coordinator.auto.status.paused');
   }
   return i18n.t('coordinator.auto.status.active');
+}
+
+function formatMissionRuntimeStatusLabel(status: string, i18n: Translator): string {
+  switch (status) {
+    case 'queued':
+    case 'planning':
+    case 'running':
+    case 'verifying':
+    case 'repairing':
+    case 'waiting_user':
+    case 'needs_human':
+    case 'handoff':
+    case 'blocked':
+    case 'completed':
+    case 'failed':
+    case 'stopped':
+      return i18n.t(`coordinator.agent.status.${status}`);
+    case 'archived':
+      return i18n.t('coordinator.agent.status.completed');
+    default:
+      return String(status ?? '').trim() || i18n.t('common.unknown');
+  }
+}
+
+function mapMissionArtifactsToResponseMessages(artifacts: Array<{
+  type: string;
+  path: string | null;
+  name?: string | null;
+  mimeType?: string | null;
+  caption?: string | null;
+}>): Array<{
+  artifact?: OutputArtifact | null;
+  mediaPath?: string | null;
+  caption?: string | null;
+}> {
+  return (Array.isArray(artifacts) ? artifacts : [])
+    .map((artifact) => {
+      const path = typeof artifact?.path === 'string' ? artifact.path.trim() : '';
+      if (!path) {
+        return null;
+      }
+      const kind = artifact.type === 'image' || artifact.type === 'video' || artifact.type === 'audio'
+        ? artifact.type
+        : 'file';
+      return {
+        artifact: {
+          kind,
+          path,
+          displayName: typeof artifact?.name === 'string' ? artifact.name.trim() || null : null,
+          mimeType: typeof artifact?.mimeType === 'string' ? artifact.mimeType.trim() || null : null,
+          caption: typeof artifact?.caption === 'string' ? artifact.caption.trim() || null : null,
+          source: 'provider_native',
+        },
+        mediaPath: path,
+        caption: typeof artifact?.caption === 'string' ? artifact.caption.trim() || null : null,
+      };
+    })
+    .filter(Boolean) as Array<{
+      artifact?: OutputArtifact | null;
+      mediaPath?: string | null;
+      caption?: string | null;
+    }>;
 }
 
 function buildThreadBrowserKey(event) {

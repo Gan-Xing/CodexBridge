@@ -170,6 +170,13 @@ export interface AutomationJob {
   lastDeliveredAt: number | null;
   lastResultPreview: string | null;
   lastError: string | null;
+  missionWorkflowPath?: string | null;
+  missionWorkflowSourceLabel?: string | null;
+  missionWorkpadLatestBlocker?: string | null;
+  missionWorkpadLatestVerifierSummary?: string | null;
+  missionWorkpadFinalResultSummary?: string | null;
+  missionAttemptHistory?: MissionAttemptHistoryEntry[];
+  missionRuntimeState?: MissionRuntimeStateSnapshot | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -194,13 +201,13 @@ export type AgentJobStatus =
   | 'failed'
   | 'stopped';
 
-export interface AgentJobMissionRuntimeState {
+export interface MissionRuntimeStateSnapshot {
   mission: Record<string, unknown> | null;
   attempts: Record<string, unknown>[];
   events: Record<string, unknown>[];
 }
 
-export interface AgentJobAttemptHistoryEntry {
+export interface MissionAttemptHistoryEntry {
   attempt: number;
   status: AgentJobStatus;
   verifierSummary: string | null;
@@ -208,6 +215,10 @@ export interface AgentJobAttemptHistoryEntry {
   error: string | null;
   recordedAt: number;
 }
+
+export type AgentJobMissionRuntimeState = MissionRuntimeStateSnapshot;
+
+export type AgentJobAttemptHistoryEntry = MissionAttemptHistoryEntry;
 
 export interface AgentJob {
   id: string;
