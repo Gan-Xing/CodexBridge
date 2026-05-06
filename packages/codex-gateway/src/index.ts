@@ -40,6 +40,7 @@ export type CodexGatewayExcludedResponsibility = typeof CODEX_GATEWAY_DOES_NOT_O
 
 export * from './capabilities/capability_presets.js';
 export * from './capabilities/cliproxy_model_catalog.js';
+export * from './capabilities/protocol_boundary.js';
 export * from './capabilities/thinking_policy.js';
 export * from './converters/responses_adapter.js';
 export * from './server/responses_adapter_server.js';

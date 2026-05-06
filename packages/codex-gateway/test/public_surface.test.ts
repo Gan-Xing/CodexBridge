@@ -4,6 +4,7 @@ import path from 'node:path';
 import test from 'node:test';
 import {
   CODEX_GATEWAY_DOES_NOT_OWN,
+  assessCodexGatewayProtocolBoundary,
   CODEX_GATEWAY_OWNS,
   CODEX_GATEWAY_PACKAGE_NAME,
   CODEX_GATEWAY_PACKAGE_PHASE,
@@ -18,6 +19,7 @@ test('codex gateway package exposes the migration boundary contract', () => {
   assert.ok(CODEX_GATEWAY_OWNS.includes('local-codex-gateway-server'));
   assert.ok(CODEX_GATEWAY_DOES_NOT_OWN.includes('wechat-transport'));
   assert.ok(CODEX_GATEWAY_DOES_NOT_OWN.includes('assistant-records'));
+  assert.equal(assessCodexGatewayProtocolBoundary('openai-chat-compatible').strategy, 'responses-to-chat-direct');
 });
 
 test('codex gateway package metadata stays internal-only while the boundary stabilizes', () => {

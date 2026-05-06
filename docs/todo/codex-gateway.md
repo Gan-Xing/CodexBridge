@@ -88,6 +88,7 @@ Latest progress:
 - [x] LiteLLM-style usage aliases such as cache, reasoning, audio, and prediction token fields are now normalized into Responses usage details at the package boundary
 - [x] LiteLLM-inspired usage normalization now associates response usage with normalized model pricing metadata to expose estimated input, output, and total cost at the package boundary
 - [x] `open-responses`-inspired package server coverage now locks `/models`, `/responses`, and `/responses/compact` as the primary Responses-first routes, while keeping `/v1/*` aliases for SDK compatibility
+- [x] `llm-rosetta`-inspired protocol-boundary rules now explicitly lock `openai-chat-compatible` to the current direct adapter path and defer Anthropic/Gemini-native targets behind a future IR gate
 
 ## Packaging Direction
 
@@ -213,7 +214,7 @@ Frozen migration surface:
 ## Reference Usage
 
 - [x] Use codex-proxy as the main reference for Codex Responses event handling, `previous_response_id`, function-call streams, and real protocol tests
-- [ ] Use llm-rosetta as the reference for a future IR layer; do not add a full IR until Responses-to-Chat starts blocking Anthropic/Gemini-native support
+- [x] Use llm-rosetta as the reference for a future IR layer; do not add a full IR until Responses-to-Chat starts blocking Anthropic/Gemini-native support
 - [x] Use LiteLLM as the reference for provider catalogs, cost/usage metadata, retry/error taxonomy, and gateway-level operational concerns
 - [x] Treat open-responses as a Responses-first product reference, not as code to vendor into this adapter
 
