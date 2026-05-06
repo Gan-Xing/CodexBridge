@@ -388,9 +388,14 @@ package:
 
 - `packages/responses-adapter/src/converters/responses_adapter.ts`
 
-The legacy CodexBridge paths are now re-export shims for those files. The local
-adapter server remains under `src/providers/openai_compatible/*` until the next
-phase moves it behind an equivalent shim.
+Phase 3 moves the local adapter HTTP server into the package:
+
+- `packages/responses-adapter/src/server/responses_adapter_server.ts`
+
+The legacy CodexBridge paths are now re-export shims for those files. The
+CodexBridge provider integration wrapper remains at
+`src/providers/openai_compatible/plugin.ts` and is responsible for provider
+profile/env wiring only.
 
 CodexBridge keeps all bridge/runtime behavior:
 

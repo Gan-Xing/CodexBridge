@@ -129,8 +129,8 @@ Migration plan:
 - [x] Phase 2: move pure converters: request conversion, response conversion, usage mapping, error mapping, multimodal conversion, and tool-name repair
 - [x] Phase 2: move stream converters and SSE parser/builder while preserving the existing `response.created`, `response.output_item.added`, `response.output_text.delta`, `response.failed`, and `response.completed` behavior
 - [x] Phase 2: add package-boundary converter tests and keep CodexBridge tests as integration coverage
-- [ ] Phase 3: move the local adapter HTTP server into the package; keep `src/providers/openai_compatible/plugin.ts` as the CodexBridge integration wrapper
-- [ ] Phase 3: make CodexBridge pass provider profile/env config into the adapter package instead of importing converter internals directly
+- [x] Phase 3: move the local adapter HTTP server into the package; keep `src/providers/openai_compatible/plugin.ts` as the CodexBridge integration wrapper
+- [x] Phase 3: make CodexBridge pass provider profile/env config into the adapter package through the legacy server shim instead of importing converter internals directly
 - [ ] Phase 4: add contract tests at the package boundary for Responses request, Chat request, non-streaming output, streaming output, tool calls, usage, errors, compact fallback, and multimodal downgrades
 - [ ] Phase 4: run live smoke tests through CodexBridge profiles only after package-level tests pass
 - [ ] Phase 5: decide whether to publish as `@codexbridge/responses-adapter`; keep it private/internal until the API boundary is stable
@@ -175,6 +175,14 @@ Phase 1C/2 converter migration:
 - [x] Added package-level converter tests for request conversion, response conversion, and SSE conversion
 - [x] Phase 1C/2 verification run on 2026-05-06: `responses-adapter:typecheck`, `responses-adapter:test`, `responses-adapter:check-boundary`, `responses-adapter:build`, OpenAI-compatible adapter/config/plugin tests, root `typecheck`, root `build`, and `git diff --check`
 
+Phase 3 server migration:
+
+- [x] Moved `src/providers/openai_compatible/responses_adapter_server.ts` implementation to `packages/responses-adapter/src/server/responses_adapter_server.ts`
+- [x] Replaced the old `src/providers/openai_compatible/responses_adapter_server.ts` path with a re-export shim so `OpenAICompatibleProviderPlugin` and existing tests keep working
+- [x] Exported `OpenAICompatibleResponsesAdapterServer`, server options, and `reserveLocalPort` from `packages/responses-adapter/src/index.ts`
+- [x] Added package-level server tests for compact fallback, model metadata, and local port reservation
+- [x] Phase 3 verification run on 2026-05-06: `responses-adapter:typecheck`, `responses-adapter:test`, `responses-adapter:check-boundary`, `responses-adapter:build`, OpenAI-compatible adapter/server/config/plugin/WebSocket repair tests, root `typecheck`, root `build`, and `git diff --check`
+
 Reference usage:
 
 - [ ] Use codex-proxy as the main reference for Codex Responses event handling, `previous_response_id`, function-call streams, and real protocol tests
@@ -185,12 +193,12 @@ Reference usage:
 Completion criteria:
 
 - [ ] CodexBridge can switch OpenAI-native, DeepSeek, MiniMax, Qwen, and OpenRouter profiles without changing WeChat UX
-- [ ] The adapter package can be tested without starting WeChat or CodexBridge runtime
-- [ ] The adapter package has no imports from CodexBridge core, platform runtimes, stores, slash commands, or i18n
-- [ ] Legacy CodexBridge import paths still work through re-export shims during the migration window
+- [x] The adapter package can be tested without starting WeChat or CodexBridge runtime
+- [x] The adapter package has no imports from CodexBridge core, platform runtimes, stores, slash commands, or i18n
+- [x] Legacy CodexBridge import paths still work through re-export shims during the migration window
 - [ ] Adding a new OpenAI-compatible provider normally requires config/capability data, not a new provider plugin class
 - [ ] Unsupported provider features produce clear downgrade/error behavior instead of silent stalls or malformed upstream payloads
-- [ ] Existing CodexBridge OpenAI-compatible tests pass through the new package boundary
+- [x] Existing CodexBridge OpenAI-compatible tests pass through the new package boundary
 
 ### Guardrail
 

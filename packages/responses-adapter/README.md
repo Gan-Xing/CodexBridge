@@ -30,12 +30,15 @@ It must not own bridge behavior:
 Phase 1B moved the provider capability catalog, CLIProxyAPI-style model catalog,
 and reasoning/thinking policy into this package. Phase 1C moved the pure
 Responses/Chat converter and SSE translator implementation into this package.
-The old CodexBridge paths still exist as re-export shims during migration:
+Phase 3 moved the local `/v1/responses` adapter server into this package. The
+old CodexBridge paths still exist as re-export shims during migration:
 
 - `src/providers/openai_compatible/capability_presets.ts`
 - `src/providers/openai_compatible/cliproxy_model_catalog.ts`
 - `src/providers/openai_compatible/responses_adapter.ts`
+- `src/providers/openai_compatible/responses_adapter_server.ts`
 - `src/providers/shared/thinking_policy.ts`
 
-The local adapter server still lives under `src/providers/openai_compatible/*`
-until the next migration phase moves it behind an equivalent shim.
+CodexBridge now keeps only the OpenAI-compatible provider integration wrapper in
+`src/providers/openai_compatible/plugin.ts`; package code still must not import
+from CodexBridge core/platform/runtime/store/i18n.
