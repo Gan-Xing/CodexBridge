@@ -16,6 +16,23 @@ import {
 
 type JsonRecord = Record<string, any>;
 type AdapterRoute = 'responses' | 'responses.compact';
+type GatewayErrorCategory =
+  | 'authentication'
+  | 'rate_limit'
+  | 'transient_upstream'
+  | 'unsupported_feature'
+  | 'not_found'
+  | 'invalid_request'
+  | 'malformed_upstream'
+  | 'upstream_failure';
+type GatewayRetryHint =
+  | 'check_api_key_or_access'
+  | 'respect_retry_after'
+  | 'retry_with_backoff'
+  | 'remove_or_downgrade_unsupported_feature'
+  | 'check_model_or_route'
+  | 'fix_request'
+  | 'retry_or_inspect_upstream';
 
 export type CodexGatewayTraceEvent =
   | {
@@ -320,23 +337,51 @@ export class OpenAICompatibleResponsesAdapterServer {
       return;
     }
     const json = await upstream.response.json() as JsonRecord;
-    const modelMetadata = resolveModelMetadata(
-      this.models,
-      normalizeString(requestBody?.model) || normalizeString(json?.model) || this.defaultModel,
-    );
-    const adaptedResponse = chatCompletionsResponseToResponses(json, {
-      request: requestBody,
-      providerCapabilities: this.providerCapabilities,
-      modelMetadata,
-    });
-    this.emitTrace({
-      type: 'response.translated',
-      route: 'responses',
-      model: requestedModel,
-      stream: false,
-      response: adaptedResponse,
-    });
-    writeJson(response, 200, adaptedResponse);
+    if (!json || typeof json !== 'object') {
+      const error = buildMalformedUpstreamPayloadError(
+        this.providerName,
+        'non_object_json_response',
+      );
+      this.emitTrace({
+        type: 'upstream.error',
+        route: 'responses',
+        status: 502,
+        error,
+      });
+      writeJson(response, 502, { error });
+      return;
+    }
+    try {
+      const modelMetadata = resolveModelMetadata(
+        this.models,
+        normalizeString(requestBody?.model) || normalizeString(json?.model) || this.defaultModel,
+      );
+      const adaptedResponse = chatCompletionsResponseToResponses(json, {
+        request: requestBody,
+        providerCapabilities: this.providerCapabilities,
+        modelMetadata,
+      });
+      this.emitTrace({
+        type: 'response.translated',
+        route: 'responses',
+        model: requestedModel,
+        stream: false,
+        response: adaptedResponse,
+      });
+      writeJson(response, 200, adaptedResponse);
+    } catch (error) {
+      const malformedError = buildMalformedUpstreamPayloadError(
+        this.providerName,
+        error instanceof Error ? error.message : String(error),
+      );
+      this.emitTrace({
+        type: 'upstream.error',
+        route: 'responses',
+        status: 502,
+        error: malformedError,
+      });
+      writeJson(response, 502, { error: malformedError });
+    }
   }
 
   private async handleCompactResponses(requestBody: JsonRecord, response: ServerResponse): Promise<void> {
@@ -796,23 +841,53 @@ function normalizeUpstreamError(
   const trimmed = normalizeString(text);
   const retryAfterMs = parseRetryAfterMs(headers?.get('retry-after') ?? null) ?? parseRetryAfterMsFromBody(trimmed);
   const metadata = buildUpstreamErrorMetadata(headers);
+  const fallbackCode = upstreamErrorCode(status);
+  const fallbackCategory = classifyGatewayErrorCategory({
+    status,
+    code: fallbackCode,
+    type: 'upstream_error',
+    message: trimmed,
+  });
+  const fallbackRetry = buildGatewayRetryMetadata(fallbackCategory, retryAfterMs);
   if (trimmed) {
     try {
       const parsed = JSON.parse(trimmed);
       if (parsed?.error && typeof parsed.error === 'object') {
+        const message = normalizeString(parsed.error.message) || `${providerName} upstream returned HTTP ${status}`;
+        const type = normalizeString(parsed.error.type) || 'upstream_error';
+        const code = parsed.error.code ?? fallbackCode;
+        const category = classifyGatewayErrorCategory({
+          status,
+          code,
+          type,
+          message,
+        });
         return omitUndefined({
-          message: normalizeString(parsed.error.message) || `${providerName} upstream returned HTTP ${status}`,
-          type: normalizeString(parsed.error.type) || 'upstream_error',
-          code: parsed.error.code ?? upstreamErrorCode(status),
+          message,
+          type,
+          code,
+          category,
+          retry: buildGatewayRetryMetadata(category, retryAfterMs),
           param: parsed.error.param,
           retry_after_ms: retryAfterMs,
           metadata,
         });
       }
+      const message = normalizeString(parsed?.message) || trimmed;
+      const type = normalizeString(parsed?.type) || 'upstream_error';
+      const code = parsed?.code ?? fallbackCode;
+      const category = classifyGatewayErrorCategory({
+        status,
+        code,
+        type,
+        message,
+      });
       return omitUndefined({
-        message: normalizeString(parsed?.message) || trimmed,
-        type: normalizeString(parsed?.type) || 'upstream_error',
-        code: parsed?.code ?? upstreamErrorCode(status),
+        message,
+        type,
+        code,
+        category,
+        retry: buildGatewayRetryMetadata(category, retryAfterMs),
         retry_after_ms: retryAfterMs,
         metadata,
       });
@@ -820,7 +895,9 @@ function normalizeUpstreamError(
       return omitUndefined({
         message: trimmed,
         type: 'upstream_error',
-        code: upstreamErrorCode(status),
+        code: fallbackCode,
+        category: fallbackCategory,
+        retry: fallbackRetry,
         retry_after_ms: retryAfterMs,
         metadata,
       });
@@ -829,10 +906,28 @@ function normalizeUpstreamError(
   return omitUndefined({
     message: `${providerName} upstream returned HTTP ${status}`,
     type: 'upstream_error',
-    code: upstreamErrorCode(status),
+    code: fallbackCode,
+    category: fallbackCategory,
+    retry: fallbackRetry,
     retry_after_ms: retryAfterMs,
     metadata,
   });
+}
+
+function buildMalformedUpstreamPayloadError(
+  providerName: string,
+  detail: string,
+): JsonRecord {
+  const message = normalizeString(detail)
+    ? `${providerName} upstream returned a malformed success payload: ${normalizeString(detail)}`
+    : `${providerName} upstream returned a malformed success payload.`;
+  return {
+    message,
+    type: 'upstream_error',
+    code: 'malformed_upstream_payload',
+    category: 'malformed_upstream',
+    retry: buildGatewayRetryMetadata('malformed_upstream', null),
+  };
 }
 
 function buildUpstreamErrorMetadata(headers?: Headers | null): JsonRecord | undefined {
@@ -986,6 +1081,108 @@ function upstreamErrorCode(status: number): string {
         return 'invalid_request_error';
       }
       return 'unknown_error';
+  }
+}
+
+function classifyGatewayErrorCategory({
+  status,
+  code,
+  type,
+  message,
+}: {
+  status: number;
+  code: unknown;
+  type: unknown;
+  message: unknown;
+}): GatewayErrorCategory {
+  const normalizedCode = normalizeString(code).toLowerCase();
+  const normalizedType = normalizeString(type).toLowerCase();
+  const normalizedMessage = normalizeString(message).toLowerCase();
+  if (
+    status === 401
+    || normalizedCode.includes('invalid_api_key')
+    || normalizedCode.includes('authentication')
+    || normalizedType.includes('authentication')
+    || normalizedMessage.includes('invalid api key')
+    || normalizedMessage.includes('unauthorized')
+  ) {
+    return 'authentication';
+  }
+  if (
+    status === 429
+    || normalizedCode.includes('rate_limit')
+    || normalizedType.includes('rate_limit')
+    || normalizedMessage.includes('rate limit')
+    || normalizedMessage.includes('too many requests')
+  ) {
+    return 'rate_limit';
+  }
+  if (
+    normalizedCode.includes('unsupported')
+    || normalizedType.includes('unsupported')
+    || normalizedMessage.includes('not support')
+    || normalizedMessage.includes('unsupported')
+    || normalizedMessage.includes('does not support')
+  ) {
+    return 'unsupported_feature';
+  }
+  if (status === 404 || normalizedCode.includes('not_found') || normalizedMessage.includes('not found')) {
+    return 'not_found';
+  }
+  if (status === 408 || status >= 500) {
+    return 'transient_upstream';
+  }
+  if (status >= 400 && status < 500) {
+    return 'invalid_request';
+  }
+  return 'upstream_failure';
+}
+
+function buildGatewayRetryMetadata(
+  category: GatewayErrorCategory,
+  retryAfterMs: number | null,
+): { retryable: boolean; hint: GatewayRetryHint; retry_after_ms?: number } {
+  switch (category) {
+    case 'authentication':
+      return omitUndefined({
+        retryable: false,
+        hint: 'check_api_key_or_access',
+      });
+    case 'rate_limit':
+      return omitUndefined({
+        retryable: true,
+        hint: 'respect_retry_after',
+        retry_after_ms: retryAfterMs ?? undefined,
+      });
+    case 'transient_upstream':
+      return omitUndefined({
+        retryable: true,
+        hint: 'retry_with_backoff',
+        retry_after_ms: retryAfterMs ?? undefined,
+      });
+    case 'unsupported_feature':
+      return {
+        retryable: false,
+        hint: 'remove_or_downgrade_unsupported_feature',
+      };
+    case 'not_found':
+      return {
+        retryable: false,
+        hint: 'check_model_or_route',
+      };
+    case 'invalid_request':
+      return {
+        retryable: false,
+        hint: 'fix_request',
+      };
+    case 'malformed_upstream':
+    case 'upstream_failure':
+    default:
+      return omitUndefined({
+        retryable: true,
+        hint: 'retry_or_inspect_upstream',
+        retry_after_ms: retryAfterMs ?? undefined,
+      });
   }
 }
 

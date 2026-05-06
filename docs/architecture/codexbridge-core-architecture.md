@@ -259,6 +259,7 @@ Current Phase 5 decision:
 - keep package-local build output under `packages/codex-gateway/dist` so `package.json` exports and files describe real artifacts
 - allow an internal-only standalone launcher for the local `/v1/responses` adapter server, as long as it stays inside the package boundary and does not pull bridge runtime concerns back in
 - let server-side upstream error normalization preserve actionable gateway metadata such as `retry_after_ms`, request IDs, and selected rate-limit headers when available
+- let server-side upstream error normalization expose stable machine-readable categories and retry hints for authentication, rate limits, transient upstream failures, unsupported features, invalid requests, and malformed success payloads
 - let package-level model catalogs normalize optional pricing and context-window metadata so `/v1/models` can expose richer provider/model hints without bridge-specific logic
 - let usage normalization fold common provider aliases for cache, reasoning, audio, and prediction-token accounting into stable Responses usage details
 - let usage normalization associate usage totals with normalized model pricing metadata so the package can expose estimated input/output/total cost without bridge-owned billing logic

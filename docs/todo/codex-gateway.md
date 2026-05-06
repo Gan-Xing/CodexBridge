@@ -89,6 +89,7 @@ Latest progress:
 - [x] LiteLLM-inspired usage normalization now associates response usage with normalized model pricing metadata to expose estimated input, output, and total cost at the package boundary
 - [x] Package `/v1/models` output now includes a normalized `protocol` view that merges provider defaults with model overrides for tools, multimodal input, reasoning, compact support, structured output, and output-token limits
 - [x] Package-local trace mode now exposes optional request/response/retry/stream trace hooks, and the internal standalone launcher can emit those trace events as NDJSON to stderr
+- [x] Upstream error normalization now exposes stable categories and retry hints for authentication, rate-limit, transient, unsupported-feature, invalid-request, and malformed-upstream cases
 - [x] `open-responses`-inspired package server coverage now locks `/models`, `/responses`, and `/responses/compact` as the primary Responses-first routes, while keeping `/v1/*` aliases for SDK compatibility
 - [x] `llm-rosetta`-inspired protocol-boundary rules now explicitly lock `openai-chat-compatible` to the current direct adapter path and defer Anthropic/Gemini-native targets behind a future IR gate
 
@@ -243,10 +244,11 @@ not bridge-side WeChat product work.
   JSON/schema support, reasoning support, web search, parallel tool calls,
   and provider/model-specific quirks where the metadata is reliable enough to
   drive downgrade or debug behavior.
-- [ ] Strengthen provider error taxonomy and retry hints beyond the current normalized upstream error surface
-  Distinguish authentication failures, rate limits, transient upstream
-  failures, unsupported-feature responses, and malformed provider payloads
-  with stable machine-readable categories and clearer retry guidance.
+- [x] Strengthen provider error taxonomy and retry hints beyond the current normalized upstream error surface
+  The package now distinguishes authentication failures, rate limits,
+  transient upstream failures, unsupported-feature responses, invalid
+  requests, and malformed provider payloads with stable machine-readable
+  categories and retry guidance.
 - [ ] Add package-local golden fixtures for real provider responses and stream events
   Capture representative non-streaming, streaming, tool-call, multimodal, and
   downgrade samples so future adapter changes can be checked against stable

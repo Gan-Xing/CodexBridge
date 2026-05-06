@@ -433,12 +433,123 @@ test('adapter server preserves retry-after and rate-limit metadata for upstream 
     assert.equal(body.error.message, 'Rate limit exceeded for deployment');
     assert.equal(body.error.type, 'rate_limit_error');
     assert.equal(body.error.code, 'rate_limit_exceeded');
+    assert.equal(body.error.category, 'rate_limit');
     assert.equal(body.error.retry_after_ms, 12_000);
+    assert.deepEqual(body.error.retry, {
+      retryable: true,
+      hint: 'respect_retry_after',
+      retry_after_ms: 12_000,
+    });
     assert.equal(body.error.metadata.request_id, 'req_litellm_style_123');
     assert.equal(body.error.metadata.region, 'eastus');
     assert.deepEqual(body.error.metadata.rate_limit_headers, {
       'x-ratelimit-remaining-requests': '99',
       'x-ratelimit-remaining-tokens': '9999',
+    });
+  } finally {
+    await server.stop();
+  }
+});
+
+test('adapter server categorizes authentication and unsupported-feature upstream errors', async () => {
+  let calls = 0;
+  const server = new OpenAICompatibleResponsesAdapterServer({
+    apiKey: 'test-key',
+    fetchImpl: (async () => {
+      calls += 1;
+      if (calls === 1) {
+        return new Response(JSON.stringify({
+          error: {
+            message: 'Invalid API key provided',
+            type: 'authentication_error',
+          },
+        }), {
+          status: 401,
+          headers: {
+            'Content-Type': 'application/json',
+          },
+        });
+      }
+      return new Response(JSON.stringify({
+        error: {
+          message: 'response_format is not supported for this model',
+          type: 'invalid_request_error',
+        },
+      }), {
+        status: 400,
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
+    }) as typeof fetch,
+  });
+
+  await server.start();
+  try {
+    const authResponse = await fetch(`${server.baseUrl}/v1/responses`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'example-model',
+        input: 'auth case',
+      }),
+    });
+    const authBody = await authResponse.json() as any;
+    assert.equal(authResponse.status, 401);
+    assert.equal(authBody.error.category, 'authentication');
+    assert.deepEqual(authBody.error.retry, {
+      retryable: false,
+      hint: 'check_api_key_or_access',
+    });
+
+    const unsupportedResponse = await fetch(`${server.baseUrl}/v1/responses`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'example-model',
+        input: 'unsupported case',
+      }),
+    });
+    const unsupportedBody = await unsupportedResponse.json() as any;
+    assert.equal(unsupportedResponse.status, 400);
+    assert.equal(unsupportedBody.error.category, 'unsupported_feature');
+    assert.deepEqual(unsupportedBody.error.retry, {
+      retryable: false,
+      hint: 'remove_or_downgrade_unsupported_feature',
+    });
+  } finally {
+    await server.stop();
+  }
+});
+
+test('adapter server returns malformed-upstream taxonomy when a success payload cannot be adapted', async () => {
+  const server = new OpenAICompatibleResponsesAdapterServer({
+    apiKey: 'test-key',
+    fetchImpl: (async () => new Response(JSON.stringify('bad-success-payload'), {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    })) as typeof fetch,
+  });
+
+  await server.start();
+  try {
+    const response = await fetch(`${server.baseUrl}/responses`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'example-model',
+        input: 'bad upstream payload',
+      }),
+    });
+    const body = await response.json() as any;
+    assert.equal(response.status, 502);
+    assert.equal(body.error.code, 'malformed_upstream_payload');
+    assert.equal(body.error.category, 'malformed_upstream');
+    assert.deepEqual(body.error.retry, {
+      retryable: true,
+      hint: 'retry_or_inspect_upstream',
     });
   } finally {
     await server.stop();
