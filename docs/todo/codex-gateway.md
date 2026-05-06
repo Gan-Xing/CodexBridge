@@ -64,7 +64,7 @@ Avoid frequent edits here unless the change is truly cross-cutting:
 
 - [ ] Finish live-provider smoke coverage for Qwen/DashScope and OpenRouter once credentials are available
 - [x] Keep new provider onboarding config-first and capability-driven instead of adding one-off provider classes
-- [ ] Keep package ownership strictly at protocol/gateway level
+- [x] Keep package ownership strictly at protocol/gateway level
 - [ ] Decide whether Phase 5 should remain internal-only or move toward publishable package form
 
 Latest progress:
@@ -74,6 +74,7 @@ Latest progress:
 - [x] `CODEX_COMPAT_PROFILES_JSON` can now declare multiple custom OpenAI-compatible provider profiles without adding new provider/plugin classes
 - [x] `CODEX_COMPAT_PROFILES_PATH` now supports file-based custom compatible provider lists, with inline JSON taking precedence for duplicate IDs
 - [x] Custom compatible profile JSON ignores invalid entries while preserving existing built-in preset, single-profile, and legacy config paths
+- [x] `scripts/check-codex-gateway-boundary.mjs` now enforces that legacy bridge-side shim files stay pure re-exports into `packages/codex-gateway`
 
 ## Packaging Direction
 

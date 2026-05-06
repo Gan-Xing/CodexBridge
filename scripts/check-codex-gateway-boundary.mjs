@@ -5,6 +5,12 @@ import { builtinModules } from 'node:module';
 const repoRoot = process.cwd();
 const packageRoot = path.join(repoRoot, 'packages', 'codex-gateway');
 const sourceRoot = path.join(packageRoot, 'src');
+const legacyShimFiles = new Map([
+  ['src/providers/openai_compatible/responses_adapter.ts', "export * from '../../../packages/codex-gateway/src/converters/responses_adapter.js';"],
+  ['src/providers/openai_compatible/responses_adapter_server.ts', "export * from '../../../packages/codex-gateway/src/server/responses_adapter_server.js';"],
+  ['src/providers/openai_compatible/capability_presets.ts', "export * from '../../../packages/codex-gateway/src/capabilities/capability_presets.js';"],
+  ['src/providers/shared/thinking_policy.ts', "export * from '../../../packages/codex-gateway/src/capabilities/thinking_policy.js';"],
+]);
 const nodeBuiltins = new Set([
   ...builtinModules,
   ...builtinModules.map((name) => `node:${name}`),
@@ -49,6 +55,10 @@ function resolveRelativeImport(fromFile, specifier) {
   return `${resolved}.ts`;
 }
 
+function normalizeText(text) {
+  return text.replace(/\r\n/g, '\n').trim();
+}
+
 const failures = [];
 
 for (const file of listTypeScriptFiles(sourceRoot)) {
@@ -74,6 +84,20 @@ for (const file of listTypeScriptFiles(sourceRoot)) {
     if (!nodeBuiltins.has(specifier)) {
       failures.push(`${path.relative(repoRoot, file)} imports external module: ${specifier}`);
     }
+  }
+}
+
+for (const [relativePath, expectedContent] of legacyShimFiles) {
+  const absolutePath = path.join(repoRoot, relativePath);
+  if (!fs.existsSync(absolutePath)) {
+    failures.push(`missing legacy Codex Gateway shim: ${relativePath}`);
+    continue;
+  }
+  const actualContent = normalizeText(fs.readFileSync(absolutePath, 'utf8'));
+  if (actualContent !== expectedContent) {
+    failures.push(
+      `${relativePath} must remain a pure re-export shim pointing into packages/codex-gateway`,
+    );
   }
 }
 
