@@ -1,0 +1,26 @@
+{
+  "name": "@codexbridge/responses-adapter",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Protocol adapter for exposing OpenAI Responses-compatible behavior over Chat Completions providers.",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test test/public_surface.test.ts"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

@@ -17,6 +17,7 @@
     "types": ["node"]
   },
   "include": [
+    "packages/**/*.ts",
     "src/**/*.ts",
     "test/**/*.js",
     "test/**/*.ts"

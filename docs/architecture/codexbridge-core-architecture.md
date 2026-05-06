@@ -4,6 +4,14 @@
 
 `CodexBridge` is a `platform plugins + Codex engine adapter + bridge core` project.
 
+Immutable product target:
+
+> CodexBridge 的目标是通过微信稳定暴露 Codex 原生能力，并在桥接层扩展微信命令和个人助理工作流；`@codexbridge/responses-adapter` 的目标是让 CodexBridge 能稳定接入多模型来源。
+
+This target should not change during implementation. The route, package layout,
+and migration order may change as the code evolves, but changes should continue
+to serve this target.
+
 The first shipped path is:
 
 - platform: `WeChat`
@@ -224,6 +232,9 @@ The compatibility layer follows the same split as CLIProxyAPI:
 - provider profiles only decide credentials, base URL, and default model
 - model differences live in `openai_compatible` capability presets and catalog data
 - thinking/reasoning differences are translated from model capabilities
+- payload differences use CLIProxyAPI-style data rules instead of provider-specific branches
+- external model catalogs can be imported from CLIProxyAPI `models.json`-shaped files and merged into runtime capabilities
+- transient upstream retry is opt-in env configuration, not hidden provider behavior
 - local translator repairs are generic and model-keyed, not provider-class keyed
 - deployment details such as auth pools, OAuth refresh, proxy rotation, or custom
   provider headers stay outside the bridge provider abstraction
@@ -233,6 +244,187 @@ Important rule:
 - it must not reuse the OpenAI profile's real Codex thread id
 - switching to another provider profile creates a new bridge session
 - the platform binding moves, but the provider boundary stays clean
+
+## Responses Adapter Package Architecture
+
+The OpenAI-compatible protocol adapter should become an internal TypeScript
+package first, then a publishable npm package only after its API boundary is
+stable.
+
+Target dependency direction:
+
+```text
+WeChat / Telegram
+  -> CodexBridge platform runtime
+  -> Bridge core sessions and provider profiles
+  -> OpenAICompatibleProviderPlugin
+  -> @codexbridge/responses-adapter
+  -> upstream OpenAI-compatible Chat Completions provider
+```
+
+Runtime request map:
+
+```text
+Codex app-server / Codex CLI
+  POST /v1/responses
+    local adapter server
+      responsesRequestToChatCompletions()
+        upstream POST /v1/chat/completions
+      chatCompletionsResponseToResponses()
+  SSE /v1/responses
+    local adapter server
+      upstream Chat Completions SSE
+      translateChatCompletionsSseToResponsesEvents()
+  GET /v1/models
+    model catalog + provider capability metadata
+```
+
+Suggested internal package layout:
+
+```text
+packages/responses-adapter/
+  package.json
+  tsconfig.json
+  src/
+    index.ts
+    types/
+      responses.ts
+      chat.ts
+      capability.ts
+      stream.ts
+    converters/
+      responses_to_chat.ts
+      chat_to_responses.ts
+      tool_calls.ts
+      multimodal.ts
+      usage.ts
+      errors.ts
+    stream/
+      sse_parser.ts
+      chat_stream_to_responses.ts
+      responses_event_builder.ts
+    capabilities/
+      catalog.ts
+      presets.ts
+      payload_rules.ts
+      thinking_policy.ts
+    server/
+      responses_adapter_server.ts
+```
+
+The package owns only reusable protocol behavior:
+
+- `/v1/responses` request conversion into upstream Chat Completions payloads
+- upstream Chat Completions JSON response conversion into Responses objects
+- upstream Chat Completions SSE conversion into Responses SSE events
+- function/tool call conversion, including streaming argument deltas
+- provider usage/token normalization
+- provider error and stream failure normalization
+- capability-driven downgrades for tools, reasoning, JSON/schema, multimodal input, and unsupported parameters
+- local adapter server routes for `/v1/responses`, `/v1/responses/compact`, and `/v1/models`
+
+Phase 0 freezes the current migration surface before files move. This is the
+surface that current CodexBridge code and tests depend on, not the final npm
+package API:
+
+```ts
+export function responsesRequestToChatCompletions(request, options): ChatRequest;
+export function chatCompletionsResponseToResponses(response, options): ResponsesObject;
+export function translateChatCompletionsSseToResponsesEvents(chunks, options): ResponsesEvent[];
+export async function* translateChatCompletionsSseStreamToResponsesSse(stream, options): AsyncGenerator<string>;
+export function responsesRequestToCompactionResponse(request, options): ResponsesObject;
+export function getOpenAICompatibleProviderPreset(id): ProviderPreset;
+export function buildOpenAICompatibleModelCatalog(options): ProviderModelInfo[];
+export function buildOpenAICompatibleExternalModelCatalog(options): ProviderModelInfo[];
+export function mergeOpenAICompatibleProviderCapabilities(...items): ProviderCapabilities;
+export function resolveOpenAICompatibleProviderCapabilitiesForModel(capabilities, model): ProviderCapabilities;
+export function resolveReasoningEffortForProvider(options): ReasoningEffort | null;
+export function applyThinkingPolicyToOpenAIChatRequest(target, policy, effort): JsonRecord;
+export class OpenAICompatibleResponsesAdapterServer {}
+export function reserveLocalPort(): Promise<number>;
+```
+
+The WebSocket repair primitives are also part of the Phase 0 migration surface
+because they are protocol-layer behavior, even though the current local adapter
+server path avoids WebSocket mode by default:
+
+```ts
+export function normalizeResponsesWebSocketRequest(request, cache): ResponsesWebSocketNormalizeResult;
+export function repairResponsesWebSocketToolCalls(request, cache): JsonRecord;
+export function repairResponsesWebSocketToolCallInput(input, cache): JsonRecord;
+export function recordResponsesWebSocketToolCallsFromEvent(event, cache): void;
+export function shouldReplaceResponsesWebSocketTranscript(request): boolean;
+```
+
+The future stable npm API should be smaller than this migration surface.
+Everything else should remain private until at least one external consumer needs
+it. This prevents the future npm package from locking in internal helper shapes
+too early.
+
+Phase 0 validation baseline:
+
+- `pnpm exec tsx --test test/providers/openai_compatible/responses_adapter.test.ts`
+- `pnpm exec tsx --test test/providers/openai_compatible/responses_adapter_server.test.ts`
+- `pnpm exec tsx --test test/providers/openai_compatible/responses_websocket_repair.test.ts`
+- `pnpm exec tsx --test test/providers/openai_compatible/plugin.test.ts`
+
+Phase 1A establishes the package boundary without moving production adapter
+logic yet:
+
+- package root: `packages/responses-adapter`
+- source entry: `packages/responses-adapter/src/index.ts`
+- package typecheck: `pnpm run responses-adapter:typecheck`
+- package build: `pnpm run responses-adapter:build`
+- package public-surface test: `pnpm run responses-adapter:test`
+- boundary check: `pnpm run responses-adapter:check-boundary`
+
+The Phase 1A package entry only exports the boundary contract metadata. Adapter
+functions remain under `src/providers/openai_compatible/*` until the next
+phases move real protocol code behind shims.
+
+CodexBridge keeps all bridge/runtime behavior:
+
+- WeChat and Telegram transports
+- SendGate, message chunking, typing, and platform rate-limit behavior
+- slash commands, i18n, help text, and user-facing interaction design
+- bridge sessions, provider profile selection, thread binding, and recovery
+- approvals, retries, reconnects, and interrupted-turn handling
+- assistant records, automations, uploads, and artifact delivery policy
+- native OpenAI Codex app-server account/session handling
+
+The first extraction should preserve old import paths with re-export shims, so
+existing provider code can migrate incrementally:
+
+```text
+src/providers/openai_compatible/responses_adapter.ts
+  re-exports from packages/responses-adapter
+
+src/providers/openai_compatible/responses_adapter_server.ts
+  re-exports from packages/responses-adapter
+
+src/providers/openai_compatible/capability_presets.ts
+  re-exports from packages/responses-adapter
+
+src/providers/shared/thinking_policy.ts
+  re-exports from packages/responses-adapter
+```
+
+This keeps the current bridge stable while creating a clean package boundary for
+future reuse by Telegram Bridge, Mission Control, or a standalone proxy.
+
+Extraction dependency rules:
+
+- package code must not import from `src/core`, `src/platforms`, `src/runtime`, `src/store`, or `src/i18n`
+- package code may depend on Node built-ins and local package files only
+- CodexBridge provider code may import package APIs, but package code must never import CodexBridge provider code
+- live-provider smoke tests stay in CodexBridge until the adapter package has a stable fixture-based contract suite
+- the package should not expose account, auth-pool, proxy-rotation, or OAuth concepts until those become a separate deployment package
+
+Deferred architecture:
+
+- a full IR layer is useful later, but the first extraction should remain Responses-to-Chat because that is the active production path
+- a standalone HTTP proxy binary is useful later, but it should wrap the package after CodexBridge integration is stable
+- Anthropic/Gemini native endpoints should wait until the package boundary is proven with OpenAI-compatible Chat providers
 
 ## Current Implementation Strategy
 
