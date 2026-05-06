@@ -12,8 +12,8 @@ import {
 } from '../src/index.js';
 import type { MissionAttempt, MissionEvent } from '../src/index.js';
 
-test('mission control package exposes the phase-1 domain and persistence surface', () => {
-  assert.equal(MISSION_CONTROL_PACKAGE_PHASE, 'phase-5-runtime-loop');
+test('mission control package exposes the current Mission Control phase marker', () => {
+  assert.equal(MISSION_CONTROL_PACKAGE_PHASE, 'phase-6-codexbridge-integration');
 });
 
 test('mission state transitions are explicit and reject invalid transitions', () => {

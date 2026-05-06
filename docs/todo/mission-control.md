@@ -96,15 +96,15 @@ Rules for references:
 Mission Control should preserve these Symphony ideas as explicit design
 constraints, not just as vague inspiration:
 
-- [ ] Repository-owned workflow contract is the primary runtime policy source
-- [ ] Single-authority orchestrator owns dispatch, retries, cancellation, and
+- [x] Repository-owned workflow contract is the primary runtime policy source
+- [x] Single-authority orchestrator owns dispatch, retries, cancellation, and
   reconciliation
-- [ ] Stable workspace identity survives retries and normal exits
-- [ ] Continuation after normal exit is supported; retries are not failure-only
-- [ ] Handoff or waiting-human outcomes are first-class mission states
-- [ ] Status surfaces observe and control the orchestrator but do not own run
+- [x] Stable workspace identity survives retries and normal exits
+- [x] Continuation after normal exit is supported; retries are not failure-only
+- [x] Handoff or waiting-human outcomes are first-class mission states
+- [x] Status surfaces observe and control the orchestrator but do not own run
   execution
-- [ ] Policy/config/coordination/execution/status layers remain separated
+- [x] Policy/config/coordination/execution/status layers remain separated
 
 ## Packaging Direction
 
@@ -146,12 +146,12 @@ Package bootstrap target:
 
 This backlog follows the route below:
 
-- [ ] Use Symphony to define the orchestrator/workspace/retry/state-machine shape
-- [ ] Preserve the Symphony idea that normal worker exit may still schedule a
+- [x] Use Symphony to define the orchestrator/workspace/retry/state-machine shape
+- [x] Preserve the Symphony idea that normal worker exit may still schedule a
   continuation retry
-- [ ] Preserve the Symphony idea that handoff/waiting states are legitimate
+- [x] Preserve the Symphony idea that handoff/waiting states are legitimate
   mission outcomes, not only failures
-- [ ] Use current Codex app-server flow as the first real provider:
+- [x] Use current Codex app-server flow as the first real provider:
   `CodexMissionProvider`
 - [ ] Add a future `OpenAIAgentsMissionProvider` on top of
   `openai-agents-js`, not as the default runtime
@@ -159,7 +159,7 @@ This backlog follows the route below:
   references
 - [ ] Reuse only the prototype pieces from local `codex-mission-control` that
   survive the provider-pluggable package boundary
-- [ ] Converge the result into one provider-pluggable package:
+- [x] Converge the result into one provider-pluggable package:
   `@codexbridge/mission-control`
 
 ## Phase 0: Baseline Current `/agent` Behavior
@@ -453,6 +453,16 @@ Phase 6 source-of-truth tests:
 - `test/runtime/weixin_bridge_runtime.test.ts`
   - `WeixinBridgeRuntime runs due automation jobs against the same WeChat scope and records completion`
 
+Phase 6e landed: public package metadata and checklist status now track the
+verified CodexBridge integration state so that:
+
+- `@codexbridge/mission-control` publishes a `phase-6-codexbridge-integration`
+  marker instead of the stale Phase 5 label
+- package README and public-surface tests reflect that `/agent` and scheduled
+  `/auto` already delegate into the same Mission Control runtime
+- checklist items backed by Mission Control package tests, bridge integration
+  tests, and the package boundary check are marked complete
+
 ## Phase 7: Optional Web Surface
 
 Only after chat control is solid:
@@ -489,10 +499,10 @@ Source expansion:
 
 Mission Control is ready for broader extraction when:
 
-- [ ] A user can give one goal and the system keeps working until it completes,
+- [x] A user can give one goal and the system keeps working until it completes,
   blocks, fails, or is stopped
-- [ ] Restart recovery works for queued/running/verifying missions
-- [ ] `/agent` and `/auto` both use the same mission runtime
-- [ ] The package has no imports from platform/runtime/i18n command code
+- [x] Restart recovery works for queued/running/verifying missions
+- [x] `/agent` and `/auto` both use the same mission runtime
+- [x] The package has no imports from platform/runtime/i18n command code
 - [ ] A later Telegram, web, or other host surface can integrate without changing mission
   core behavior

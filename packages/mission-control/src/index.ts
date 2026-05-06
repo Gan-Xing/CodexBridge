@@ -1,6 +1,6 @@
 export const MISSION_CONTROL_PACKAGE_NAME = '@codexbridge/mission-control' as const;
 
-export const MISSION_CONTROL_PACKAGE_PHASE = 'phase-5-runtime-loop' as const;
+export const MISSION_CONTROL_PACKAGE_PHASE = 'phase-6-codexbridge-integration' as const;
 
 export const MISSION_CONTROL_OWNS = [
   'mission-domain-model',

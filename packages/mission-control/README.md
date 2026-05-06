@@ -35,14 +35,16 @@ It must not own bridge behavior:
 
 Current phase:
 
-- `phase-5-runtime-loop`: package boundary plus durable mission
+- `phase-6-codexbridge-integration`: package boundary plus durable mission
   domain, repository-backed persistence, typed workflow loading, canonical
   attempt prompt contract, workpad status rendering helpers, deterministic
   workspace assignment, recovery-safe lease coordination, provider port,
   `CodexMissionProvider` adapter shell, verifier/budget/repair-prompt
   primitives, package-owned retry/resume snapshot helpers, and a
   repository-backed bounded mission runtime that drives continuation,
-  repair/retry, verifier authority, and stop/interrupt control
+  repair/retry, verifier authority, and stop/interrupt control, with
+  CodexBridge `/agent` and scheduled `/auto` runs delegating into the same
+  Mission Control runtime without introducing a separate `/mission` surface
 
 This package should preserve the Symphony-style separation between:
 
