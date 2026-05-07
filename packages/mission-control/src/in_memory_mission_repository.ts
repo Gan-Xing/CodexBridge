@@ -1,4 +1,9 @@
-import { hashChecklistSnapshot, normalizeMissionRecord } from './domain_records.js';
+import {
+  hashChecklistSnapshot,
+  normalizeMissionRecord,
+  normalizeWorkflowHash,
+  normalizeWorkflowResolverReason,
+} from './domain_records.js';
 import { isMissionResumable } from './state_machine.js';
 import type { MissionRepository } from './repository.js';
 import type {
@@ -160,12 +165,16 @@ function normalizeState(state: InMemoryState): InMemoryState {
     missions: Array.isArray(state.missions)
       ? state.missions.map((mission) => normalizeMissionRecord(cloneValue(mission)))
       : [],
-    generations: Array.isArray(state.generations) ? cloneValue(state.generations) : [],
+    generations: Array.isArray(state.generations)
+      ? state.generations.map((generation) => normalizeGeneration(cloneValue(generation)))
+      : [],
     checklistSnapshots: Array.isArray(state.checklistSnapshots)
       ? state.checklistSnapshots.map((snapshot) => normalizeChecklistSnapshot(cloneValue(snapshot)))
       : [],
     planChangeRequests: Array.isArray(state.planChangeRequests) ? cloneValue(state.planChangeRequests) : [],
-    attempts: Array.isArray(state.attempts) ? cloneValue(state.attempts) : [],
+    attempts: Array.isArray(state.attempts)
+      ? state.attempts.map((attempt) => normalizeAttempt(cloneValue(attempt)))
+      : [],
     events: Array.isArray(state.events) ? cloneValue(state.events) : [],
   };
 }
@@ -205,8 +214,47 @@ function normalizeChecklistSnapshot(snapshot: ChecklistSnapshot): ChecklistSnaps
   };
 }
 
+function normalizeGeneration(generation: MissionGeneration): MissionGeneration {
+  return {
+    ...generation,
+    checklistSnapshotId: typeof generation.checklistSnapshotId === 'string'
+      ? generation.checklistSnapshotId
+      : null,
+    parentGenerationId: typeof generation.parentGenerationId === 'string'
+      ? generation.parentGenerationId
+      : null,
+    workflowPath: typeof generation.workflowPath === 'string' ? generation.workflowPath : null,
+    workflowHash: normalizeWorkflowHash(generation.workflowHash),
+    resolverReason: normalizeWorkflowResolverReason(generation.resolverReason),
+    summary: typeof generation.summary === 'string' ? generation.summary : null,
+  };
+}
+
+function normalizeAttempt(attempt: MissionAttempt): MissionAttempt {
+  return {
+    ...attempt,
+    missingAcceptanceCriteria: Array.isArray(attempt.missingAcceptanceCriteria)
+      ? [...attempt.missingAcceptanceCriteria]
+      : [],
+    generationId: typeof attempt.generationId === 'string' ? attempt.generationId : null,
+    generationIndex: normalizePositiveInteger(attempt.generationIndex),
+    checklistSnapshotId: typeof attempt.checklistSnapshotId === 'string' ? attempt.checklistSnapshotId : null,
+    workflowPath: typeof attempt.workflowPath === 'string' ? attempt.workflowPath : null,
+    workflowHash: normalizeWorkflowHash(attempt.workflowHash),
+    resolverReason: normalizeWorkflowResolverReason(attempt.resolverReason),
+  };
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function normalizePositiveInteger(value: number | null | undefined): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return null;
+  }
+  const normalized = Math.trunc(value);
+  return normalized > 0 ? normalized : null;
 }
 
 function upsertById<T extends { id: string }>(items: T[], value: T): T[] {

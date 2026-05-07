@@ -11,7 +11,7 @@ import {
 
 test('mission control package exposes the package boundary contract', () => {
   assert.equal(MISSION_CONTROL_PACKAGE_NAME, '@codexbridge/mission-control');
-  assert.equal(MISSION_CONTROL_PACKAGE_PHASE, 'phase-9q-paused-approval-resolution');
+  assert.equal(MISSION_CONTROL_PACKAGE_PHASE, 'phase-9r-workflow-resolver-trace');
   assert.equal(MISSION_CYCLE_RESULT_SCHEMA_VERSION, 'mission-cycle/v1');
   assert.ok(MISSION_CONTROL_OWNS.includes('mission-domain-model'));
   assert.ok(MISSION_CONTROL_OWNS.includes('provider-abstraction'));

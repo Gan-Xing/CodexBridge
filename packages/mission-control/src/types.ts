@@ -32,6 +32,13 @@ export type MissionPriority = 'low' | 'normal' | 'high';
 
 export type MissionRiskLevel = 'low' | 'medium' | 'high';
 
+export type MissionWorkflowResolverReason =
+  | 'explicit_override'
+  | 'workspace_default'
+  | 'cwd_default'
+  | 'built_in_default'
+  | `rule:${string}`;
+
 export type MissionGenerationTrigger = 'initial' | 'retry' | 'resume';
 
 export type MissionGenerationStatus =
@@ -226,6 +233,9 @@ export interface MissionGeneration {
   trigger: MissionGenerationTrigger;
   parentGenerationId: string | null;
   checklistSnapshotId: string | null;
+  workflowPath: string | null;
+  workflowHash: string | null;
+  resolverReason: MissionWorkflowResolverReason | null;
   status: MissionGenerationStatus;
   attemptCount: number;
   summary: string | null;
@@ -261,6 +271,8 @@ export interface Mission {
   cwd: string | null;
   workspacePath: string | null;
   workflowPath: string | null;
+  workflowHash: string | null;
+  workflowResolverReason: MissionWorkflowResolverReason | null;
   providerProfileId: string;
   bridgeSessionId: string | null;
   codexThreadId: string | null;
@@ -295,6 +307,9 @@ export interface MissionAttempt {
   status: MissionAttemptStatus;
   providerRunId: string | null;
   providerThreadId: string | null;
+  workflowPath: string | null;
+  workflowHash: string | null;
+  resolverReason: MissionWorkflowResolverReason | null;
   promptDigest: string | null;
   verifierVerdict: MissionVerifierVerdict | null;
   verifierSummary: string | null;
@@ -340,6 +355,8 @@ export interface CreateMissionInput {
   cwd?: string | null;
   workspacePath?: string | null;
   workflowPath?: string | null;
+  workflowHash?: string | null;
+  workflowResolverReason?: MissionWorkflowResolverReason | null;
   providerProfileId: string;
   bridgeSessionId?: string | null;
   codexThreadId?: string | null;

@@ -8,6 +8,7 @@ import type {
   MissionLoopPolicy,
   MissionStopRequest,
   MissionStatus,
+  MissionWorkflowResolverReason,
   WorkItem,
 } from './types.js';
 
@@ -97,6 +98,9 @@ export function normalizeMissionRecord(mission: Mission): Mission {
     expectedOutput,
     acceptanceCriteria: normalizeStringList(mission.acceptanceCriteria),
     plan: normalizeStringList(mission.plan),
+    workflowHash: normalizeWorkflowHash(mission.workflowHash),
+    workflowResolverReason: normalizeWorkflowResolverReason(mission.workflowResolverReason)
+      ?? (normalizeText(mission.workflowPath) ? 'explicit_override' : null),
     maxAttempts: loopPolicy.maxAttempts ?? normalizePositiveInteger(mission.maxAttempts) ?? 1,
     maxTurns: loopPolicy.maxTurns ?? normalizePositiveInteger(mission.maxTurns) ?? 1,
     stopRequest: normalizeMissionStopRequest(mission.stopRequest),
@@ -183,6 +187,9 @@ export function createMissionGeneration(
     trigger?: MissionGeneration['trigger'];
     parentGenerationId?: string | null;
     checklistSnapshotId?: string | null;
+    workflowPath?: string | null;
+    workflowHash?: string | null;
+    resolverReason?: MissionWorkflowResolverReason | null;
     status?: MissionGenerationStatus | null;
     summary?: string | null;
   } = {},
@@ -200,6 +207,9 @@ export function createMissionGeneration(
     trigger: options.trigger ?? (index === 1 ? 'initial' : 'retry'),
     parentGenerationId: options.parentGenerationId ?? null,
     checklistSnapshotId: options.checklistSnapshotId ?? normalized.currentChecklistSnapshotId,
+    workflowPath: normalizeText(options.workflowPath) ?? normalized.workflowPath,
+    workflowHash: normalizeWorkflowHash(options.workflowHash) ?? normalized.workflowHash,
+    resolverReason: normalizeWorkflowResolverReason(options.resolverReason) ?? normalized.workflowResolverReason,
     status,
     attemptCount: normalized.attemptCount,
     summary: normalizeText(options.summary) ?? normalizeText(normalized.statusReason) ?? null,
@@ -218,6 +228,8 @@ export function createMissionRetryAggregate(
     bridgeSessionId?: string | null;
     codexThreadId?: string | null;
     workflowPath?: string | null;
+    workflowHash?: string | null;
+    workflowResolverReason?: MissionWorkflowResolverReason | null;
     workspacePath?: string | null;
   } = {},
 ): {
@@ -241,6 +253,16 @@ export function createMissionRetryAggregate(
     workflowPath: options.workflowPath !== undefined
       ? options.workflowPath
       : current.workflowPath,
+    workflowHash: options.workflowHash !== undefined
+      ? normalizeWorkflowHash(options.workflowHash)
+      : (options.workflowPath !== undefined ? null : current.workflowHash),
+    workflowResolverReason: options.workflowResolverReason !== undefined
+      ? normalizeWorkflowResolverReason(options.workflowResolverReason)
+      : (
+        options.workflowPath !== undefined
+          ? (normalizeText(options.workflowPath) ? 'explicit_override' : null)
+          : current.workflowResolverReason
+      ),
     workspacePath: options.workspacePath !== undefined
       ? options.workspacePath
       : current.workspacePath,
@@ -406,6 +428,29 @@ function normalizeGenerationStatus(value: string | null | undefined): MissionGen
     return value;
   }
   return null;
+}
+
+export function normalizeWorkflowResolverReason(
+  value: MissionWorkflowResolverReason | string | null | undefined,
+): MissionWorkflowResolverReason | null {
+  if (value === 'explicit_override'
+    || value === 'workspace_default'
+    || value === 'cwd_default'
+    || value === 'built_in_default') {
+    return value;
+  }
+  if (typeof value === 'string' && /^rule:[A-Za-z0-9._-]+$/.test(value.trim())) {
+    return value.trim() as MissionWorkflowResolverReason;
+  }
+  return null;
+}
+
+export function normalizeWorkflowHash(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim().toLowerCase();
+  return /^[a-f0-9]{64}$/.test(trimmed) ? trimmed : null;
 }
 
 function normalizePositiveInteger(value: number | null | undefined): number | null {

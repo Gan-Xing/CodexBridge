@@ -245,6 +245,18 @@ Current convergence status:
     approval resolution or response-carrying resume flows, so the first host no
     longer needs shell-log inspection or an external `loop.sh` UX to keep a
     checklist-backed mission moving
+- Phase 9r now adds deterministic workflow resolution and trace metadata on top
+  of that package/runtime boundary:
+  - Mission Control exports a deterministic `MissionWorkflowResolver` that can
+    honor explicit workflow overrides, rule-based source/risk selection, and
+    workspace/cwd defaults without pushing host-local workflow choice back into
+    CodexBridge command handlers
+  - authoritative mission, generation, attempt, and execution views now retain
+    `workflowPath`, `workflowHash`, and `resolverReason`, so hosts can inspect
+    workflow provenance without reconstructing it from ad hoc local state
+  - runtime workflow-load failures now preserve that same trace metadata before
+    the mission fails, so invalid workflow incidents remain auditable through
+    package-owned state rather than bridge-local logs
 - `/agent` `list/show/stop/retry` now consume that package API through an
   authoritative mission repository plus `AgentJob` projection instead of
   rebuilding runtime truth directly from bridge compatibility fields
@@ -259,7 +271,16 @@ Current convergence status:
 - the first-host `/agent` surface now has package-backed prompt/checklist
   confirmation, paused-state continuation, plan-change resolution, loop
   snapshot, and supervision semantics, so the Mission Control/CodexBridge v0
-  integration boundary is intentionally stable
+  integration boundary is intentionally stable for query/confirm/stop flows
+- the remaining Phase 9 gaps are now:
+  - policy-driven proactive notification:
+    package-backed loop snapshots can already be queried on demand, but the
+    `/agent` host path still does not wire mission-cycle/status notifications
+    through its host adapter/send path as a first-class user-facing behavior
+  - persisted environment/checkpoint artifacts:
+    Mission Control still needs formal package-owned environment-stamp and
+    checkpoint records for recovery/audit instead of relying only on derived
+    snapshots, workpad state, and workspace layout helpers
 - broader issue/board sources, service exposure, and later providers remain
   explicitly deferred; they should not reopen bridge-owned runtime truth or
   weaken the current package/host adapter split when work resumes

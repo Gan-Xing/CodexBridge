@@ -35,6 +35,8 @@ function createQueuedMission(now: number) {
     codexThreadId: 'thread-api-1',
     cwd: '/repo',
     workflowPath: '/repo/.codexbridge/mission/WORKFLOW.md',
+    workflowHash: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+    workflowResolverReason: 'explicit_override',
     workspacePath: '/tmp/mission-control/workspaces/mission-api-1',
     maxAttempts: 3,
     maxTurns: 5,
@@ -1052,6 +1054,11 @@ test('direct mission control api exposes package-owned query views with boundary
   assert.equal(executionResult.data?.hostBindings.providerThreadId, 'thread-api-1');
   assert.equal(executionResult.data?.hostBindings.bridgeSessionId, 'session-api-1');
   assert.equal(executionResult.data?.executionRefs.workflowPath, '/repo/.codexbridge/mission/WORKFLOW.md');
+  assert.equal(
+    executionResult.data?.executionRefs.workflowHash,
+    '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+  );
+  assert.equal(executionResult.data?.executionRefs.resolverReason, 'explicit_override');
   assert.equal(executionResult.data?.artifactRefs[0]?.name, 'report.md');
   assert.equal(executionResult.data?.latestCycleResult?.audit.eventSeq, 1);
   assert.equal(executionResult.data?.loopSnapshot.status, 'verifying');

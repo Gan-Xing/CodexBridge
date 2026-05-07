@@ -1,6 +1,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { hashChecklistSnapshot, normalizeMissionRecord } from './domain_records.js';
+import {
+  hashChecklistSnapshot,
+  normalizeMissionRecord,
+  normalizeWorkflowHash,
+  normalizeWorkflowResolverReason,
+} from './domain_records.js';
 import { isMissionResumable } from './state_machine.js';
 import type { MissionRepository } from './repository.js';
 import type {
@@ -225,6 +230,9 @@ function normalizeAttempt(attempt: MissionAttempt): MissionAttempt {
     generationId: typeof attempt.generationId === 'string' ? attempt.generationId : null,
     generationIndex: normalizePositiveInteger(attempt.generationIndex),
     checklistSnapshotId: typeof attempt.checklistSnapshotId === 'string' ? attempt.checklistSnapshotId : null,
+    workflowPath: typeof attempt.workflowPath === 'string' ? attempt.workflowPath : null,
+    workflowHash: normalizeWorkflowHash(attempt.workflowHash),
+    resolverReason: normalizeWorkflowResolverReason(attempt.resolverReason),
   };
 }
 
@@ -233,6 +241,9 @@ function normalizeGeneration(generation: MissionGeneration): MissionGeneration {
     ...generation,
     checklistSnapshotId: typeof generation.checklistSnapshotId === 'string' ? generation.checklistSnapshotId : null,
     parentGenerationId: typeof generation.parentGenerationId === 'string' ? generation.parentGenerationId : null,
+    workflowPath: typeof generation.workflowPath === 'string' ? generation.workflowPath : null,
+    workflowHash: normalizeWorkflowHash(generation.workflowHash),
+    resolverReason: normalizeWorkflowResolverReason(generation.resolverReason),
     summary: typeof generation.summary === 'string' ? generation.summary : null,
   };
 }

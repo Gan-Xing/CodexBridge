@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -43,6 +44,7 @@ export interface MissionWorkflowSource {
 
 export interface LoadedMissionWorkflow {
   source: MissionWorkflowSource;
+  hash: string;
   policy: MissionWorkflowPolicy;
   rawFrontMatter: Record<string, unknown>;
   rawText: string;
@@ -118,6 +120,7 @@ export class MissionWorkflowLoader {
         path: resolvedPath,
         label: resolvedPath,
       },
+      hash: hashMissionWorkflowText(rawText),
       policy: {
         version: 1,
         maxTurns: validated.maxTurns ?? null,
@@ -168,6 +171,7 @@ export class MissionWorkflowLoader {
           ? `built-in defaults (missing ${resolvedPath})`
           : 'built-in defaults',
       },
+      hash: hashMissionWorkflowText(this.builtInPromptBody),
       policy: {
         version: 1,
         maxTurns: null,
@@ -187,6 +191,10 @@ export class MissionWorkflowLoader {
       rawText: this.builtInPromptBody,
     };
   }
+}
+
+export function hashMissionWorkflowText(rawText: string): string {
+  return crypto.createHash('sha256').update(rawText.replace(/\r\n/g, '\n')).digest('hex');
 }
 
 function splitWorkflowFrontMatter(rawText: string): { frontMatter: string; body: string } {

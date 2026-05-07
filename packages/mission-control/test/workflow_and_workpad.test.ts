@@ -6,6 +6,7 @@ import test from 'node:test';
 import {
   MissionWorkflowError,
   MissionWorkflowLoader,
+  MissionWorkflowResolver,
   createMission,
   createMissionAttemptPromptContract,
   createMissionChecklistSnapshot,
@@ -91,6 +92,73 @@ Broken workflow.
   assert.ok(result.error instanceof MissionWorkflowError);
   assert.equal(result.error?.workflowPath, workflowPath);
   assert.ok(result.error?.issues.some((issue) => issue.includes('version') || issue.includes('maxTurns')));
+});
+
+test('workflow resolver stays deterministic across explicit overrides, source/risk rules, and built-in fallback', () => {
+  const resolver = new MissionWorkflowResolver({
+    rules: [
+      {
+        id: 'local-todo-high-risk',
+        relativePath: '.codexbridge/mission/HIGH_RISK_WORKFLOW.md',
+        sources: ['local-todo'],
+        riskLevels: ['high'],
+        requireWorkspacePath: true,
+      },
+    ],
+  });
+
+  const explicit = resolver.resolve({
+    source: 'manual',
+    riskLevel: 'medium',
+    cwd: '/repo',
+    workspacePath: null,
+    workflowPath: './ops/WORKFLOW.md',
+    workflowResolverReason: 'explicit_override',
+  });
+  assert.deepEqual(explicit, {
+    explicitPath: path.resolve('/repo', './ops/WORKFLOW.md'),
+    workflowPath: path.resolve('/repo', './ops/WORKFLOW.md'),
+    resolverReason: 'explicit_override',
+    matchedRuleId: null,
+  });
+
+  const ruleDriven = resolver.resolve({
+    source: 'local-todo',
+    riskLevel: 'high',
+    cwd: '/repo',
+    workspacePath: '/workspace/mission-high-risk',
+    workflowPath: null,
+    workflowResolverReason: null,
+  });
+  assert.deepEqual(ruleDriven, {
+    explicitPath: path.resolve('/workspace/mission-high-risk', '.codexbridge/mission/HIGH_RISK_WORKFLOW.md'),
+    workflowPath: path.resolve('/workspace/mission-high-risk', '.codexbridge/mission/HIGH_RISK_WORKFLOW.md'),
+    resolverReason: 'rule:local-todo-high-risk',
+    matchedRuleId: 'local-todo-high-risk',
+  });
+  assert.deepEqual(ruleDriven, resolver.resolve({
+    source: 'local-todo',
+    riskLevel: 'high',
+    cwd: '/repo',
+    workspacePath: '/workspace/mission-high-risk',
+    workflowPath: null,
+    workflowResolverReason: null,
+  }));
+
+  const builtIn = resolver.resolve({
+    source: 'manual',
+    riskLevel: 'low',
+    cwd: null,
+    workspacePath: null,
+    workflowPath: null,
+    workflowResolverReason: null,
+  });
+  assert.deepEqual(builtIn, {
+    explicitPath: null,
+    workflowPath: null,
+    resolverReason: 'built_in_default',
+    matchedRuleId: null,
+  });
 });
 
 test('attempt prompt contract keeps workflow policy and runtime state separated', () => {

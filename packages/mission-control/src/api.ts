@@ -25,6 +25,7 @@ import {
   MissionWorkflowLoader,
   type LoadedMissionWorkflow,
 } from './workflow.js';
+import { MissionWorkflowResolver } from './workflow_resolver.js';
 import type { MissionRepository } from './repository.js';
 import type {
   ChecklistSnapshot,
@@ -78,6 +79,7 @@ export interface DirectMissionControlApiOptions {
   now?: () => number;
   generateId?: () => string;
   workflowLoader?: MissionWorkflowLoader;
+  workflowResolver?: MissionWorkflowResolver;
 }
 
 export class DirectMissionControlApi implements MissionControlApi {
@@ -88,6 +90,8 @@ export class DirectMissionControlApi implements MissionControlApi {
   private readonly generateId: () => string;
 
   private readonly workflowLoader: MissionWorkflowLoader;
+
+  private readonly workflowResolver: MissionWorkflowResolver;
 
   readonly commands: MissionControlCommands;
 
@@ -100,11 +104,13 @@ export class DirectMissionControlApi implements MissionControlApi {
     now = () => Date.now(),
     generateId = () => `mission-control-${Math.random().toString(16).slice(2)}`,
     workflowLoader = new MissionWorkflowLoader(),
+    workflowResolver = new MissionWorkflowResolver(),
   }: DirectMissionControlApiOptions) {
     this.repository = repository;
     this.now = now;
     this.generateId = generateId;
     this.workflowLoader = workflowLoader;
+    this.workflowResolver = workflowResolver;
     this.commands = {
       createMission: (request) => this.handleCreateMission(request),
       startMission: (request) => this.handleStartMission(request),
@@ -1002,10 +1008,11 @@ export class DirectMissionControlApi implements MissionControlApi {
     loadedWorkflow: LoadedMissionWorkflow | null;
     view: MissionSummaryView['workflow'];
   } {
+    const workflowSelection = this.workflowResolver.resolve(mission);
     const result = this.workflowLoader.tryLoad({
       cwd: mission.cwd,
       workspacePath: mission.workspacePath,
-      explicitPath: mission.workflowPath ?? undefined,
+      explicitPath: workflowSelection.explicitPath ?? undefined,
     });
     if (result.workflow) {
       return {
@@ -1017,7 +1024,7 @@ export class DirectMissionControlApi implements MissionControlApi {
         },
       };
     }
-    const workflowPath = result.error.workflowPath ?? mission.workflowPath ?? null;
+    const workflowPath = result.error.workflowPath ?? workflowSelection.workflowPath ?? mission.workflowPath ?? null;
     const error = result.error.issues.length > 0
       ? `${result.error.message} ${result.error.issues.join('; ')}`
       : result.error.message;
@@ -1037,15 +1044,32 @@ export class DirectMissionControlApi implements MissionControlApi {
 
   private buildMissionExecutionRefs(mission: Mission): MissionExecutionRefsView {
     const attempts = sortAttempts(this.repository.listAttempts(mission.id));
+    const activeGeneration = this.repository.getGenerationById(mission.activeGenerationId);
     const activeAttempt = mission.activeAttemptId
       ? attempts.find((attempt) => attempt.id === mission.activeAttemptId) ?? null
       : null;
     const latestAttempt = activeAttempt ?? attempts[attempts.length - 1] ?? null;
+    const workflowTrace = {
+      workflowPath: latestAttempt?.workflowPath
+        ?? activeGeneration?.workflowPath
+        ?? mission.workflowPath
+        ?? null,
+      workflowHash: latestAttempt?.workflowHash
+        ?? activeGeneration?.workflowHash
+        ?? mission.workflowHash
+        ?? null,
+      resolverReason: latestAttempt?.resolverReason
+        ?? activeGeneration?.resolverReason
+        ?? mission.workflowResolverReason
+        ?? null,
+    };
     return {
       activeAttemptId: mission.activeAttemptId,
       providerRunId: latestAttempt?.providerRunId ?? null,
       providerThreadId: latestAttempt?.providerThreadId ?? null,
-      workflowPath: mission.workflowPath,
+      workflowPath: workflowTrace.workflowPath,
+      workflowHash: workflowTrace.workflowHash,
+      resolverReason: workflowTrace.resolverReason,
       workspacePath: mission.workspacePath,
     };
   }

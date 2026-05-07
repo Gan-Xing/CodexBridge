@@ -75,6 +75,8 @@ export interface MissionExecutionRefsView {
   providerRunId: string | null;
   providerThreadId: string | null;
   workflowPath: string | null;
+  workflowHash: string | null;
+  resolverReason: string | null;
   workspacePath: string | null;
 }
 

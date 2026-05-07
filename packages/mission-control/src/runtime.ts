@@ -42,18 +42,21 @@ import {
   type MissionVerifierResult,
 } from './verifier.js';
 import { MissionWorkflowLoader, type LoadedMissionWorkflow } from './workflow.js';
+import { MissionWorkflowResolver } from './workflow_resolver.js';
 import { MissionLeaseCoordinator } from './lease_coordinator.js';
 import { MissionWorkspaceService, type MissionWorkspaceAssignment } from './workspace.js';
 import {
   createMissionAttemptPromptContract,
   renderMissionAttemptPromptContract,
 } from './prompt_contract.js';
+import type { MissionWorkflowResolverReason } from './types.js';
 
 export interface MissionRuntimeOptions {
   repository: MissionRepository;
   provider: MissionProvider;
   verifier: MissionVerifier;
   workflowLoader?: MissionWorkflowLoader;
+  workflowResolver?: MissionWorkflowResolver;
   workspaceService?: MissionWorkspaceService;
   leaseCoordinator?: MissionLeaseCoordinator;
   now?: () => number;
@@ -87,6 +90,8 @@ export class MissionRuntime {
 
   private readonly workflowLoader: MissionWorkflowLoader;
 
+  private readonly workflowResolver: MissionWorkflowResolver;
+
   private readonly workspaceService: MissionWorkspaceService;
 
   private readonly leaseCoordinator: MissionLeaseCoordinator;
@@ -100,6 +105,7 @@ export class MissionRuntime {
     provider,
     verifier,
     workflowLoader = new MissionWorkflowLoader(),
+    workflowResolver = new MissionWorkflowResolver(),
     workspaceService = new MissionWorkspaceService(),
     leaseCoordinator = new MissionLeaseCoordinator(repository),
     now = () => Date.now(),
@@ -109,6 +115,7 @@ export class MissionRuntime {
     this.provider = provider;
     this.verifier = verifier;
     this.workflowLoader = workflowLoader;
+    this.workflowResolver = workflowResolver;
     this.workspaceService = workspaceService;
     this.leaseCoordinator = leaseCoordinator;
     this.now = now;
@@ -143,8 +150,14 @@ export class MissionRuntime {
     lastAttempt = claimedStop.attempt;
 
     try {
+      const workflowSelection = this.workflowResolver.resolve(mission);
+      mission = this.persistWorkflowTrace(mission, {
+        workflowPath: workflowSelection.workflowPath,
+        workflowHash: null,
+        resolverReason: workflowSelection.resolverReason,
+      });
       const workflowResult = this.workflowLoader.tryLoad({
-        explicitPath: mission.workflowPath ?? undefined,
+        explicitPath: workflowSelection.explicitPath ?? undefined,
         cwd: mission.cwd,
         workspacePath: mission.workspacePath,
       });
@@ -161,11 +174,15 @@ export class MissionRuntime {
           blocker: summary,
           evidence: {
             workflowPath: workflowResult.error.workflowPath,
+            workflowHash: null,
+            resolverReason: workflowSelection.resolverReason,
             issues: [...workflowResult.error.issues],
           },
         });
         this.appendMissionEvent(mission, 'mission.failed', summary, null, {
           workflowPath: workflowResult.error.workflowPath,
+          workflowHash: null,
+          resolverReason: workflowSelection.resolverReason,
           issues: [...workflowResult.error.issues],
           cycleResult,
         });
@@ -177,8 +194,10 @@ export class MissionRuntime {
         });
       }
       workflow = workflowResult.workflow;
-      mission = this.updateMissionFields(mission, {
+      mission = this.persistWorkflowTrace(mission, {
         workflowPath: workflow.source.path,
+        workflowHash: workflow.hash,
+        resolverReason: workflowSelection.resolverReason,
       });
 
       const workspace = this.workspaceService.ensureWorkspace(mission, {
@@ -187,7 +206,6 @@ export class MissionRuntime {
       });
       mission = this.updateMissionFields(mission, {
         workspacePath: workspace.workspacePath,
-        workflowPath: workflow.source.path,
       });
       const workspaceStop = await this.consumePersistedStopRequest(mission.id, options.ownerId, {
         interruptProvider: true,
@@ -368,6 +386,8 @@ export class MissionRuntime {
       this.saveMission(mission);
       this.appendMissionEvent(mission, 'mission.planning', 'Mission planning started.', null, {
         workflowPath: input.workflow.source.path,
+        workflowHash: input.workflow.hash,
+        resolverReason: mission.workflowResolverReason,
       });
     }
 
@@ -1180,11 +1200,24 @@ export class MissionRuntime {
 
   private updateMissionFields(
     mission: Mission,
-    updates: Partial<Pick<Mission, 'workflowPath' | 'workspacePath' | 'codexThreadId' | 'resultArtifacts' | 'activeAttemptId'>>,
+    updates: Partial<Pick<
+      Mission,
+      'workflowPath'
+      | 'workflowHash'
+      | 'workflowResolverReason'
+      | 'workspacePath'
+      | 'codexThreadId'
+      | 'resultArtifacts'
+      | 'activeAttemptId'
+    >>,
   ): Mission {
     const next: Mission = {
       ...normalizeMissionRecord(mission),
       workflowPath: updates.workflowPath !== undefined ? updates.workflowPath : mission.workflowPath,
+      workflowHash: updates.workflowHash !== undefined ? updates.workflowHash : mission.workflowHash,
+      workflowResolverReason: updates.workflowResolverReason !== undefined
+        ? updates.workflowResolverReason
+        : mission.workflowResolverReason,
       workspacePath: updates.workspacePath !== undefined ? updates.workspacePath : mission.workspacePath,
       codexThreadId: updates.codexThreadId !== undefined ? updates.codexThreadId : mission.codexThreadId,
       resultArtifacts: updates.resultArtifacts !== undefined ? [...updates.resultArtifacts] : [...mission.resultArtifacts],
@@ -1192,6 +1225,43 @@ export class MissionRuntime {
       updatedAt: this.now(),
     };
     return this.saveMission(next);
+  }
+
+  private persistWorkflowTrace(
+    mission: Mission,
+    trace: {
+      workflowPath: string | null;
+      workflowHash: string | null;
+      resolverReason: MissionWorkflowResolverReason | null;
+    },
+  ): Mission {
+    const nextMission = this.updateMissionFields(mission, {
+      workflowPath: trace.workflowPath,
+      workflowHash: trace.workflowHash,
+      workflowResolverReason: trace.resolverReason,
+    });
+    const existingGeneration = this.repository.getGenerationById(nextMission.activeGenerationId);
+    if (existingGeneration) {
+      this.repository.saveGeneration({
+        ...existingGeneration,
+        workflowPath: trace.workflowPath,
+        workflowHash: trace.workflowHash,
+        resolverReason: trace.resolverReason,
+        updatedAt: this.now(),
+      });
+      return nextMission;
+    }
+    this.repository.saveGeneration(createMissionGeneration(nextMission, {
+      at: this.now(),
+      id: nextMission.activeGenerationId,
+      index: nextMission.activeGenerationIndex,
+      checklistSnapshotId: nextMission.currentChecklistSnapshotId,
+      workflowPath: trace.workflowPath,
+      workflowHash: trace.workflowHash,
+      resolverReason: trace.resolverReason,
+      trigger: nextMission.activeGenerationIndex === 1 ? 'initial' : 'retry',
+    }));
+    return nextMission;
   }
 
   private failMissionFromCurrentState(
@@ -1248,6 +1318,9 @@ export class MissionRuntime {
       status,
       providerRunId: null,
       providerThreadId: normalizedMission.codexThreadId,
+      workflowPath: normalizedMission.workflowPath,
+      workflowHash: normalizedMission.workflowHash,
+      resolverReason: normalizedMission.workflowResolverReason,
       promptDigest: null,
       verifierVerdict: null,
       verifierSummary: null,

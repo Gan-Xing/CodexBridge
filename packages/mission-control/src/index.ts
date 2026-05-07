@@ -1,6 +1,6 @@
 export const MISSION_CONTROL_PACKAGE_NAME = '@codexbridge/mission-control' as const;
 
-export const MISSION_CONTROL_PACKAGE_PHASE = 'phase-9q-paused-approval-resolution' as const;
+export const MISSION_CONTROL_PACKAGE_PHASE = 'phase-9r-workflow-resolver-trace' as const;
 
 export const MISSION_CONTROL_OWNS = [
   'mission-domain-model',
@@ -47,6 +47,7 @@ export * from './repository.js';
 export * from './in_memory_mission_repository.js';
 export * from './json_file_mission_repository.js';
 export * from './workflow.js';
+export * from './workflow_resolver.js';
 export * from './prompt_contract.js';
 export * from './workpad_view.js';
 export * from './workspace.js';

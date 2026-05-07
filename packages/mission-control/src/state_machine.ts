@@ -14,6 +14,8 @@ import {
   buildMissionWorkItemId,
   normalizeMissionLoopPolicy,
   normalizeMissionRecord,
+  normalizeWorkflowHash,
+  normalizeWorkflowResolverReason,
 } from './domain_records.js';
 
 export const MISSION_STATUS_TRANSITIONS: Readonly<Record<MissionStatus, readonly MissionStatus[]>> = Object.freeze({
@@ -103,6 +105,9 @@ export function createMission(input: CreateMissionInput): Mission {
     cwd: input.cwd ?? null,
     workspacePath: input.workspacePath ?? null,
     workflowPath: input.workflowPath ?? null,
+    workflowHash: normalizeWorkflowHash(input.workflowHash),
+    workflowResolverReason: normalizeWorkflowResolverReason(input.workflowResolverReason)
+      ?? (normalizeText(input.workflowPath) ? 'explicit_override' : null),
     providerProfileId: input.providerProfileId,
     bridgeSessionId: input.bridgeSessionId ?? null,
     codexThreadId: input.codexThreadId ?? null,

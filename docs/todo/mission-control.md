@@ -880,12 +880,39 @@ explicit paused mission state, uses `queued` as the package-owned continuation
 boundary between accepted cycles, and documents the shipped
 `commands / queries / streams` surface instead of older placeholder names.
 
+Phase 9r now adds deterministic workflow resolution and persisted
+workflow-selection trace metadata:
+
+- `MissionWorkflowResolver` resolves explicit overrides, rule-based source/risk
+  policies, workspace defaults, cwd defaults, and built-in fallback paths
+  deterministically
+- the runtime persists `workflowPath`, `workflowHash`, and `resolverReason`
+  onto the authoritative mission plus the active generation and attempts
+- package execution/query views now expose that trace metadata without forcing
+  hosts to infer workflow provenance from local path conventions
+
+Phase 9s is still open: the remaining Phase 9 gaps are first-host proactive
+notifications plus persisted environment-stamp/checkpoint records. The first
+host can already query package-backed loop snapshots on demand, but it does not
+yet provide a policy-driven proactive notification path that pushes those same
+cycle/stage/completion snapshots back to the user after meaningful mission loop
+events, and the package still needs formal persisted environment/checkpoint
+artifacts for recovery/audit.
+
 - [x] Add `WorkItemSourceAdapter` as the source abstraction
 - [x] Support manual host-created source-backed work items through the
   package-owned create command
 - [x] Support local todo/checklist source adapters
 - [x] Support package-owned pristine source sync/reconciliation before the
   first attempt starts
+- [x] Add `MissionWorkflowResolver` so workflow selection can vary by
+  work-item type, source, repo/workspace context, risk, and explicit
+  validated overrides while remaining deterministic
+- [x] Persist workflow-selection trace metadata per generation/attempt,
+  including:
+  - `workflowPath`
+  - `workflowHash`
+  - `resolverReason`
 - [x] Add package-owned workflow/checklist/workpad read models so hosts can
   render authoritative mission state without bridge-local reconstruction
 - [x] Reconcile the concrete package status machine with the formal spec around
@@ -919,6 +946,9 @@ boundary between accepted cycles, and documents the shipped
   - overall completion
   - next step
   - latest blocker / verifier summary
+- [ ] Add first-host proactive mission notifications that can, per host policy,
+  push package-backed loop snapshot updates after meaningful cycle/state
+  changes while keeping manual `/agent show` queries as the fallback
 - [x] Add first-host resume/continue flows for `waiting_user`,
   `needs_human`, `handoff`, and `blocked` missions without requiring raw
   shell/loop log inspection
@@ -939,6 +969,17 @@ boundary between accepted cycles, and documents the shipped
   - [x] stale-run recovery
   - [x] history retention
   - [x] checkpoint/continuation semantics
+- [ ] Persist package-owned `MissionEnvironmentStamp` records so operators and
+  hosts can inspect execution context such as:
+  - `cwd`
+  - `workspacePath`
+  - `gitSha`
+  - `gitBranch`
+  - `workflowHash`
+  - `providerProfileId`
+- [ ] Persist formal package-owned `MissionCheckpoint` records at meaningful
+  recovery boundaries instead of relying only on derived snapshots/workpad
+  state
 - [x] Reduce long-lived reliance on external `loop.sh` to an operational
   fallback once package supervision exists
 
@@ -948,6 +989,10 @@ Completion criteria:
   assuming a chat-only origin
 - [x] The runtime can recover, continue, and report progress using package-owned
   supervision semantics
+- [x] Workflow selection and overrides are deterministic and traceable through
+  package-owned resolver metadata
+- [ ] Environment-stamp and checkpoint records are persisted as package-owned
+  runtime artifacts for recovery/audit
 - [x] External shell supervision is optional, not structurally required
 - [x] The concrete package commands/status model converges with the formal spec
   for confirmation, paused-state, and loop-budget lifecycle control
@@ -955,6 +1000,8 @@ Completion criteria:
   checklist confirmation before the first autonomous cycle starts
 - [x] A first host can inspect package-owned cycle/stage/completion snapshots
   and resolve richer paused states without reading shell logs
+- [ ] A first host can proactively deliver package-backed cycle/status updates
+  per notification policy, with manual mission queries remaining available
 - [x] A user can run a checklist-backed looping mission from the first host
   surface without external `loop.sh` as the primary UX
 
@@ -1016,5 +1063,8 @@ Mission Control is ready for broader extraction when:
 - [x] the first host can render package-owned loop snapshots and resolve
   `PlanChangeRequest` / `waiting_user` / `needs_human` / `handoff` without shell-log
   inspection
+- [ ] the first host can proactively notify users with package-backed loop
+  snapshots after meaningful mission progress while keeping manual query as a
+  fallback
 - [x] the first host can drive a checklist-backed looping mission as product
   UX without depending on external `loop.sh`

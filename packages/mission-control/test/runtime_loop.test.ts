@@ -90,7 +90,7 @@ test('mission runtime keeps verifier repair loops bounded and only completes aft
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'mission-control-runtime-repair-cwd-'));
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mission-control-runtime-repair-state-'));
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mission-control-runtime-repair-root-'));
-  writeWorkflow(cwd, `
+  const workflowPath = writeWorkflow(cwd, `
 version: 1
 maxTurns: 4
 maxAttempts: 3
@@ -207,6 +207,14 @@ continuation: allow
   assert.equal(attempts[0]?.status, 'repairing');
   assert.equal(attempts[1]?.verifierVerdict, 'complete');
   assert.equal(attempts[1]?.status, 'completed');
+  assert.equal(attempts[0]?.workflowPath, workflowPath);
+  assert.equal(attempts[0]?.workflowHash?.length, 64);
+  assert.equal(attempts[0]?.resolverReason, 'cwd_default');
+
+  const activeGeneration = repo.getGenerationById(result.mission.activeGenerationId);
+  assert.equal(activeGeneration?.workflowPath, workflowPath);
+  assert.equal(activeGeneration?.workflowHash?.length, 64);
+  assert.equal(activeGeneration?.resolverReason, 'cwd_default');
 
   const eventKinds = repo.listEvents(mission.id).map((event) => event.kind);
   assert.ok(eventKinds.includes('mission.retrying'));
