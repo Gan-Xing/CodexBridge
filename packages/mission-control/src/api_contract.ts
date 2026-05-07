@@ -284,9 +284,19 @@ export interface ResolvePlanChangeInput {
   actor?: MissionControlActor | null;
 }
 
+export interface SubmitApprovalInput {
+  missionId: string;
+  approvalId?: string | null;
+  decision: 'approve' | 'reject';
+  reason?: string | null;
+  responseText?: string | null;
+  actor?: MissionControlActor | null;
+}
+
 export interface ResumeMissionInput {
   missionId: string;
   reason?: string | null;
+  responseText?: string | null;
   actor?: MissionControlActor | null;
 }
 
@@ -324,6 +334,9 @@ export interface MissionControlCommands {
   ): MissionControlResponse<MissionDetailView>;
   startMission(
     request: MissionControlRequest<StartMissionInput>,
+  ): MissionControlResponse<MissionDetailView>;
+  submitApproval(
+    request: MissionControlRequest<SubmitApprovalInput>,
   ): MissionControlResponse<MissionDetailView>;
   syncMissionSource(
     request: MissionControlRequest<SyncMissionSourceInput>,

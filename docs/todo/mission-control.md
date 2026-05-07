@@ -670,7 +670,15 @@ from package detail state, and `/agent confirm [index] [reject]` can resolve
 that proposal without falling back to shell logs or bridge-local state
 mutation.
 
-Phase 9p is the current validated baseline, but several behaviors above are
+Phase 9q landed: Mission Control now exposes a package-owned `submitApproval`
+command plus resume-time human-response payloads so paused missions can carry
+explicit approval decisions and attached human input back into authoritative
+mission state. CodexBridge `/agent show` now renders package-backed pending
+approval summaries plus approve/reject/input hints, and `/agent confirm` can
+resolve paused approval/input cases without flattening them into a generic
+resume-only flow.
+
+Phase 9q is the current validated baseline, but several behaviors above are
 still transitional:
 
 - `AgentJob` still carries bridge-side compatibility state that should keep
@@ -682,10 +690,10 @@ still transitional:
   first assistant-record-backed `local-todo` adapter, but broader source
   sync/reconciliation still belongs to the unfinished backlog
 - package/runtime support for `PlanChangeRequest`, `waiting_user`, and
-  `needs_human` exists, and the first host now has package-backed
-  `PlanChangeRequest` resolution plus a simple paused-state continue path, but
-  richer paused input/approval flows still need to be productized before
-  Mission Control can be treated as a complete looping experience
+  `needs_human` now also includes package-backed paused approval/input
+  resolution on the first host, but provider-native in-turn approval replies
+  still remain a host concern until the package grows a provider-neutral live
+  approval-reply control port
 - the formal Mission Control spec now expects explicit
   `scope_change_pending` semantics plus package-owned approval / plan-change
   control surfaces, and `max_loops_reached` still needs broader convergence
@@ -856,6 +864,14 @@ and CodexBridge `/agent show` plus `/agent confirm [reject]` now resolve those
 package-backed `PlanChangeRequest` flows without bridge-local state
 reconstruction.
 
+Phase 9q landed: Mission Control now exposes a package-owned `submitApproval`
+command plus resume-time human-response payloads so paused missions can carry
+explicit approval decisions and attached human input back into authoritative
+mission state. CodexBridge `/agent show` now renders package-backed pending
+approval summaries plus approve/reject/input hints, and `/agent confirm` can
+resolve those paused approval/input cases without flattening them into a
+generic resume-only flow.
+
 - [x] Add `WorkItemSourceAdapter` as the source abstraction
 - [x] Support manual host-created source-backed work items through the
   package-owned create command
@@ -877,7 +893,7 @@ reconstruction.
     next autonomous cycle starts
 - [x] Add package-owned command coverage for:
   - `startMission`
-- [ ] Add package-owned command coverage for:
+- [x] Add package-owned command coverage for:
   - approval resolution
 - [x] Add package-owned command coverage for:
   - plan-change resolution
@@ -899,9 +915,9 @@ reconstruction.
   `needs_human`, `handoff`, and `blocked` missions without requiring raw
   shell/loop log inspection
 - [x] Add first-host resolution flows for `PlanChangeRequest`
-- [ ] Add first-host resolution flows for richer paused-state approval/input
+- [x] Add first-host resolution flows for richer paused-state approval/input
   cases that need more than a simple resume signal
-- [ ] Let the first host start and continue a checklist-backed looping mission
+- [x] Let the first host start and continue a checklist-backed looping mission
   without external `loop.sh` as the primary user-facing control surface
 - [ ] Support future issue/board integrations
 - [x] Keep external checklist/source truth separate from internal immutable
@@ -930,9 +946,9 @@ Completion criteria:
   for confirmation, paused-state, and loop-budget lifecycle control
 - [x] A first host can require explicit `immutablePrompt` plus initial
   checklist confirmation before the first autonomous cycle starts
-- [ ] A first host can inspect package-owned cycle/stage/completion snapshots
+- [x] A first host can inspect package-owned cycle/stage/completion snapshots
   and resolve richer paused states without reading shell logs
-- [ ] A user can run a checklist-backed looping mission from the first host
+- [x] A user can run a checklist-backed looping mission from the first host
   surface without external `loop.sh` as the primary UX
 
 ## Phase 10: Service Exposure and Additional Hosts
@@ -988,8 +1004,8 @@ Mission Control is ready for broader extraction when:
   confirmation/budget states
 - [x] the first host can persist and confirm an immutable prompt plus initial
   checklist before autonomous looping begins
-- [ ] the first host can render package-owned loop snapshots and resolve
+- [x] the first host can render package-owned loop snapshots and resolve
   `PlanChangeRequest` / `waiting_user` / `needs_human` without shell-log
   inspection
-- [ ] the first host can drive a checklist-backed looping mission as product
+- [x] the first host can drive a checklist-backed looping mission as product
   UX without depending on external `loop.sh`

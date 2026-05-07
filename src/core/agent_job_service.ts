@@ -312,7 +312,13 @@ export class AgentJobService {
     return this.requireById(id);
   }
 
-  resumeJob(id: string, reason = 'Agent mission queued to continue after host confirmation.'): AgentJob {
+  resumeJob(
+    id: string,
+    reason = 'Agent mission queued to continue after host confirmation.',
+    options: {
+      responseText?: string | null;
+    } = {},
+  ): AgentJob {
     this.requireById(id);
     this.ensureMissionRecord(id);
     this.createMissionControlApi().commands.resumeMission({
@@ -320,6 +326,35 @@ export class AgentJobService {
       input: {
         missionId: id,
         reason,
+        responseText: options.responseText ?? null,
+        actor: {
+          actorId: 'agent-job-service',
+          actorType: 'host',
+        },
+      },
+    });
+    return this.requireById(id);
+  }
+
+  submitApproval(
+    id: string,
+    decision: 'approve' | 'reject',
+    options: {
+      approvalId?: string | null;
+      reason?: string | null;
+      responseText?: string | null;
+    } = {},
+  ): AgentJob {
+    this.requireById(id);
+    this.ensureMissionRecord(id);
+    this.createMissionControlApi().commands.submitApproval({
+      meta: this.createMissionControlMeta(`agent-approval:${id}`),
+      input: {
+        missionId: id,
+        approvalId: options.approvalId ?? null,
+        decision,
+        reason: options.reason ?? null,
+        responseText: options.responseText ?? null,
         actor: {
           actorId: 'agent-job-service',
           actorType: 'host',

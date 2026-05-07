@@ -1,6 +1,6 @@
 export const MISSION_CONTROL_PACKAGE_NAME = '@codexbridge/mission-control' as const;
 
-export const MISSION_CONTROL_PACKAGE_PHASE = 'phase-9p-plan-change-resolution' as const;
+export const MISSION_CONTROL_PACKAGE_PHASE = 'phase-9q-paused-approval-resolution' as const;
 
 export const MISSION_CONTROL_OWNS = [
   'mission-domain-model',

@@ -128,6 +128,41 @@ test('createMissionResumeSnapshot re-queues waiting missions without discarding 
   assert.equal(resumed.workpad.finalResultSummary, 'partial context');
 });
 
+test('createMissionResumeSnapshot can carry explicit human input back into queued workpad context', () => {
+  const draft = createMission({
+    id: 'mission-resume-response-1',
+    source: 'manual',
+    platform: 'cli',
+    externalScopeId: 'resume-response-1',
+    title: 'Resume with human input',
+    goal: 'Continue after the user supplies missing information.',
+    expectedOutput: 'A resumed mission result.',
+    acceptanceCriteria: ['User input is preserved'],
+    plan: ['Wait for the user', 'Continue the repair'],
+    providerProfileId: 'codex-default',
+    now: 1_701_000_110_000,
+  });
+  const queued = transitionMission(draft, 'queued', { at: 1_701_000_110_010 });
+  const running = transitionMission(queued, 'running', {
+    at: 1_701_000_110_020,
+    activeAttemptId: 'attempt-resume-response-1',
+  });
+  const waiting = transitionMission(running, 'waiting_user', {
+    at: 1_701_000_110_030,
+    reason: 'Need the deployment window.',
+  });
+
+  const resumed = createMissionResumeSnapshot(waiting, {
+    at: 1_701_000_110_040,
+    reason: 'User supplied the missing deployment window.',
+    responseText: 'Deployment window: tomorrow 09:00 UTC.',
+  });
+
+  assert.equal(resumed.status, 'queued');
+  assert.equal(resumed.workpad.summary, 'Mission queued after human response.');
+  assert.match(resumed.workpad.notes.at(-1) ?? '', /Deployment window: tomorrow 09:00 UTC\./);
+});
+
 test('shouldMissionRetryReuseAccumulatedContext only preserves waiting-human continuation states', () => {
   const draft = createMission({
     id: 'mission-resume-policy-1',

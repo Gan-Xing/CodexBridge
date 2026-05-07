@@ -5927,20 +5927,12 @@ export class BridgeCoordinator {
           this.t('coordinator.agent.notFound', { value: resolved.value || '?' }),
         ], this.buildScopedSessionMeta(event));
       }
-      const detail = this.agentJobs.getMissionDetail(resolved.job.id);
-      if (
-        confirmDirective.decision === 'reject'
-        && detail?.mission.status !== 'scope_change_pending'
-      ) {
-        return messageResponse([
-          this.t('coordinator.agent.confirmRejectUnsupported'),
-        ], this.buildScopedSessionMeta(event));
-      }
       return this.confirmAgentStartMission(
         event,
         resolved.job,
         resolved.index,
         confirmDirective.decision,
+        confirmDirective.responseText,
       );
     }
     if (operation.kind !== 'draft') {
@@ -6981,6 +6973,7 @@ export class BridgeCoordinator {
     job: AgentJob,
     index: number,
     decision: 'approve' | 'reject' | null = null,
+    responseText = '',
   ) {
     const detail = this.agentJobs.getMissionDetail(job.id);
     if (!detail) {
@@ -7008,8 +7001,34 @@ export class BridgeCoordinator {
         decision === 'reject' ? 'reject' : 'approve',
       );
     } else if (isAgentMissionPausedStatus(detail.mission.status)) {
-      updated = this.agentJobs.resumeJob(job.id);
-      return this.renderAgentMissionResumeResponse(event, updated, index);
+      const normalizedResponseText = compactWhitespace(responseText);
+      if (detail.pendingApproval || decision !== null) {
+        updated = this.agentJobs.submitApproval(
+          job.id,
+          decision === 'reject' ? 'reject' : 'approve',
+          {
+            approvalId: detail.pendingApproval?.requestId ?? null,
+            responseText: normalizedResponseText || null,
+          },
+        );
+        return this.renderAgentMissionApprovalResponse(
+          event,
+          updated,
+          index,
+          decision === 'reject' ? 'reject' : 'approve',
+          normalizedResponseText,
+        );
+      }
+      updated = this.agentJobs.resumeJob(
+        job.id,
+        normalizedResponseText
+          ? 'Agent mission queued to continue after host input.'
+          : 'Agent mission queued to continue after host confirmation.',
+        {
+          responseText: normalizedResponseText || null,
+        },
+      );
+      return this.renderAgentMissionResumeResponse(event, updated, index, normalizedResponseText);
     } else {
       return messageResponse([
         this.t('coordinator.agent.noStartConfirmation'),
@@ -7060,21 +7079,63 @@ export class BridgeCoordinator {
     return messageResponse(lines, this.buildScopedSessionMeta(event));
   }
 
-  renderAgentMissionResumeResponse(event, job: AgentJob, index: number) {
+  renderAgentMissionResumeResponse(event, job: AgentJob, index: number, responseText = '') {
     const detail = this.agentJobs.getMissionDetail(job.id);
     if (!detail) {
       return messageResponse([
         this.t('coordinator.agent.notFound', { value: String(index) }),
       ], this.buildScopedSessionMeta(event));
     }
-    const response = messageResponse([
+    const normalizedResponseText = compactWhitespace(responseText);
+    const lines = [
       this.t('coordinator.agent.resumeQueued'),
       this.t('coordinator.agent.title', { value: detail.mission.title }),
       this.t('coordinator.agent.status', {
         value: formatAgentStatusLabel(detail.mission.status, false, this.currentI18n),
       }),
-      this.t('coordinator.agent.showHint', { index }),
-    ], this.buildScopedSessionMeta(event));
+    ];
+    if (normalizedResponseText) {
+      lines.push(this.t('coordinator.agent.responseRecorded', { value: normalizedResponseText }));
+    }
+    lines.push(this.t('coordinator.agent.showHint', { index }));
+    const response = messageResponse(lines, this.buildScopedSessionMeta(event));
+    response.meta = {
+      ...(response.meta ?? {}),
+      systemAction: {
+        kind: 'run_agent_sweep',
+      },
+    };
+    return response;
+  }
+
+  renderAgentMissionApprovalResponse(
+    event,
+    job: AgentJob,
+    index: number,
+    decision: 'approve' | 'reject',
+    responseText = '',
+  ) {
+    const detail = this.agentJobs.getMissionDetail(job.id);
+    if (!detail) {
+      return messageResponse([
+        this.t('coordinator.agent.notFound', { value: String(index) }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const normalizedResponseText = compactWhitespace(responseText);
+    const lines = [
+      decision === 'reject'
+        ? this.t('coordinator.agent.approvalRejectedQueued')
+        : this.t('coordinator.agent.approvalApprovedQueued'),
+      this.t('coordinator.agent.title', { value: detail.mission.title }),
+      this.t('coordinator.agent.status', {
+        value: formatAgentStatusLabel(detail.mission.status, false, this.currentI18n),
+      }),
+    ];
+    if (normalizedResponseText) {
+      lines.push(this.t('coordinator.agent.responseRecorded', { value: normalizedResponseText }));
+    }
+    lines.push(this.t('coordinator.agent.showHint', { index }));
+    const response = messageResponse(lines, this.buildScopedSessionMeta(event));
     response.meta = {
       ...(response.meta ?? {}),
       systemAction: {
@@ -7188,11 +7249,19 @@ export class BridgeCoordinator {
     }
     const commandToken = String(index ?? detail.mission.id);
     const lines = [];
+    if (detail.pendingApproval?.summary) {
+      lines.push(this.t('coordinator.agent.pendingApprovalTitle', {
+        value: detail.pendingApproval.summary,
+      }));
+      lines.push(this.t('coordinator.agent.pendingApprovalApproveHint', { index: commandToken }));
+      lines.push(this.t('coordinator.agent.pendingApprovalRejectHint', { index: commandToken }));
+    }
     if (detail.latestCycleResult?.needUserAction) {
       lines.push(this.t('coordinator.agent.userActionRequired', {
         value: detail.latestCycleResult.needUserAction,
       }));
     }
+    lines.push(this.t('coordinator.agent.respondJobHint', { index: commandToken }));
     lines.push(this.t('coordinator.agent.resumeJobHint', { index: commandToken }));
     return lines;
   }
@@ -13760,32 +13829,42 @@ function isAgentMissionConfirmableStatus(status: string): boolean {
 function parseAgentConfirmDirective(value: string): {
   targetToken: string;
   decision: 'approve' | 'reject' | null;
+  responseText: string;
 } {
   const parts = String(value ?? '').trim().split(/\s+/u).filter(Boolean);
   if (parts.length === 0) {
     return {
       targetToken: '',
       decision: null,
+      responseText: '',
     };
   }
-  const last = parts[parts.length - 1]?.toLowerCase() ?? '';
-  if (isAgentRejectDecisionToken(last)) {
-    parts.pop();
+  const first = parts[0]?.toLowerCase() ?? '';
+  if (isAgentRejectDecisionToken(first) || isAgentApproveDecisionToken(first)) {
     return {
-      targetToken: parts.join(' ').trim(),
-      decision: 'reject',
+      targetToken: '',
+      decision: isAgentRejectDecisionToken(first) ? 'reject' : 'approve',
+      responseText: parts.slice(1).join(' ').trim(),
     };
   }
-  if (isAgentApproveDecisionToken(last)) {
-    parts.pop();
+  if (parts.length === 1) {
     return {
-      targetToken: parts.join(' ').trim(),
-      decision: 'approve',
+      targetToken: parts[0] ?? '',
+      decision: null,
+      responseText: '',
     };
+  }
+  const targetToken = parts.shift() ?? '';
+  let decision: 'approve' | 'reject' | null = null;
+  const next = parts[0]?.toLowerCase() ?? '';
+  if (isAgentRejectDecisionToken(next) || isAgentApproveDecisionToken(next)) {
+    decision = isAgentRejectDecisionToken(next) ? 'reject' : 'approve';
+    parts.shift();
   }
   return {
-    targetToken: parts.join(' ').trim(),
-    decision: null,
+    targetToken,
+    decision,
+    responseText: parts.join(' ').trim(),
   };
 }
 

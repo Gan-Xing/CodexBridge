@@ -58,6 +58,7 @@ export interface CreateMissionRetrySnapshotOptions {
 export interface CreateMissionResumeSnapshotOptions {
   at?: number;
   reason?: string | null;
+  responseText?: string | null;
 }
 
 export interface CreateMissionStopRequestOptions {
@@ -93,6 +94,12 @@ export function createMissionResumeSnapshot(
     throw new Error(`mission ${mission.id} cannot be resumed from status ${mission.status}`);
   }
   const at = options.at ?? Date.now();
+  const responseText = normalizeText(options.responseText);
+  const responseNote = responseText ? `Human response: ${responseText}` : null;
+  const workpadNotes = [...mission.workpad.notes];
+  if (responseNote && workpadNotes[workpadNotes.length - 1] !== responseNote) {
+    workpadNotes.push(responseNote);
+  }
   return {
     ...mission,
     status: 'queued',
@@ -105,8 +112,10 @@ export function createMissionResumeSnapshot(
     lease: null,
     workpad: {
       ...mission.workpad,
+      summary: responseText ? 'Mission queued after human response.' : mission.workpad.summary,
       latestBlocker: null,
       latestVerifierSummary: null,
+      notes: workpadNotes,
       updatedAt: at,
     },
     updatedAt: at,

@@ -231,6 +231,20 @@ Main remaining integration gap:
   - CodexBridge `/agent show` now renders the latest proposed scope change
     directly from package detail state, and `/agent confirm [reject]` resolves
     that flow without bridge-local state mutation or shell-log inspection
+- Phase 9q now adds the first package-backed paused approval/input resolution
+  flow on top of those same mission views:
+  - Mission Control exports a package-owned `submitApproval` command plus
+    resume-time human-response payloads so paused missions can carry explicit
+    approval decisions and attached human input back into authoritative mission
+    state
+  - CodexBridge `/agent show` now renders package-backed pending approval
+    summaries plus approve/reject/input hints for paused
+    `waiting_user` / `needs_human` / `handoff` / `blocked` missions instead of
+    collapsing them into a generic resume-only prompt
+  - `/agent confirm` can now route those paused missions through package-owned
+    approval resolution or response-carrying resume flows, so the first host no
+    longer needs shell-log inspection or an external `loop.sh` UX to keep a
+    checklist-backed mission moving
 - `/agent` `list/show/stop/retry` now consume that package API through an
   authoritative mission repository plus `AgentJob` projection instead of
   rebuilding runtime truth directly from bridge compatibility fields
@@ -245,11 +259,10 @@ Main remaining integration gap:
 - the next hardening work is wiring broader source sync/reconciliation triggers
   beyond the current manual create path, append-oriented pristine pre-attempt
   sync path, and first local todo adapter; continuing to shrink `AgentJob`
-  compatibility caches; and finishing the first-host product flow around:
-  - richer paused-state approval/input cases beyond the current
-    `PlanChangeRequest` plus simple resume flow
-  - checklist-backed loop continuation/resolution UX that does not depend on
-    raw shell logs or external `loop.sh` as the primary operator surface
+  compatibility caches; and later deciding how much of provider-native in-turn
+  approval reply handling should move from today’s host-owned live `/allow`
+  flow into a future package-neutral control port without breaking the current
+  host adapter boundary
 
 ## V0 Migration Baseline Sources
 

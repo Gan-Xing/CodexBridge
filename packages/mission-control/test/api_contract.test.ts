@@ -276,6 +276,141 @@ test('direct mission control api stages checklist and immutable prompt confirmat
   );
 });
 
+test('direct mission control api resolves workflow confirmations and paused approvals through package-owned approval commands', async () => {
+  const { repo, api, nowRef } = createApiHarness(1_701_200_058_000);
+
+  await api.commands.createMission({
+    meta: {
+      requestId: 'req-approval-create-1',
+      correlationId: null,
+      idempotencyKey: null,
+    },
+    input: {
+      missionId: 'mission-api-approval-1',
+      workItem: {
+        source: 'manual',
+        sourceRef: 'manual:api-approval-1',
+        sourceRevision: 'manual-approval-rev-1',
+        title: 'Confirm the first autonomous cycle',
+        goal: 'Require package-owned approval resolution before the first run.',
+        expectedOutput: 'A queued mission after approvals.',
+        acceptanceCriteria: ['Checklist confirmed', 'Prompt confirmed'],
+        plan: ['Inspect the checklist', 'Inspect the immutable prompt'],
+        metadata: null,
+      },
+      platform: 'weixin',
+      externalScopeId: 'wx-user-approval-1',
+      providerProfileId: 'codex-default',
+      initialStatus: 'draft',
+    },
+  });
+
+  await api.commands.startMission({
+    meta: {
+      requestId: 'req-approval-stage-1',
+      correlationId: null,
+      idempotencyKey: null,
+    },
+    input: {
+      missionId: 'mission-api-approval-1',
+    },
+  });
+
+  const promptPending = await api.commands.submitApproval({
+    meta: {
+      requestId: 'req-approval-checklist-1',
+      correlationId: null,
+      idempotencyKey: null,
+    },
+    input: {
+      missionId: 'mission-api-approval-1',
+      decision: 'approve',
+      actor: {
+        actorId: 'test-user',
+        actorType: 'user',
+      },
+    },
+  });
+  assert.equal(promptPending.data.mission.status, 'awaiting_prompt_confirm');
+  assert.match(promptPending.data.pendingApproval?.summary ?? '', /immutable prompt/i);
+
+  const queued = await api.commands.submitApproval({
+    meta: {
+      requestId: 'req-approval-prompt-1',
+      correlationId: null,
+      idempotencyKey: null,
+    },
+    input: {
+      missionId: 'mission-api-approval-1',
+      decision: 'approve',
+      actor: {
+        actorId: 'test-user',
+        actorType: 'user',
+      },
+    },
+  });
+  assert.equal(queued.data.mission.status, 'queued');
+  assert.equal(queued.data.pendingApproval, null);
+
+  const waitingBase = createQueuedMission(nowRef.value + 500);
+  const waitingRunning = transitionMission(waitingBase, 'running', {
+    at: nowRef.value + 520,
+    activeAttemptId: 'attempt-api-approval-waiting-1',
+  });
+  const waitingMission = transitionMission(waitingRunning, 'waiting_user', {
+    at: nowRef.value + 530,
+    reason: 'Need approval on the deployment window.',
+    lastError: 'Need approval on the deployment window.',
+    pendingApproval: {
+      requestId: 'approval-waiting-1',
+      kind: 'manual',
+      summary: 'Approve or reject the proposed deployment window before continuing.',
+      options: [
+        { index: 1, label: 'Approve window' },
+        { index: 2, label: 'Reject window' },
+      ],
+      createdAt: nowRef.value + 530,
+    },
+  });
+  waitingMission.attemptCount = 1;
+
+  repo.saveMission(waitingMission);
+  repo.saveWorkItem(createMissionWorkItem(waitingMission, { at: nowRef.value + 510 }));
+
+  const approvalResolved = await api.commands.submitApproval({
+    meta: {
+      requestId: 'req-approval-waiting-1',
+      correlationId: null,
+      idempotencyKey: null,
+    },
+    input: {
+      missionId: waitingMission.id,
+      approvalId: 'approval-waiting-1',
+      decision: 'reject',
+      responseText: 'Do not deploy today; wait for tomorrow morning.',
+      actor: {
+        actorId: 'release-manager',
+        actorType: 'user',
+      },
+    },
+  });
+
+  assert.equal(approvalResolved.data.mission.status, 'queued');
+  assert.equal(approvalResolved.data.pendingApproval, null);
+  assert.equal(approvalResolved.data.workpadStatus.summary, 'Mission queued after human response.');
+  assert.match(
+    approvalResolved.data.workpadStatus.notes.at(-1) ?? '',
+    /Do not deploy today; wait for tomorrow morning\./,
+  );
+  const finalEvent = repo.listEvents(waitingMission.id).at(-1) as MissionEvent | undefined;
+  assert.equal(finalEvent?.kind, 'mission.queued');
+  assert.equal((finalEvent?.metadata as Record<string, unknown> | undefined)?.decision, 'reject');
+  assert.equal(
+    (finalEvent?.metadata as Record<string, unknown> | undefined)?.responseText,
+    'Do not deploy today; wait for tomorrow morning.',
+  );
+});
+
 test('direct mission control api can sync a pristine mission from a refreshed source summary before attempts start', async () => {
   const { repo, api, nowRef } = createApiHarness(1_701_200_060_000);
 

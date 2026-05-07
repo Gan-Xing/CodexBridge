@@ -64,6 +64,7 @@ import type {
   MissionTimelineView,
   ProposePlanChangeInput,
   ResolvePlanChangeInput,
+  SubmitApprovalInput,
   StartMissionInput,
   ResumeMissionInput,
   RetryMissionInput,
@@ -107,6 +108,7 @@ export class DirectMissionControlApi implements MissionControlApi {
     this.commands = {
       createMission: (request) => this.handleCreateMission(request),
       startMission: (request) => this.handleStartMission(request),
+      submitApproval: (request) => this.handleSubmitApproval(request),
       syncMissionSource: (request) => this.handleSyncMissionSource(request),
       proposePlanChange: (request) => this.handleProposePlanChange(request),
       resolvePlanChange: (request) => this.handleResolvePlanChange(request),
@@ -323,6 +325,127 @@ export class DirectMissionControlApi implements MissionControlApi {
       },
     }));
     return withMeta(request.meta, this.buildMissionDetailView(staged.mission));
+  }
+
+  private handleSubmitApproval(
+    request: MissionControlRequest<SubmitApprovalInput>,
+  ): MissionControlResponse<MissionDetailView> {
+    const mission = this.requireMission(request.input.missionId);
+    const pendingApproval = mission.pendingApproval;
+    const approvalId = normalizeText(request.input.approvalId) ?? pendingApproval?.requestId ?? null;
+    if (pendingApproval && approvalId && pendingApproval.requestId !== approvalId) {
+      throw new Error(`Mission approval does not match the active pending approval: ${mission.id}`);
+    }
+
+    if (mission.status === 'scope_change_pending') {
+      return this.handleResolvePlanChange({
+        meta: request.meta,
+        input: {
+          missionId: mission.id,
+          planChangeRequestId: approvalId,
+          decision: request.input.decision,
+          reason: request.input.reason,
+          actor: request.input.actor,
+        },
+      });
+    }
+
+    const at = this.now();
+    if (
+      mission.status === 'awaiting_checklist_confirm'
+      || mission.status === 'awaiting_prompt_confirm'
+    ) {
+      if (request.input.decision === 'reject') {
+        const stopped = transitionMission(mission, 'stopped', {
+          at,
+          reason: normalizeText(request.input.reason) ?? 'Mission start was rejected before the first autonomous cycle.',
+          pendingApproval: null,
+          workpad: {
+            ...mission.workpad,
+            summary: 'Mission start was rejected before autonomous execution.',
+            latestBlocker: null,
+            latestVerifierSummary: null,
+            updatedAt: at,
+          },
+        });
+        this.repository.saveMission(stopped);
+        this.repository.appendEvent(this.createMissionEvent({
+          mission: stopped,
+          attemptId: null,
+          kind: 'mission.stopped',
+          summary: stopped.statusReason ?? 'Mission start was rejected before the first autonomous cycle.',
+          metadata: {
+            requestId: request.meta.requestId,
+            approvalId,
+            decision: request.input.decision,
+            responseText: normalizeText(request.input.responseText) ?? null,
+            ...buildActorMetadata(request.input.actor),
+          },
+        }));
+        return withMeta(request.meta, this.buildMissionDetailView(stopped));
+      }
+
+      const staged = advanceMissionStartGate(this.repository, mission, {
+        at,
+        requestId: request.meta.requestId,
+        confirmChecklist: mission.status === 'awaiting_checklist_confirm',
+        confirmPrompt: mission.status === 'awaiting_prompt_confirm',
+      });
+      this.repository.saveMission(staged.mission);
+      this.repository.appendEvent(this.createMissionEvent({
+        mission: staged.mission,
+        attemptId: null,
+        kind: staged.eventKind,
+        summary: staged.summary,
+        metadata: {
+          requestId: request.meta.requestId,
+          approvalId,
+          decision: request.input.decision,
+          responseText: normalizeText(request.input.responseText) ?? null,
+          checklistSnapshotId: staged.mission.currentChecklistSnapshotId,
+          checklistSnapshotVersion: staged.mission.currentChecklistSnapshotVersion,
+          checklistHash: staged.checklistSnapshot?.hash ?? null,
+          ...buildActorMetadata(request.input.actor),
+        },
+      }));
+      return withMeta(request.meta, this.buildMissionDetailView(staged.mission));
+    }
+
+    if (canSubmitPausedMissionApproval(mission)) {
+      const queued = createMissionResumeSnapshot(mission, {
+        at,
+        reason: normalizeText(request.input.reason)
+          ?? (request.input.decision === 'reject'
+            ? 'Mission queued after human rejection.'
+            : 'Mission queued after human approval.'),
+        responseText: buildMissionApprovalResponseText({
+          decision: request.input.decision,
+          pendingApproval,
+          responseText: request.input.responseText,
+        }),
+      });
+      this.repository.saveMission(queued);
+      this.repository.appendEvent(this.createMissionEvent({
+        mission: queued,
+        attemptId: null,
+        kind: 'mission.queued',
+        summary: request.input.decision === 'reject'
+          ? 'Mission queued after the host rejected the pending request.'
+          : 'Mission queued after the host approved the pending request.',
+        metadata: {
+          requestId: request.meta.requestId,
+          approvalId,
+          decision: request.input.decision,
+          responseText: normalizeText(request.input.responseText) ?? null,
+          pendingApprovalKind: pendingApproval?.kind ?? null,
+          pendingApprovalSummary: pendingApproval?.summary ?? null,
+          ...buildActorMetadata(request.input.actor),
+        },
+      }));
+      return withMeta(request.meta, this.buildMissionDetailView(queued));
+    }
+
+    return withMeta(request.meta, this.buildMissionDetailView(mission));
   }
 
   private handleSyncMissionSource(
@@ -652,6 +775,7 @@ export class DirectMissionControlApi implements MissionControlApi {
     const resumed = createMissionResumeSnapshot(mission, {
       at: this.now(),
       reason: request.input.reason,
+      responseText: request.input.responseText,
     });
     this.repository.saveMission(resumed);
     this.repository.appendEvent(this.createMissionEvent({
@@ -1509,6 +1633,34 @@ function buildPlanChangeApproval(
     ],
     createdAt: at,
   };
+}
+
+function canSubmitPausedMissionApproval(mission: Mission): boolean {
+  return mission.status === 'waiting_user'
+    || mission.status === 'needs_human'
+    || mission.status === 'handoff'
+    || mission.status === 'blocked';
+}
+
+function buildMissionApprovalResponseText(input: {
+  decision: SubmitApprovalInput['decision'];
+  pendingApproval: MissionPendingApproval | null;
+  responseText: string | null | undefined;
+}): string {
+  const lines = [
+    input.decision === 'reject'
+      ? 'Human rejected the pending request.'
+      : 'Human approved the pending request.',
+  ];
+  const summary = normalizeText(input.pendingApproval?.summary);
+  if (summary) {
+    lines.push(`Pending request: ${summary}`);
+  }
+  const responseText = normalizeText(input.responseText);
+  if (responseText) {
+    lines.push(`Human input: ${responseText}`);
+  }
+  return lines.join(' ').trim();
 }
 
 function normalizeStringList(values: readonly string[] | null | undefined): string[] {

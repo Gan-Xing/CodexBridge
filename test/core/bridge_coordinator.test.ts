@@ -8031,6 +8031,7 @@ test('/agent list, show, result, stop, and retry prefer Mission Control runtime 
     assert.match(showWaitingText, /当前清单项：/);
     assert.match(showWaitingText, /下一步：等待用户提供发布时间窗口后再继续。/);
     assert.match(showWaitingText, /需补充信息：请确认发布时间窗口。/);
+    assert.match(showWaitingText, /补充信息并继续：\/agent confirm 1 <补充信息>/);
     assert.match(showWaitingText, /满足继续条件后：\/agent confirm 1/);
     assert.match(showWaitingText, /阻塞：等待用户确认。|阻塞：发布窗口尚未确认。/);
     assert.match(showWaitingText, /验证：等待用户确认。/);
@@ -8038,15 +8039,20 @@ test('/agent list, show, result, stop, and retry prefer Mission Control runtime 
     const resumed = await runtime.services.bridgeCoordinator.handleInboundEvent({
       platform: 'weixin',
       externalScopeId: 'wx-agent-mission-state-1',
-      text: '/agent confirm 1',
+      text: '/agent confirm 1 发布时间窗口改为今晚 21:00 UTC',
     });
     assert.match(resumed.messages.map((message) => message.text).join('\n'), /Agent 任务已确认继续，现已重新排队/);
+    assert.match(resumed.messages.map((message) => message.text).join('\n'), /已记录补充信息：发布时间窗口改为今晚 21:00 UTC/);
     assert.equal(resumed.meta?.systemAction?.kind, 'run_agent_sweep');
 
     const resumedJob = runtime.services.agentJobs.getById(job.id);
     assert.equal((resumedJob?.missionRuntimeState?.mission as Record<string, unknown> | null)?.status, 'queued');
     assert.equal((resumedJob?.missionRuntimeState?.mission as Record<string, unknown> | null)?.activeGenerationIndex, 1);
     assert.equal(resumedJob?.missionRuntimeState?.attempts.length ?? -1, 1);
+    assert.match(
+      String((resumedJob?.missionRuntimeState?.mission as any)?.workpad?.notes?.at(-1) ?? ''),
+      /发布时间窗口改为今晚 21:00 UTC/,
+    );
 
     const maxLoopsState = structuredClone(completedState);
     (maxLoopsState.mission as Record<string, unknown>).status = 'max_loops_reached';
@@ -8248,6 +8254,81 @@ test('/agent show and confirm resolve package-backed scope change proposals with
     );
     assert.equal(approvedDetail?.currentChecklistSnapshot?.version, 2);
     assert.equal(approvedDetail?.planChangeRequests.at(-1)?.status, 'applied');
+  } finally {
+    if (originalOpenAiKey === undefined) {
+      delete process.env.OPENAI_API_KEY;
+    } else {
+      process.env.OPENAI_API_KEY = originalOpenAiKey;
+    }
+  }
+});
+
+test('/agent show and confirm can submit paused approval decisions with attached input without shell-log inspection', async () => {
+  const originalOpenAiKey = process.env.OPENAI_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+  try {
+    const { runtime } = makeRuntime({ defaultCwd: '/repo' });
+    await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-paused-approval-1',
+      text: '/agent 准备发布说明并等待我确认发布时间窗',
+    });
+    const { index } = await fullyConfirmLatestAgentJob(runtime, 'wx-agent-paused-approval-1');
+    const [job] = runtime.services.agentJobs.listForScope({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-paused-approval-1',
+    });
+    const detail = runtime.services.agentJobs.getMissionDetail(job.id);
+    const running = transitionMission(detail!.mission, 'running', {
+      at: detail!.mission.updatedAt + 1,
+      activeAttemptId: `${job.id}-attempt-paused-approval-1`,
+    });
+    running.attemptCount = 1;
+    const waiting = transitionMission(running, 'waiting_user', {
+      at: running.updatedAt + 1,
+      activeAttemptId: `${job.id}-attempt-paused-approval-1`,
+      reason: 'Need approval on the deployment window before continuing.',
+      lastError: 'Need approval on the deployment window before continuing.',
+      pendingApproval: {
+        requestId: `${job.id}-approval-paused-1`,
+        kind: 'manual',
+        summary: 'Approve or reject the deployment window before continuing.',
+        options: [
+          { index: 1, label: 'Approve window' },
+          { index: 2, label: 'Reject window' },
+        ],
+        createdAt: running.updatedAt + 1,
+      },
+    });
+    waiting.workpad.summary = 'Mission paused pending deployment-window approval.';
+    waiting.workpad.latestBlocker = 'Need approval on the deployment window before continuing.';
+    waiting.workpad.latestVerifierSummary = 'Waiting for the deployment-window decision.';
+    runtime.services.agentJobs.getMissionRepository().saveMission(waiting);
+
+    const showPending = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-paused-approval-1',
+      text: `/agent show ${index}`,
+    });
+    const showPendingText = showPending.messages.map((message) => message.text).join('\n');
+    assert.match(showPendingText, /待确认事项：Approve or reject the deployment window before continuing\./);
+    assert.match(showPendingText, /确认并继续：\/agent confirm 1/);
+    assert.match(showPendingText, /拒绝并继续：\/agent confirm 1 reject/);
+    assert.match(showPendingText, /补充信息并继续：\/agent confirm 1 <补充信息>/);
+
+    const rejected = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-paused-approval-1',
+      text: `/agent confirm ${index} reject 今天先不要发，等明早 09:00 UTC`,
+    });
+    const rejectedText = rejected.messages.map((message) => message.text ?? '').join('\n');
+    assert.match(rejectedText, /已记录拒绝决定/);
+    assert.match(rejectedText, /已记录补充信息：今天先不要发，等明早 09:00 UTC/);
+    assert.equal(rejected.meta?.systemAction?.kind, 'run_agent_sweep');
+
+    const rejectedDetail = runtime.services.agentJobs.getMissionDetail(job.id);
+    assert.equal(rejectedDetail?.mission.status, 'queued');
+    assert.match(rejectedDetail?.workpadStatus.notes.at(-1) ?? '', /今天先不要发，等明早 09:00 UTC/);
   } finally {
     if (originalOpenAiKey === undefined) {
       delete process.env.OPENAI_API_KEY;
