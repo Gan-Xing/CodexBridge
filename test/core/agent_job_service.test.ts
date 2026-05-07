@@ -173,7 +173,8 @@ test('AgentJobService retryJob preserves Mission Control runtime history when re
   assert.equal(runtimeState.mission?.workpad.latestBlocker, null);
   assert.equal(runtimeState.mission?.workpad.latestVerifierSummary, null);
   assert.equal(runtimeState.attempts.length, 1);
-  assert.equal(runtimeState.events.length, 1);
+  assert.equal(runtimeState.events.length, 2);
+  assert.equal(runtimeState.events[1]?.kind, 'mission.queued');
   assert.equal(runtimeState.attempts[0]?.status, 'waiting_user');
 });
 
@@ -300,5 +301,6 @@ test('AgentJobService retryJob preserves prior runtime history for fresh reruns 
   assert.equal(runtimeState.mission?.activeGenerationIndex, 2);
   assert.equal(runtimeState.generations.length, 2);
   assert.equal(runtimeState.attempts.length, 1);
-  assert.equal(runtimeState.events.length, 1);
+  assert.equal(runtimeState.events.length, 2);
+  assert.equal(runtimeState.events[1]?.kind, 'mission.retrying');
 });

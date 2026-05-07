@@ -53,9 +53,16 @@ Main remaining integration gap:
 
 - the unified `Mission` model now exists inside
   `@codexbridge/mission-control`
-- the next hardening work is keeping host-side control actions thin and
-  reusable, so future Telegram, CLI, or web surfaces can stop/retry/resume the
-  same mission records without re-implementing bridge-local runtime logic
+- Phase 8a now adds a package-owned in-process API for:
+  - mission summary/detail/timeline/attempt/execution queries
+  - retry / resume / stop commands
+  - transport-neutral boundary metadata
+- `/agent` `list/show/stop/retry` now consume that package API through an
+  `AgentJob`-backed host adapter repository instead of rebuilding runtime truth
+  directly from bridge compatibility fields
+- the next hardening work is pushing the remaining read/control paths and
+  `AgentJob` projection cleanup onto the same package-owned surface, so future
+  Telegram, CLI, or web hosts do not re-implement bridge-local runtime logic
 
 ## V0 Migration Baseline Sources
 

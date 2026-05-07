@@ -1,14 +1,12 @@
 import crypto from 'node:crypto';
-import { shouldMissionRetryReuseAccumulatedContext } from '../../packages/mission-control/src/index.js';
-import { NotFoundError } from './errors.js';
 import {
-  createMissionControlledAgentJobView,
-  createResumedMissionRuntimeStateForAgentJob,
-  createRetriedMissionRuntimeStateForAgentJob,
-  createStoppedMissionRuntimeStateForAgentJob,
-  loadAgentJobMissionRuntimeState,
-  serializeAgentJobMissionRuntimeState,
-} from './mission_control_agent_job_adapter.js';
+  DirectMissionControlApi,
+  shouldMissionRetryReuseAccumulatedContext,
+  type MissionDetailView,
+  type MissionSummaryView,
+} from '../../packages/mission-control/src/index.js';
+import { NotFoundError } from './errors.js';
+import { AgentJobMissionRepository } from './mission_control_agent_job_repository.js';
 import { createI18n, type Translator } from '../i18n/index.js';
 import type {
   AgentJob,
@@ -66,6 +64,27 @@ export class AgentJobService {
     return this.agentJobs
       .list()
       .sort((left, right) => left.createdAt - right.createdAt);
+  }
+
+  listMissionSummariesForScope(scopeRef: PlatformScopeRef): MissionSummaryView[] {
+    return this.createMissionControlApi().queries.listMissionSummaries({
+      meta: this.createMissionControlMeta(`agent-list:${scopeRef.platform}:${scopeRef.externalScopeId}`),
+      input: {
+        filter: {
+          platform: scopeRef.platform,
+          externalScopeId: scopeRef.externalScopeId,
+        },
+      },
+    }).data;
+  }
+
+  getMissionDetail(id: string): MissionDetailView | null {
+    return this.createMissionControlApi().queries.getMissionDetail({
+      meta: this.createMissionControlMeta(`agent-detail:${id}`),
+      input: {
+        missionId: id,
+      },
+    }).data;
   }
 
   getById(id: string): AgentJob | null {
@@ -177,75 +196,57 @@ export class AgentJobService {
   }
 
   requestStop(id: string): AgentJob {
-    const current = this.requireById(id);
-    const effectiveJob = createMissionControlledAgentJobView(current);
-    const stoppedState = createStoppedMissionRuntimeStateForAgentJob(current, {
-      reason: 'Agent job stop requested.',
-      now: this.now(),
+    this.requireById(id);
+    this.createMissionControlApi().commands.stopMission({
+      meta: this.createMissionControlMeta(`agent-stop:${id}`),
+      input: {
+        missionId: id,
+        reason: 'Agent job stop requested.',
+        actor: {
+          actorId: 'agent-job-service',
+          actorType: 'host',
+        },
+      },
     });
-    return this.updateJob(id, {
-      stopRequested: true,
-      running: false,
-      status: effectiveJob.status === 'completed' || effectiveJob.status === 'failed'
-        ? effectiveJob.status
-        : 'stopped',
-      missionRuntimeState: stoppedState ? serializeAgentJobMissionRuntimeState(stoppedState) : current.missionRuntimeState,
-    });
+    return this.requireById(id);
   }
 
   retryJob(id: string): AgentJob {
     const current = this.requireById(id);
-    const effectiveJob = createMissionControlledAgentJobView(current);
-    const runtimeState = loadAgentJobMissionRuntimeState(current);
-    if (runtimeState.mission && shouldMissionRetryReuseAccumulatedContext(runtimeState.mission)) {
-      const mission = runtimeState.mission;
-      const resumedState = createResumedMissionRuntimeStateForAgentJob(current, {
-        reason: 'Agent mission queued to continue after human input.',
-        now: this.now(),
+    const api = this.createMissionControlApi();
+    const detail = api.queries.getMissionDetail({
+      meta: this.createMissionControlMeta(`agent-detail:${id}`),
+      input: {
+        missionId: id,
+      },
+    }).data;
+    if (detail?.mission && shouldMissionRetryReuseAccumulatedContext(detail.mission)) {
+      api.commands.resumeMission({
+        meta: this.createMissionControlMeta(`agent-resume:${id}`),
+        input: {
+          missionId: id,
+          reason: 'Agent mission queued to continue after human input.',
+          actor: {
+            actorId: 'agent-job-service',
+            actorType: 'host',
+          },
+        },
       });
-      if (resumedState) {
-        return this.updateJob(id, {
-          status: 'queued',
-          running: false,
-          stopRequested: false,
-          attemptCount: mission.attemptCount,
-          lastRunAt: mission.lastRunAt,
-          completedAt: null,
-          lastResultPreview: mission.lastResultPreview,
-          resultText: mission.resultText,
-          resultArtifacts: effectiveJob.resultArtifacts ?? null,
-          lastError: null,
-          verificationSummary: null,
-          missionWorkpadLatestBlocker: null,
-          missionWorkpadLatestVerifierSummary: null,
-          missionWorkpadFinalResultSummary: mission.workpad.finalResultSummary,
-          missionAttemptHistory: effectiveJob.missionAttemptHistory,
-          missionRuntimeState: serializeAgentJobMissionRuntimeState(resumedState),
-        });
-      }
+      return this.requireById(id);
     }
-    const resetState = createRetriedMissionRuntimeStateForAgentJob(current, {
-      now: this.now(),
-      codexThreadId: this.getSession(current)?.codexThreadId ?? null,
+    api.commands.retryMission({
+      meta: this.createMissionControlMeta(`agent-retry:${id}`),
+      input: {
+        missionId: id,
+        reason: 'Agent mission re-queued through Mission Control retry.',
+        codexThreadId: this.getSession(current)?.codexThreadId ?? null,
+        actor: {
+          actorId: 'agent-job-service',
+          actorType: 'host',
+        },
+      },
     });
-    return this.updateJob(id, {
-      status: 'queued',
-      running: false,
-      stopRequested: false,
-      attemptCount: 0,
-      lastRunAt: null,
-      completedAt: null,
-      lastResultPreview: null,
-      lastError: null,
-      resultText: null,
-      resultArtifacts: null,
-      verificationSummary: null,
-      missionWorkpadLatestBlocker: null,
-      missionWorkpadLatestVerifierSummary: null,
-      missionWorkpadFinalResultSummary: null,
-      missionAttemptHistory: effectiveJob.missionAttemptHistory,
-      missionRuntimeState: serializeAgentJobMissionRuntimeState(resetState),
-    });
+    return this.requireById(id);
   }
 
   deleteJob(id: string): void {
@@ -411,6 +412,28 @@ export class AgentJobService {
 
   getSession(job: AgentJob): BridgeSession | null {
     return this.bridgeSessions?.getSessionById?.(job.bridgeSessionId) ?? null;
+  }
+
+  private createMissionControlApi(): DirectMissionControlApi {
+    return new DirectMissionControlApi({
+      repository: new AgentJobMissionRepository({
+        listJobs: () => this.agentJobs.list(),
+        getJobById: (id) => this.agentJobs.getById(id),
+        updateJob: (id, updates) => this.updateJob(id, updates),
+        resolveSession: (job) => this.getSession(job),
+      }, {
+        now: this.now,
+      }),
+      now: this.now,
+    });
+  }
+
+  private createMissionControlMeta(requestId: string) {
+    return {
+      requestId,
+      correlationId: null,
+      idempotencyKey: null,
+    };
   }
 }
 

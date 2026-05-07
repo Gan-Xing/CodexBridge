@@ -1,6 +1,6 @@
 export const MISSION_CONTROL_PACKAGE_NAME = '@codexbridge/mission-control' as const;
 
-export const MISSION_CONTROL_PACKAGE_PHASE = 'phase-7a-work-item-lineage-foundations' as const;
+export const MISSION_CONTROL_PACKAGE_PHASE = 'phase-8a-in-process-api-contracts' as const;
 
 export const MISSION_CONTROL_OWNS = [
   'mission-domain-model',
@@ -49,3 +49,5 @@ export * from './provider.js';
 export * from './codex_provider.js';
 export * from './verifier.js';
 export * from './runtime.js';
+export * from './api_contract.js';
+export * from './api.js';

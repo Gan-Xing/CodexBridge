@@ -13,7 +13,6 @@ import {
 } from './assistant_record_service.js';
 import {
   createMissionControlledAgentJobView,
-  createAgentJobStatusView,
   loadMissionWorkflowForAgentJob,
 } from './mission_control_agent_job_adapter.js';
 import { runAgentJobWithMissionControl } from './mission_control_agent_job_runner.js';
@@ -32,6 +31,7 @@ import {
   type SupportedLocale,
   type Translator,
 } from '../i18n/index.js';
+import { createMissionWorkpadStatusView } from '../../packages/mission-control/src/index.js';
 import {
   CodexInstructionsManager,
   type CodexInstructionsSnapshot,
@@ -6015,8 +6015,9 @@ export class BridgeCoordinator {
 
   handleAgentListCommand(event) {
     const scopeRef = toScopeRef(event);
-    const jobs = this.agentJobs.listForScope(scopeRef).map((job) => createMissionControlledAgentJobView(job));
-    if (jobs.length === 0) {
+    const scopedJobs = this.agentJobs.listForScope(scopeRef);
+    const summaries = this.agentJobs.listMissionSummariesForScope(scopeRef);
+    if (summaries.length === 0) {
       return messageResponse([
         this.t('coordinator.agent.listTitle', { count: 0 }),
         this.t('coordinator.agent.empty'),
@@ -6024,29 +6025,35 @@ export class BridgeCoordinator {
       ], this.buildScopedSessionMeta(event));
     }
     const lines = [
-      this.t('coordinator.agent.listTitle', { count: jobs.length }),
+      this.t('coordinator.agent.listTitle', { count: summaries.length }),
     ];
-    for (const [index, job] of jobs.entries()) {
+    for (const [index, summary] of summaries.entries()) {
+      const mission = summary.mission;
       lines.push(this.t('coordinator.agent.item', {
         index: index + 1,
-        title: job.title,
+        title: mission.title,
       }));
       lines.push(this.t('coordinator.agent.status', {
-        value: formatAgentStatusLabel(job.status, job.running, this.currentI18n),
+        value: formatAgentStatusLabel(
+          mission.status as AgentJobStatus,
+          isActiveMissionJobStatus(mission.status),
+          this.currentI18n,
+        ),
       }));
       lines.push(this.t('coordinator.agent.attempts', {
-        value: `${job.attemptCount}/${job.maxAttempts}`,
+        value: `${mission.attemptCount}/${mission.maxAttempts}`,
       }));
-      if (job.lastResultPreview) {
-        lines.push(this.t('coordinator.agent.lastResult', { value: job.lastResultPreview }));
+      if (summary.lastResultPreview) {
+        lines.push(this.t('coordinator.agent.lastResult', { value: summary.lastResultPreview }));
         lines.push(this.t('coordinator.agent.resultHint', { index: index + 1 }));
       }
-      const artifacts = this.resolveAgentJobArtifacts(job);
+      const rawJob = scopedJobs.find((candidate) => candidate.id === mission.id);
+      const artifacts = rawJob ? this.resolveAgentJobArtifacts(rawJob) : [];
       if (artifacts.length > 0) {
         lines.push(this.t('coordinator.agent.attachments', { value: formatAgentArtifactSummary(artifacts, this.currentI18n) }));
       }
-      if (job.lastError) {
-        lines.push(this.t('coordinator.agent.lastError', { value: job.lastError }));
+      if (summary.lastError) {
+        lines.push(this.t('coordinator.agent.lastError', { value: summary.lastError }));
       }
     }
     lines.push(this.t('coordinator.agent.actionsHint'));
@@ -6061,27 +6068,43 @@ export class BridgeCoordinator {
       ], this.buildScopedSessionMeta(event));
     }
     const job = createMissionControlledAgentJobView(resolved.job);
+    const detail = this.agentJobs.getMissionDetail(resolved.job.id);
+    if (!detail) {
+      return messageResponse([
+        this.t('coordinator.agent.notFound', { value: token || '?' }),
+      ], this.buildScopedSessionMeta(event));
+    }
     const workflowLoadResult = loadMissionWorkflowForAgentJob(job);
     const workflow = workflowLoadResult.workflow;
-    const missionStatusView = createAgentJobStatusView(job, workflow);
+    const missionStatusView = createMissionWorkpadStatusView({
+      mission: detail.mission,
+      attempts: detail.attempts,
+      workflow,
+    });
     const lines = [
-      this.t('coordinator.agent.detailTitle', { title: job.title }),
-      this.t('coordinator.agent.status', { value: formatAgentStatusLabel(job.status, job.running, this.currentI18n) }),
+      this.t('coordinator.agent.detailTitle', { title: detail.mission.title }),
+      this.t('coordinator.agent.status', {
+        value: formatAgentStatusLabel(
+          detail.mission.status as AgentJobStatus,
+          isActiveMissionJobStatus(detail.mission.status),
+          this.currentI18n,
+        ),
+      }),
       this.t('coordinator.agent.mode', { value: formatAgentMode(job.mode, this.currentI18n) }),
       this.t('coordinator.agent.category', { value: formatAgentCategory(job.category, this.currentI18n) }),
-      this.t('coordinator.agent.risk', { value: formatAgentRisk(job.riskLevel, this.currentI18n) }),
-      this.t('coordinator.agent.providerProfile', { value: job.providerProfileId }),
-      this.t('coordinator.agent.workingDirectory', { value: job.cwd ?? this.t('common.notSet') }),
+      this.t('coordinator.agent.risk', { value: formatAgentRisk(detail.mission.riskLevel, this.currentI18n) }),
+      this.t('coordinator.agent.providerProfile', { value: detail.mission.providerProfileId }),
+      this.t('coordinator.agent.workingDirectory', { value: detail.mission.cwd ?? this.t('common.notSet') }),
       this.t('coordinator.agent.workflow', {
         value: workflow
           ? workflow.source.label
-          : workflowLoadResult.error?.message ?? job.missionWorkflowSourceLabel ?? this.t('common.notSet'),
+          : workflowLoadResult.error?.message ?? detail.mission.workflowPath ?? this.t('common.notSet'),
       }),
-      this.t('coordinator.agent.goal', { value: job.goal }),
-      this.t('coordinator.agent.expectedOutput', { value: job.expectedOutput }),
+      this.t('coordinator.agent.goal', { value: detail.mission.goal }),
+      this.t('coordinator.agent.expectedOutput', { value: detail.mission.expectedOutput }),
       this.t('coordinator.agent.planTitle'),
-      ...job.plan.map((line, index) => `${index + 1}. ${line}`),
-      this.t('coordinator.agent.attempts', { value: `${job.attemptCount}/${job.maxAttempts}` }),
+      ...detail.mission.plan.map((line, index) => `${index + 1}. ${line}`),
+      this.t('coordinator.agent.attempts', { value: `${detail.mission.attemptCount}/${detail.mission.maxAttempts}` }),
     ];
     if (missionStatusView.summary) {
       lines.push(this.t('coordinator.agent.workpadSummary', { value: missionStatusView.summary }));
@@ -6089,11 +6112,11 @@ export class BridgeCoordinator {
     if (missionStatusView.latestBlocker) {
       lines.push(this.t('coordinator.agent.workpadBlocker', { value: missionStatusView.latestBlocker }));
     }
-    if (job.verificationSummary) {
-      lines.push(this.t('coordinator.agent.verification', { value: job.verificationSummary }));
+    if (detail.latestVerifierSummary) {
+      lines.push(this.t('coordinator.agent.verification', { value: detail.latestVerifierSummary }));
     }
-    if (job.lastResultPreview) {
-      lines.push(this.t('coordinator.agent.lastResult', { value: job.lastResultPreview }));
+    if (detail.lastResultPreview) {
+      lines.push(this.t('coordinator.agent.lastResult', { value: detail.lastResultPreview }));
       lines.push(this.t('coordinator.agent.resultHint', { index: resolved.index ?? job.id }));
     }
     const artifacts = this.resolveAgentJobArtifacts(job);
@@ -6101,10 +6124,10 @@ export class BridgeCoordinator {
       lines.push(this.t('coordinator.agent.attachmentsTitle'));
       lines.push(...artifacts.map((artifact, index) => formatAgentArtifactLine(artifact, index, this.currentI18n)));
     }
-    if (job.lastError) {
-      lines.push(this.t('coordinator.agent.lastError', { value: job.lastError }));
+    if (detail.lastError) {
+      lines.push(this.t('coordinator.agent.lastError', { value: detail.lastError }));
     }
-    if (job.missionAttemptHistory.length > 0) {
+    if (detail.attempts.length > 0) {
       lines.push(this.t('coordinator.agent.attemptHistoryTitle'));
       lines.push(...missionStatusView.attemptHistory.map((line) => `- ${line}`));
     }
@@ -13315,6 +13338,13 @@ function formatAgentRisk(value: string, i18n: Translator): string {
   return i18n.t(`coordinator.agent.risk.${value}`) === `coordinator.agent.risk.${value}`
     ? value
     : i18n.t(`coordinator.agent.risk.${value}`);
+}
+
+function isActiveMissionJobStatus(status: string): boolean {
+  return status === 'planning'
+    || status === 'running'
+    || status === 'verifying'
+    || status === 'repairing';
 }
 
 function formatAgentStatusLabel(status: string, running: boolean, i18n: Translator): string {

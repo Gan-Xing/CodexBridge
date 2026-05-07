@@ -111,6 +111,16 @@ Fresh reruns now open a new mission generation instead of destructively
 clearing prior attempt/event history, but completion semantics and typed
 cycle-result protocol work are still pending inside Phase 7.
 
+Phase 8a now adds the first package-owned in-process API contract above those
+records:
+
+- canonical `commands / queries / streams` request/response shapes
+- boundary metadata: `requestId`, `correlationId`, `idempotencyKey`
+- package-owned query views for summary/workpad, timeline/history, attempts,
+  and execution refs/host bindings/artifact refs
+- a direct in-process implementation used by CodexBridge for `/agent`
+  `list/show/stop/retry`
+
 That baseline is useful, but it is **not** the final target shape.
 The remaining work is to converge the current implementation toward the
 host-neutral architecture locked in the two architecture documents above.
@@ -564,22 +574,22 @@ Completion criteria:
 
 ## Phase 8: Host-Neutral API and Projection Cleanup
 
-- [ ] Define the canonical package-owned `commands / queries / streams`
+- [x] Define the canonical package-owned `commands / queries / streams`
   contract
-- [ ] Keep direct in-process function calls as the first concrete
+- [x] Keep direct in-process function calls as the first concrete
   implementation of that contract
-- [ ] Add boundary metadata:
+- [x] Add boundary metadata:
   - `requestId`
   - `correlationId`
   - `idempotencyKey`
-- [ ] Add package-owned query shapes for:
+- [x] Add package-owned query shapes for:
   - mission summary/workpad
   - mission timeline/history
   - mission attempts
   - execution refs / host bindings / artifact refs
 - [ ] Add explicit host adapter boundaries for session/thread/approval/artifact
   delivery/notification/auth context
-- [ ] Move `/agent` reads and control actions further onto package-owned query
+- [x] Move `/agent` reads and control actions further onto package-owned query
   and command contracts
 - [ ] Keep stripping bridge-owned runtime truth out of `AgentJob` until it is a
   projection/cache only

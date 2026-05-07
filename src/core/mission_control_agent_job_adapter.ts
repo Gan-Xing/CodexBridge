@@ -170,10 +170,8 @@ export function createMissionControlledAgentJobView(job: AgentJob): AgentJob {
     lastResultPreview: summarizeMissionPreview(mission.lastResultPreview, mission.resultArtifacts) ?? job.lastResultPreview,
     resultText: compactString(mission.resultText) ?? job.resultText ?? null,
     resultArtifacts,
-    lastError: compactString(mission.lastError) ?? compactString(mission.statusReason) ?? job.lastError,
-    verificationSummary: compactString(mission.workpad.latestVerifierSummary)
-      ?? compactString(mission.statusReason)
-      ?? job.verificationSummary,
+    lastError: compactString(mission.lastError) ?? job.lastError,
+    verificationSummary: compactString(mission.workpad.latestVerifierSummary) ?? job.verificationSummary,
     missionWorkflowPath: mission.workflowPath ?? job.missionWorkflowPath,
     missionWorkflowSourceLabel: mission.workflowPath
       ? `configured workflow (${mission.workflowPath})`
@@ -271,6 +269,49 @@ export function createFreshMissionRuntimeStateForAgentJob(
     })],
     planChangeRequests: [],
     attempts: [],
+    events: [],
+  };
+}
+
+export function createProjectedMissionRuntimeStateForAgentJob(
+  job: AgentJob,
+  options: {
+    now?: number;
+    codexThreadId?: string | null;
+  } = {},
+): AgentJobMissionRuntimeStateView {
+  const existing = loadAgentJobMissionRuntimeState(job);
+  if (existing.mission) {
+    return existing;
+  }
+  const now = options.now ?? Date.now();
+  const mission = normalizeMissionRecord({
+    ...createMissionFromAgentJob(job, {
+      workflow: null,
+      latestBlocker: job.missionWorkpadLatestBlocker,
+    }),
+    codexThreadId: options.codexThreadId ?? null,
+    updatedAt: now,
+  });
+  const attempts = job.missionAttemptHistory.length > 0
+    ? job.missionAttemptHistory.map((entry) => createSyntheticAttemptFromHistory(job, entry))
+    : mission.attemptCount > 0
+      ? [createSyntheticAttempt(job, Math.max(1, mission.attemptCount), mapAgentStatusToMissionAttemptStatus(job.status))]
+      : [];
+  return {
+    workItem: createMissionWorkItem(mission, { at: now }),
+    mission,
+    generations: [createMissionGeneration(mission, {
+      at: now,
+      trigger: mission.activeGenerationIndex === 1 ? 'initial' : 'retry',
+      status: mapMissionStatusToGenerationStatus(mission.status),
+    })],
+    checklistSnapshots: [createMissionChecklistSnapshot(mission, {
+      at: now,
+      generationId: mission.activeGenerationId,
+    })],
+    planChangeRequests: [],
+    attempts,
     events: [],
   };
 }

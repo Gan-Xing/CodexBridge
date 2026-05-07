@@ -24,6 +24,7 @@ import {
   type WorkItem,
 } from '../../packages/mission-control/src/index.js';
 import { AgentJobService } from './agent_job_service.js';
+import { AgentJobMissionRepository as AgentJobMissionStateRepository } from './mission_control_agent_job_repository.js';
 import type {
   AgentJob,
   AgentJobAttemptHistoryEntry,
@@ -125,7 +126,15 @@ export async function runAgentJobWithMissionControl(
   options: RunAgentJobWithMissionControlOptions,
 ): Promise<MissionControlAgentJobRunOutput> {
   const now = options.now ?? (() => Date.now());
-  const repository = new AgentJobMissionRepository(options.agentJobs, now);
+  const repository = new AgentJobMissionStateRepository({
+    listJobs: () => options.agentJobs.listAllJobs(),
+    getJobById: (id) => options.agentJobs.getById(id),
+    updateJob: (id, updates) => options.agentJobs.updateJob(id, updates),
+    resolveSession: (job) => options.resolveSession(options.agentJobs.getById(job.id) ?? job),
+  }, {
+    now,
+    materializeMissingState: false,
+  });
   const scopeRef = {
     platform: options.job.platform,
     externalScopeId: options.job.externalScopeId,
@@ -654,8 +663,8 @@ function buildAgentJobMissionPatch(job: AgentJob, state: MissionRuntimeState): P
     lastResultPreview: summarizeMissionPreview(mission.lastResultPreview, mission.resultArtifacts),
     resultText: mission.resultText,
     resultArtifacts: mapMissionArtifactsToAgentArtifacts(mission.resultArtifacts),
-    lastError: mission.lastError ?? mission.statusReason,
-    verificationSummary: mission.workpad.latestVerifierSummary ?? mission.statusReason,
+    lastError: mission.lastError,
+    verificationSummary: mission.workpad.latestVerifierSummary,
     missionWorkflowPath: mission.workflowPath,
     missionWorkflowSourceLabel: mission.workflowPath
       ? `configured workflow (${mission.workflowPath})`
