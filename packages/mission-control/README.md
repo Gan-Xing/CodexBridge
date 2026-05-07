@@ -1,13 +1,14 @@
 # @codexbridge/mission-control
 
-Internal package for the CodexBridge Mission Control runtime.
+Mission Control runtime package, currently developed inside the CodexBridge
+repository.
 
 Immutable target:
 
-> `@codexbridge/mission-control` gives CodexBridge a durable, goal-driven
-> runtime that can keep a mission moving through plan, execute, verify,
-> repair/retry, and handoff states until the requested outcome is actually
-> complete, explicitly blocked, or needs human input.
+> `@codexbridge/mission-control` provides a durable, goal-driven runtime that
+> can keep a mission moving through plan, execute, verify, repair/retry, and
+> handoff states until the requested outcome is actually complete, explicitly
+> blocked, or needs human input.
 
 This package is intended to own only mission-runtime behavior:
 
@@ -18,7 +19,8 @@ This package is intended to own only mission-runtime behavior:
 - provider abstraction
 - run / verify / repair / retry loop
 - attempts, events, workpad, and runner state persistence
-- stop / retry / approve / resume control actions
+- stop plus retry/resume requeue control actions
+- pending-approval and handoff state modeling
 
 It must not own bridge behavior:
 
@@ -27,12 +29,22 @@ It must not own bridge behavior:
 - SendGate or platform rate limits
 - bridge sessions or thread browsing UX
 - approvals as chat wording or UI policy
-- assistant records, automations, uploads, or artifact delivery policy
+- assistant records, uploads, or artifact delivery policy
+- provider-native in-turn approval replies before a provider-neutral approval
+  control port exists
 
 Current phase:
 
-- `phase-0-bootstrap`: package boundary, ownership contract, package scripts,
-  and boundary checks only
+- `phase-6-codexbridge-integration`: package boundary plus durable mission
+  domain, repository-backed persistence, typed workflow loading, canonical
+  attempt prompt contract, workpad status rendering helpers, deterministic
+  workspace assignment, recovery-safe lease coordination, provider port,
+  `CodexMissionProvider` adapter shell, verifier/budget/repair-prompt
+  primitives, package-owned retry/resume snapshot helpers, and a
+  repository-backed bounded mission runtime that drives continuation,
+  repair/retry, verifier authority, and stop/interrupt control, with
+  CodexBridge `/agent` delegating into the Mission Control runtime without
+  introducing a separate `/mission` surface
 
 This package should preserve the Symphony-style separation between:
 
@@ -42,5 +54,5 @@ This package should preserve the Symphony-style separation between:
 - execution
 - status surfaces
 
-CodexBridge may depend on this package. This package must not import from
-CodexBridge platform/runtime/store/i18n modules.
+CodexBridge may depend on this package as its first host surface. This package
+must not import from CodexBridge platform/runtime/store/i18n modules.

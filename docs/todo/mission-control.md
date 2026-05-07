@@ -44,7 +44,9 @@ It should own:
 - run / verify / repair / retry loop
 - persisted attempts, events, workpad, and runner leases
 - provider abstraction
-- stop / retry / approve / resume control actions
+- stop / retry / resume control actions
+- pending-approval / handoff state modeling and future provider-neutral
+  approval control hooks
 
 It should **not** own:
 
@@ -82,8 +84,8 @@ Rules for references:
 
 - [ ] Record *why* each reference matters before copying any implementation idea
 - [ ] Do not vendor external runtime code unless there is a clear local ownership reason
-- [ ] Prefer adapting concepts into CodexBridge-native abstractions over mirroring upstream APIs
-- [ ] Keep the current product target primary: CodexBridge chat-first mission execution
+- [ ] Prefer adapting concepts into Mission Control abstractions over mirroring upstream APIs
+- [ ] Keep the current product target primary: a Codex-first, provider-pluggable runtime
 - [ ] Keep the final product/package name as `Mission Control`; treat
   `codex-mission-control` as a predecessor prototype, not the target identity
 - [ ] Do not rely on a local `reference/symphony` copy existing; upstream spec is
@@ -94,20 +96,19 @@ Rules for references:
 Mission Control should preserve these Symphony ideas as explicit design
 constraints, not just as vague inspiration:
 
-- [ ] Repository-owned workflow contract is the primary runtime policy source
-- [ ] Single-authority orchestrator owns dispatch, retries, cancellation, and
+- [x] Repository-owned workflow contract is the primary runtime policy source
+- [x] Single-authority orchestrator owns dispatch, retries, cancellation, and
   reconciliation
-- [ ] Stable workspace identity survives retries and normal exits
-- [ ] Continuation after normal exit is supported; retries are not failure-only
-- [ ] Handoff or waiting-human outcomes are first-class mission states
-- [ ] Status surfaces observe and control the orchestrator but do not own run
+- [x] Stable workspace identity survives retries and normal exits
+- [x] Continuation after normal exit is supported; retries are not failure-only
+- [x] Handoff or waiting-human outcomes are first-class mission states
+- [x] Status surfaces observe and control the orchestrator but do not own run
   execution
-- [ ] Policy/config/coordination/execution/status layers remain separated
+- [x] Policy/config/coordination/execution/status layers remain separated
 
 ## Packaging Direction
 
-The package should start as an internal package inside the CodexBridge
-repository:
+The package should start as a package inside the CodexBridge repository:
 
 ```text
 packages/mission-control/
@@ -120,6 +121,7 @@ Rules:
 - No workspace/monorepo conversion is required yet.
 - Follow the same internal-package pattern already used by
   `packages/codex-gateway`.
+- Treat CodexBridge as the first host, not the final product boundary.
 
 Package bootstrap target:
 
@@ -144,12 +146,12 @@ Package bootstrap target:
 
 This backlog follows the route below:
 
-- [ ] Use Symphony to define the orchestrator/workspace/retry/state-machine shape
-- [ ] Preserve the Symphony idea that normal worker exit may still schedule a
+- [x] Use Symphony to define the orchestrator/workspace/retry/state-machine shape
+- [x] Preserve the Symphony idea that normal worker exit may still schedule a
   continuation retry
-- [ ] Preserve the Symphony idea that handoff/waiting states are legitimate
+- [x] Preserve the Symphony idea that handoff/waiting states are legitimate
   mission outcomes, not only failures
-- [ ] Use current Codex app-server flow as the first real provider:
+- [x] Use current Codex app-server flow as the first real provider:
   `CodexMissionProvider`
 - [ ] Add a future `OpenAIAgentsMissionProvider` on top of
   `openai-agents-js`, not as the default runtime
@@ -157,164 +159,310 @@ This backlog follows the route below:
   references
 - [ ] Reuse only the prototype pieces from local `codex-mission-control` that
   survive the provider-pluggable package boundary
-- [ ] Converge the result into one provider-pluggable internal package:
+- [x] Converge the result into one provider-pluggable package:
   `@codexbridge/mission-control`
 
 ## Phase 0: Baseline Current `/agent` Behavior
 
 Before moving ownership into the package:
 
-- [ ] Record the current `/agent` public behavior that users already rely on
-- [ ] Lock current `/agent` migration-protection tests covering:
+- [x] Record the current `/agent` public behavior that users already rely on
+- [x] Lock current `/agent` migration-protection tests covering:
   - create / confirm / cancel
   - list / show / stop / retry / result
   - approval + interrupted-turn handling
   - artifact/result delivery
-- [ ] Record the current `/auto` behavior that should later delegate into mission runs
+Phase 0 source-of-truth inventory:
+
+- `/agent`
+  - public command contract: `docs/command-skills/agent.md`
+  - migration-protection tests: `test/core/bridge_coordinator.test.ts`
+    - `/agent drafts, confirms, runs, verifies, and records a background job`
+    - `/agent stores generated attachments and can resend them`
+    - `/agent show, retry, rename, stop, and delete manage queued jobs`
+    - `/agent runAgentJob retries after an interrupted provider turn and completes on the next attempt`
+    - `/agent runAgentJob forwards provider approval requests to the supplied approval callback`
 
 ## Phase 1: Domain and Persistence
 
 Create the core durable mission model.
 
-- [ ] Add `MissionStatus`, `MissionSource`, and `MissionPriority` types
-- [ ] Add `Mission`, `MissionAttempt`, `MissionEvent`, and `MissionWorkpad` types
-- [ ] Add explicit state transition helpers
-- [ ] Add a persistence port:
+- [x] Add `MissionStatus`, `MissionSource`, and `MissionPriority` types
+- [x] Add `Mission`, `MissionAttempt`, `MissionEvent`, and `MissionWorkpad` types
+- [x] Add explicit state transition helpers
+- [x] Add a persistence port:
   - `MissionStore`
   - `MissionAttemptStore`
   - `MissionEventStore`
   - or one combined `MissionRepository`
-- [ ] Add a first local persistence implementation using the existing CodexBridge
+- [x] Add a first local persistence implementation using the existing CodexBridge
   storage style
-- [ ] Persist enough state to recover after process restart:
+- [x] Persist enough state to recover after process restart:
   - mission
   - attempt
   - workpad
   - event log
   - lease/lock
   - pending approval/block reason
-- [ ] Add one authority for runtime state ownership instead of splitting active
+- [x] Add one authority for runtime state ownership instead of splitting active
   mission state across ad hoc background-job records
 
 Completion criteria:
 
-- [ ] A mission can be created, listed, read, updated, and stopped without
+- [x] A mission can be created, listed, read, updated, and stopped without
   starting a provider run
-- [ ] State transitions are explicit and testable
-- [ ] Restart recovery can identify resumable missions
+- [x] State transitions are explicit and testable
+- [x] Restart recovery can identify resumable missions
 
 ## Phase 2: Workflow and Workpad
 
-- [ ] Add `MissionWorkflowLoader` for `.codexbridge/mission/WORKFLOW.md`
-- [ ] Parse YAML front matter plus prompt body
-- [ ] Keep workflow config as the primary policy surface instead of embedding
+- [x] Add `MissionWorkflowLoader` for `.codexbridge/mission/WORKFLOW.md`
+- [x] Parse YAML front matter plus prompt body
+- [x] Keep workflow config as the primary policy surface instead of embedding
   run behavior into slash-command handlers
-- [ ] Define a canonical mission-attempt prompt contract so prompt,
+- [x] Define a canonical mission-attempt prompt contract so prompt,
   orchestrator, and verifier responsibilities stay separated
-- [ ] Add safe built-in defaults when the file is missing
-- [ ] Reject mission execution when workflow config is invalid, but do not block
+- [x] Add safe built-in defaults when the file is missing
+- [x] Reject mission execution when workflow config is invalid, but do not block
   normal bridge startup
-- [ ] Design the config layer so path/env/default resolution can evolve toward a
+- [x] Design the config layer so path/env/default resolution can evolve toward a
   typed workflow-policy contract
-- [ ] Add workpad rendering helpers for:
+- [x] Add workpad rendering helpers for:
   - compact summary
   - latest blocker
   - attempt history
   - final result summary
-- [ ] Add `/agent show` integration so workpad becomes the main status view
+- [x] Add `/agent show` integration so workpad becomes the main status view
 
 Completion criteria:
 
-- [ ] Workflow source is visible in mission status
-- [ ] Workpad can survive restart and multiple attempts
+- [x] Workflow source is visible in mission status
+- [x] Workpad can survive restart and multiple attempts
+
+Phase 2 source-of-truth tests:
+
+- `test/core/bridge_coordinator.test.ts`
+  - `/agent show, retry, rename, stop, and delete manage queued jobs`
+  - `/agent runAgentJob retries after an interrupted provider turn and completes on the next attempt`
+  - `/agent runAgentJob loads WORKFLOW.md and routes it into the mission-controlled execution prompt`
+- `test/store/file_json_repositories.test.ts`
+  - `file-backed repositories preserve agent jobs across repository reloads`
 
 ## Phase 3: Workspace and Lease Management
 
-- [ ] Add `MissionWorkspaceService`
-- [ ] Create default directory layout under `~/.codexbridge/mission/`
-- [ ] Add code-changing mission isolation under
+- [x] Add `MissionWorkspaceService`
+- [x] Create default directory layout under `~/.codexbridge/mission/`
+- [x] Add code-changing mission isolation under
   `~/.codexbridge/mission/workspaces/<missionId>/`
-- [ ] Make workspace identity deterministic per mission so retries and
+- [x] Make workspace identity deterministic per mission so retries and
   continuation reuse the same execution context safely
-- [ ] Allow safe reuse of bound cwd for read-only missions
-- [ ] Add runner lease records to prevent duplicate workers
-- [ ] Add stale-lease recovery
+- [x] Allow safe reuse of bound cwd for read-only missions
+- [x] Add runner lease records to prevent duplicate workers
+- [x] Add stale-lease recovery
 
 Completion criteria:
 
-- [ ] Concurrent mission limit is enforced
-- [ ] One mission cannot accidentally resume inside another mission workspace
-- [ ] Restarting the bridge does not create duplicate active runners
+- [x] Concurrent mission limit is enforced
+- [x] One mission cannot accidentally resume inside another mission workspace
+- [x] Restarting the bridge does not create duplicate active runners
+
+Phase 3 source-of-truth tests:
+
+- `packages/mission-control/test/workspace_and_lease.test.ts`
+  - `workspace service creates deterministic isolated mission workspaces and default layout`
+  - `workspace service can reuse bound cwd for explicit read-only missions`
+  - `lease coordinator enforces concurrent limits, conflict checks, and heartbeat updates`
+  - `stale lease recovery re-queues running missions, preserves verifier states, and supports restart-safe reclaim`
 
 ## Phase 4: Codex Provider Adapter
 
 The first real provider is current Codex app-server execution.
 
-- [ ] Add `MissionProvider` port
-- [ ] Add `CodexMissionProvider`
-- [ ] Reuse provider profile + Codex thread binding safely
-- [ ] Support:
+- [x] Add `MissionProvider` port
+- [x] Add `CodexMissionProvider`
+- [x] Reuse provider profile + Codex thread binding safely
+- [x] Support:
   - start
   - continue
   - wait
   - interrupt
-- [ ] Persist provider run/thread ids at the attempt level
-- [ ] Map Codex-native interrupted/blocking/completed outcomes into mission
+- [x] Persist provider run/thread ids at the attempt level
+- [x] Map Codex-native interrupted/blocking/completed outcomes into mission
   status
-- [ ] Treat normal provider exit as eligible for continuation when the mission
+- [x] Treat normal provider exit as eligible for continuation when the mission
   is still active and budget remains
 
 Completion criteria:
 
-- [ ] Mission Control can drive a real Codex run without importing WeChat code
-- [ ] Stop/retry behavior remains chat-visible through CodexBridge integration
+- [x] Mission Control can drive a real Codex run without importing WeChat code
+- [x] Stop/retry behavior remains chat-visible through CodexBridge integration
+
+Phase 4 source-of-truth tests:
+
+- `packages/mission-control/test/provider_and_codex_adapter.test.ts`
+  - `provider helpers persist provider ids on attempts and map terminal outcomes into mission states`
+  - `continuation scheduling only applies to active missions with remaining budget`
+  - `CodexMissionProvider reuses provider profile, thread binding, and workspace assignment safely`
+- `packages/mission-control/test/runtime_loop.test.ts`
+  - `mission runtime stopMission interrupts the active provider run and marks the attempt stopped`
+- `test/core/bridge_coordinator.test.ts`
+  - `/agent runAgentJob retries after an interrupted provider turn and completes on the next attempt`
+  - `/agent runAgentJob continues the same attempt after a normal partial provider exit`
+  - `/agent runAgentJob forwards provider approval requests to the supplied approval callback`
 
 ## Phase 5: Verification Loop
 
 This phase is the core difference between a background chat wrapper and a real
 mission runtime.
 
-- [ ] Add `MissionVerifier`
-- [ ] Normalize verifier verdicts:
+- [x] Add `MissionVerifier`
+- [x] Normalize verifier verdicts:
   - `complete`
   - `repair`
   - `blocked`
+  - `waiting_user`
+  - `needs_human`
+  - `handoff`
   - `failed`
-- [ ] Persist verifier summaries and missing acceptance criteria
-- [ ] Add repair prompt generation / reuse
-- [ ] Enforce:
+- [x] Persist verifier summaries and missing acceptance criteria
+- [x] Add repair prompt generation / reuse
+- [x] Enforce:
   - max attempts
   - max turns
   - max runtime
   - artifact count/size budget
-- [ ] Make `waiting_user` / `needs_human` / `handoff` explicit verifier- or
+- [x] Make `waiting_user` / `needs_human` / `handoff` explicit verifier- or
   provider-driven outcomes instead of generic failure buckets
+
+Phase 5 runtime loop landed in-package: Mission Control now consumes verifier
+budgets, uses verifier verdicts as the completion authority, continues the same
+attempt after normal partial exits, retries with repair prompts when budget
+permits, and fails visibly when budget is exhausted.
 
 Completion criteria:
 
-- [ ] "Completed" means acceptance criteria passed
-- [ ] Missions do not silently stop after one provider response
-- [ ] Repair/retry is bounded and observable
+- [x] "Completed" means acceptance criteria passed
+- [x] Missions do not silently stop after one provider response
+- [x] Repair/retry is bounded and observable
+
+Phase 5 source-of-truth tests:
+
+- `packages/mission-control/test/verifier_foundations.test.ts`
+  - `verifier helpers normalize waiting-user and repair verdicts into explicit mission states`
+  - `verifier helpers persist summaries and missing acceptance criteria onto attempts and missions`
+  - `verifier budget helpers resolve workflow limits and report exhausted budgets`
+- `packages/mission-control/test/runtime_loop.test.ts`
+  - `mission runtime keeps verifier repair loops bounded and only completes after acceptance criteria pass`
+  - `mission runtime continues the same attempt after a normal partial exit and counts provider turns separately from attempts`
+  - `mission runtime converts verifier repair verdicts into budget-exhausted failure when no retry budget remains`
 
 ## Phase 6: CodexBridge Integration
 
-- [ ] Make `/agent` call Mission Control instead of owning the runner directly
-- [ ] Make `/auto` schedule Mission Control runs instead of separate background
-  job logic
-- [ ] Reuse the same mission state for:
+- [x] Make `/agent` call Mission Control instead of owning the runner directly
+- [x] Reuse the same mission state for:
   - list
   - show
   - stop
   - retry
   - result
-- [ ] Keep WeChat as the first-class notification/control surface
-- [ ] Preserve current user-facing behavior as much as possible during migration
+- [x] Keep CodexBridge WeChat as the first-class notification/control surface
+- [x] Preserve current user-facing behavior as much as possible during migration
+
+Phase 6a landed: `/agent runAgentJob` now delegates execution into Mission
+Control through a bridge-side adapter that:
+
+- persists mission/attempt/event snapshot state on the `AgentJob` compatibility
+  record
+- reuses existing CodexBridge turn recovery, approval, interrupt, and WeChat
+  progress delivery paths as the first host/control surface
+- preserves Mission Control verifier authority and continuation-after-normal-exit
+  behavior on the real `/agent` execution path without introducing a new
+  `/mission` command yet
+
+Phase 6c landed: bridge-side `/agent` read/control commands now project a
+single Mission Control-backed state view so that:
+
+- list/show/result prefer `missionRuntimeState` over stale compatibility fields
+- stop updates the persisted mission snapshot instead of only toggling legacy
+  `AgentJob` status fields
+- retry re-queues a fresh queued mission snapshot under the same mission/job id
+  instead of dropping back to ad hoc compatibility-only state
+- existing `/agent result` fallback still backfills the compatibility record
+  when only a preview copy was cached locally
+
+Phase 6d landed: package-owned retry snapshot helpers now back `/agent retry`
+so that:
+
+- queued retry state is derived from `@codexbridge/mission-control` instead of
+  bridge-local reset logic
+- retry keeps stable mission/workspace/thread identity while clearing stale
+  attempts, events, verifier summaries, and result state before requeueing
+- provider-native in-turn approval replies remain a host concern until the
+  package grows a provider-neutral approval reply control port
 
 Completion criteria:
 
-- [ ] `/agent` remains the Mission v0 surface
-- [ ] No new `/mission` command is required yet
-- [ ] Existing users do not need to learn a new mental model
+- [x] `/agent` remains the Mission v0 surface
+- [x] No new `/mission` command is required yet
+- [x] Existing users do not need to learn a new mental model
+
+Phase 6 source-of-truth tests:
+
+- `packages/mission-control/test/control_actions.test.ts`
+  - `createMissionRetrySnapshot clears runtime history but preserves stable mission context`
+  - `createMissionResumeSnapshot re-queues waiting missions without discarding accumulated context`
+  - `shouldMissionRetryReuseAccumulatedContext only preserves waiting-human continuation states`
+  - `json repository resetMission replaces the mission snapshot and clears attempts and events for that mission`
+- `test/core/bridge_coordinator.test.ts`
+  - `/agent drafts, confirms, runs, verifies, and records a background job`
+  - `/agent stores generated attachments and can resend them`
+  - `/agent show, retry, rename, stop, and delete manage queued jobs`
+  - `/agent list, show, result, stop, and retry prefer Mission Control runtime state over stale compatibility fields`
+  - `/agent runAgentJob retries after an interrupted provider turn and completes on the next attempt`
+  - `/agent runAgentJob continues the same attempt after a normal partial provider exit`
+  - `/agent runAgentJob loads WORKFLOW.md and routes it into the mission-controlled execution prompt`
+  - `/agent runAgentJob forwards provider approval requests to the supplied approval callback`
+- `test/core/agent_job_service.test.ts`
+  - `AgentJobService retryJob preserves Mission Control runtime history when re-queueing waiting-human missions`
+  - `AgentJobService retryJob still clears runtime history for fresh reruns`
+
+Phase 6e landed: public package metadata and checklist status now track the
+verified CodexBridge integration state so that:
+
+- `@codexbridge/mission-control` publishes a `phase-6-codexbridge-integration`
+  marker instead of the stale Phase 5 label
+- package README and public-surface tests reflect that `/agent` delegates into
+  Mission Control without introducing a separate `/mission` surface
+- checklist items backed by Mission Control package tests, bridge integration
+  tests, and the package boundary check are marked complete
+
+Phase 6f landed: waiting-human continuation retries now reuse package-owned
+resume semantics so that:
+
+- `/agent retry` preserves attempts, events, and workpad context for
+  `waiting_user`, `needs_human`, `handoff`, and `blocked` missions instead of
+  clearing them like a fresh rerun
+- the existing `/agent retry` surface continues to serve as Mission v0 requeue
+  control without introducing a separate `/agent resume` command yet
+- completed or failed reruns still reset through package retry snapshots, so a
+  deliberate fresh rerun keeps bounded clean-state behavior
+
+Phase 4-6 revalidation sync landed: package-level verification and bridge-side
+integration tests were rerun against the current `track/mission-control` code so
+that:
+
+- the completed status of Phase 4, Phase 5, and Phase 6 remains backed by
+  current code, not only by historical checklist state
+- the top-level roadmap can mark Mission Control's workflow/workpad/workspace,
+  verifier-authority, continuation, and CodexBridge control-surface integration
+  summary items complete without drifting from the tested implementation
+- the current validation baseline is explicit:
+  - `pnpm mission-control:typecheck`
+  - `pnpm mission-control:test`
+  - `pnpm mission-control:build`
+  - `pnpm mission-control:check-boundary`
+  - `pnpm test --test-name-pattern "Mission Control|WORKFLOW\\.md|interrupted provider turn|normal partial provider exit|approval requests" test/core/bridge_coordinator.test.ts`
+  - `pnpm test --test-name-pattern "AgentJobService retryJob preserves Mission Control runtime history when re-queueing waiting-human missions|AgentJobService retryJob still clears runtime history for fresh reruns" test/core/agent_job_service.test.ts`
 
 ## Phase 7: Optional Web Surface
 
@@ -352,10 +500,10 @@ Source expansion:
 
 Mission Control is ready for broader extraction when:
 
-- [ ] A user can give one goal and the system keeps working until it completes,
+- [x] A user can give one goal and the system keeps working until it completes,
   blocks, fails, or is stopped
-- [ ] Restart recovery works for queued/running/verifying missions
-- [ ] `/agent` and `/auto` both use the same mission runtime
-- [ ] The package has no imports from platform/runtime/i18n command code
-- [ ] A later Telegram or web surface can integrate without changing mission
+- [x] Restart recovery works for queued/running/verifying missions
+- [x] `/agent` uses the mission runtime without host-owned runner logic
+- [x] The package has no imports from platform/runtime/i18n command code
+- [ ] A later Telegram, web, or other host surface can integrate without changing mission
   core behavior

@@ -52,14 +52,19 @@ export class AutomationJobService {
   }
 
   listForScope(scopeRef: PlatformScopeRef): AutomationJob[] {
-    return this.automationJobs
-      .list()
+    return this.readAllJobs()
       .filter((job) => job.platform === scopeRef.platform && job.externalScopeId === scopeRef.externalScopeId)
       .sort((left, right) => left.createdAt - right.createdAt);
   }
 
+  listAllJobs(): AutomationJob[] {
+    return this.readAllJobs()
+      .sort((left, right) => left.createdAt - right.createdAt);
+  }
+
   getById(id: string): AutomationJob | null {
-    return this.automationJobs.getById(id);
+    const job = this.automationJobs.getById(id);
+    return job ? sanitizeAutomationJob(job) : null;
   }
 
   requireById(id: string): AutomationJob {
@@ -98,7 +103,7 @@ export class AutomationJobService {
     schedule: AutomationSchedule;
   }): AutomationJob {
     const now = this.now();
-    const job: AutomationJob = {
+    const job = sanitizeAutomationJob({
       id: crypto.randomUUID(),
       platform: params.scopeRef.platform,
       externalScopeId: params.scopeRef.externalScopeId,
@@ -119,19 +124,19 @@ export class AutomationJobService {
       lastError: null,
       createdAt: now,
       updatedAt: now,
-    };
+    });
     this.automationJobs.save(job);
     return job;
   }
 
   updateJob(id: string, updates: Partial<AutomationJob>): AutomationJob {
     const current = this.requireById(id);
-    const next: AutomationJob = {
+    const next = sanitizeAutomationJob({
       ...current,
       ...updates,
       schedule: updates.schedule ? cloneSchedule(updates.schedule) : current.schedule,
       updatedAt: this.now(),
-    };
+    });
     this.automationJobs.save(next);
     return next;
   }
@@ -164,7 +169,7 @@ export class AutomationJobService {
 
   resetRunningJobs(): void {
     const now = this.now();
-    for (const job of this.automationJobs.list()) {
+    for (const job of this.readAllJobs()) {
       if (!job.running) {
         continue;
       }
@@ -180,7 +185,7 @@ export class AutomationJobService {
   claimDueJobs(platform: string, limit = 3): AutomationJob[] {
     const now = this.now();
     if (this.staleRunningMs > 0) {
-      for (const job of this.automationJobs.list()) {
+      for (const job of this.readAllJobs()) {
         if (
           job.platform !== platform
           || job.status !== 'active'
@@ -197,8 +202,7 @@ export class AutomationJobService {
         });
       }
     }
-    const due = this.automationJobs
-      .list()
+    const due = this.readAllJobs()
       .filter((job) => (
         job.platform === platform
         && job.status === 'active'
@@ -243,6 +247,10 @@ export class AutomationJobService {
 
   getSession(job: AutomationJob): BridgeSession | null {
     return this.bridgeSessions?.getSessionById?.(job.bridgeSessionId) ?? null;
+  }
+
+  private readAllJobs(): AutomationJob[] {
+    return this.automationJobs.list().map((job) => sanitizeAutomationJob(job));
   }
 }
 
@@ -361,6 +369,35 @@ function cloneSchedule(schedule: AutomationSchedule): AutomationSchedule {
 function normalizeNullableString(value: unknown): string | null {
   const normalized = typeof value === 'string' ? value.trim() : '';
   return normalized || null;
+}
+
+function normalizeNullableNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function sanitizeAutomationJob(job: AutomationJob): AutomationJob {
+  return {
+    id: String(job.id ?? ''),
+    platform: String(job.platform ?? ''),
+    externalScopeId: String(job.externalScopeId ?? ''),
+    title: String(job.title ?? '').trim(),
+    mode: job.mode,
+    providerProfileId: String(job.providerProfileId ?? ''),
+    bridgeSessionId: String(job.bridgeSessionId ?? ''),
+    cwd: normalizeNullableString(job.cwd),
+    prompt: String(job.prompt ?? '').trim(),
+    locale: normalizeNullableString(job.locale),
+    schedule: cloneSchedule(job.schedule),
+    status: job.status,
+    running: Boolean(job.running),
+    nextRunAt: Number(job.nextRunAt ?? 0),
+    lastRunAt: normalizeNullableNumber(job.lastRunAt),
+    lastDeliveredAt: normalizeNullableNumber(job.lastDeliveredAt),
+    lastResultPreview: normalizeNullableString(job.lastResultPreview),
+    lastError: normalizeNullableString(job.lastError),
+    createdAt: Number(job.createdAt ?? 0),
+    updatedAt: Number(job.updatedAt ?? 0),
+  };
 }
 
 export function describeAutomationScope(job: AutomationJob): string {

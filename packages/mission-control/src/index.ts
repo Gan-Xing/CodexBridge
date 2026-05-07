@@ -1,6 +1,6 @@
 export const MISSION_CONTROL_PACKAGE_NAME = '@codexbridge/mission-control' as const;
 
-export const MISSION_CONTROL_PACKAGE_PHASE = 'phase-0-bootstrap' as const;
+export const MISSION_CONTROL_PACKAGE_PHASE = 'phase-6-codexbridge-integration' as const;
 
 export const MISSION_CONTROL_OWNS = [
   'mission-domain-model',
@@ -25,7 +25,6 @@ export const MISSION_CONTROL_DOES_NOT_OWN = [
   'thread-browsing',
   'provider-profile-cli-management',
   'assistant-records',
-  'automations',
   'uploads',
   'artifact-delivery-policy',
 ] as const;
@@ -34,3 +33,18 @@ export type MissionControlOwnedResponsibility = typeof MISSION_CONTROL_OWNS[numb
 
 export type MissionControlExcludedResponsibility =
   typeof MISSION_CONTROL_DOES_NOT_OWN[number];
+
+export * from './types.js';
+export * from './state_machine.js';
+export * from './repository.js';
+export * from './json_file_mission_repository.js';
+export * from './workflow.js';
+export * from './prompt_contract.js';
+export * from './workpad_view.js';
+export * from './workspace.js';
+export * from './lease_coordinator.js';
+export * from './control_actions.js';
+export * from './provider.js';
+export * from './codex_provider.js';
+export * from './verifier.js';
+export * from './runtime.js';

@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import {
+  AUTO_COMMAND_SKILL_ACTIONS,
   resolveOpenAIAgentRuntimeConfig,
   AGENT_COMMAND_SKILL_ACTIONS,
   INSTRUCTIONS_COMMAND_SKILL_ACTIONS,
@@ -7740,7 +7741,9 @@ test('/agent show, retry, rename, stop, and delete manage queued jobs', async ()
       externalScopeId: 'wx-agent-2',
       text: '/agent show 1',
     });
-    assert.match(show.messages.map((message) => message.text).join('\n'), /Agent 详情/);
+    const showText = show.messages.map((message) => message.text).join('\n');
+    assert.match(showText, /Agent 详情/);
+    assert.match(showText, /工作流：/);
 
     const renamed = await runtime.services.bridgeCoordinator.handleInboundEvent({
       platform: 'weixin',
@@ -7769,6 +7772,506 @@ test('/agent show, retry, rename, stop, and delete manage queued jobs', async ()
       text: '/agent del 1',
     });
     assert.match(deleted.messages.map((message) => message.text).join('\n'), /Agent 任务已删除/);
+  } finally {
+    if (originalOpenAiKey === undefined) {
+      delete process.env.OPENAI_API_KEY;
+    } else {
+      process.env.OPENAI_API_KEY = originalOpenAiKey;
+    }
+  }
+});
+
+test('/agent list, show, result, stop, and retry prefer Mission Control runtime state over stale compatibility fields', async () => {
+  const originalOpenAiKey = process.env.OPENAI_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+  try {
+    const { runtime } = makeRuntime({ defaultCwd: '/repo' });
+    await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-mission-state-1',
+      text: '/agent 汇总当前修复进展并给出最终结论',
+    });
+    await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-mission-state-1',
+      text: '/agent confirm',
+    });
+
+    const [job] = runtime.services.agentJobs.listForScope({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-mission-state-1',
+    });
+    assert.ok(job);
+    const session = runtime.services.bridgeSessions.getSessionById(job.bridgeSessionId);
+    const missionUpdatedAt = Date.now();
+    const attemptId = `${job.id}-mission-attempt-1`;
+    const completedState = {
+      mission: {
+        id: job.id,
+        source: 'weixin',
+        sourceRef: job.id,
+        platform: job.platform,
+        externalScopeId: job.externalScopeId,
+        title: job.title,
+        goal: job.goal,
+        expectedOutput: job.expectedOutput,
+        acceptanceCriteria: [job.expectedOutput],
+        plan: [...job.plan],
+        status: 'completed',
+        priority: 'normal',
+        riskLevel: job.riskLevel,
+        cwd: job.cwd,
+        workspacePath: null,
+        workflowPath: null,
+        providerProfileId: job.providerProfileId,
+        bridgeSessionId: job.bridgeSessionId,
+        codexThreadId: session?.codexThreadId ?? null,
+        activeAttemptId: attemptId,
+        attemptCount: 1,
+        maxAttempts: job.maxAttempts,
+        maxTurns: 8,
+        lastRunAt: missionUpdatedAt - 500,
+        completedAt: missionUpdatedAt,
+        archivedAt: null,
+        stoppedAt: null,
+        lastResultPreview: 'Mission Control 已完成结果。',
+        resultText: 'Mission Control 已完成结果。\n\n验证通过，所有验收项已满足。',
+        resultArtifacts: [],
+        lastError: null,
+        statusReason: '修复已通过验证。',
+        pendingApproval: null,
+        lease: null,
+        workpad: {
+          summary: 'Mission Control 最终摘要。',
+          latestPlan: [...job.plan],
+          latestBlocker: null,
+          latestVerifierSummary: '修复已通过验证。',
+          finalResultSummary: 'Mission Control 已完成结果。',
+          notes: [],
+          updatedAt: missionUpdatedAt,
+        },
+        createdAt: job.createdAt,
+        updatedAt: missionUpdatedAt,
+      },
+      attempts: [
+        {
+          id: attemptId,
+          missionId: job.id,
+          index: 1,
+          status: 'completed',
+          providerRunId: 'provider-run-1',
+          providerThreadId: session?.codexThreadId ?? null,
+          promptDigest: 'digest-1',
+          verifierVerdict: 'complete',
+          verifierSummary: '修复已通过验证。',
+          missingAcceptanceCriteria: [],
+          outputPreview: 'Mission Control 已完成结果。',
+          error: null,
+          startedAt: missionUpdatedAt - 500,
+          endedAt: missionUpdatedAt,
+          createdAt: missionUpdatedAt - 600,
+          updatedAt: missionUpdatedAt,
+        },
+      ],
+      events: [],
+    };
+    runtime.services.agentJobs.updateJob(job.id, {
+      status: 'queued',
+      running: false,
+      attemptCount: 0,
+      lastRunAt: null,
+      completedAt: null,
+      lastResultPreview: 'stale preview',
+      resultText: 'stale wrong result',
+      resultArtifacts: null,
+      lastError: 'stale error',
+      verificationSummary: 'stale verification',
+      missionWorkpadLatestBlocker: 'stale blocker',
+      missionWorkpadLatestVerifierSummary: 'stale verifier',
+      missionWorkpadFinalResultSummary: 'stale final summary',
+      missionAttemptHistory: [],
+      missionRuntimeState: completedState,
+    });
+
+    const listed = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-mission-state-1',
+      text: '/agent',
+    });
+    const listedText = listed.messages.map((message) => message.text).join('\n');
+    assert.match(listedText, /状态：已完成/);
+    assert.match(listedText, /Mission Control 已完成结果。/);
+    assert.doesNotMatch(listedText, /stale preview/);
+
+    const showCompleted = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-mission-state-1',
+      text: '/agent show 1',
+    });
+    const showCompletedText = showCompleted.messages.map((message) => message.text).join('\n');
+    assert.match(showCompletedText, /Mission Control 最终摘要。/);
+    assert.match(showCompletedText, /修复已通过验证。/);
+    assert.doesNotMatch(showCompletedText, /stale verification/);
+
+    const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-mission-state-1',
+      text: '/agent result 1',
+    });
+    const resultText = result.messages.map((message) => message.text).join('\n');
+    assert.match(resultText, /Mission Control 已完成结果。/);
+    assert.match(resultText, /所有验收项已满足。/);
+    assert.doesNotMatch(resultText, /stale wrong result/);
+
+    const waitingUserState = structuredClone(completedState);
+    (waitingUserState.mission as Record<string, unknown>).status = 'waiting_user';
+    (waitingUserState.mission as Record<string, unknown>).completedAt = null;
+    (waitingUserState.mission as Record<string, unknown>).statusReason = '等待用户确认。';
+    (waitingUserState.mission as Record<string, unknown>).lastError = '等待用户确认。';
+    (waitingUserState.mission as Record<string, unknown>).workpad = {
+      ...(waitingUserState.mission as any).workpad,
+      latestBlocker: '等待用户确认。',
+      latestVerifierSummary: '等待用户确认。',
+      updatedAt: missionUpdatedAt + 1,
+    };
+    (waitingUserState.mission as Record<string, unknown>).updatedAt = missionUpdatedAt + 1;
+    (waitingUserState.attempts[0] as Record<string, unknown>).status = 'waiting_user';
+    (waitingUserState.attempts[0] as Record<string, unknown>).endedAt = null;
+    (waitingUserState.attempts[0] as Record<string, unknown>).updatedAt = missionUpdatedAt + 1;
+    runtime.services.agentJobs.updateJob(job.id, {
+      status: 'completed',
+      running: false,
+      stopRequested: false,
+      missionRuntimeState: waitingUserState,
+    });
+
+    const stopped = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-mission-state-1',
+      text: '/agent stop 1',
+    });
+    assert.match(stopped.messages.map((message) => message.text).join('\n'), /Agent 任务已请求停止/);
+
+    const showStopped = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-mission-state-1',
+      text: '/agent show 1',
+    });
+    const showStoppedText = showStopped.messages.map((message) => message.text).join('\n');
+    assert.match(showStoppedText, /状态：已停止/);
+
+    const retried = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-mission-state-1',
+      text: '/agent retry 1',
+    });
+    assert.match(retried.messages.map((message) => message.text).join('\n'), /Agent 任务已重新排队/);
+
+    const retriedJob = runtime.services.agentJobs.getById(job.id);
+    assert.equal((retriedJob?.missionRuntimeState?.mission as Record<string, unknown> | null)?.status, 'queued');
+    assert.equal(retriedJob?.missionRuntimeState?.attempts.length ?? -1, 0);
+
+    const showRetried = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-mission-state-1',
+      text: '/agent show 1',
+    });
+    const showRetriedText = showRetried.messages.map((message) => message.text).join('\n');
+    assert.match(showRetriedText, /状态：排队中/);
+    assert.doesNotMatch(showRetriedText, /所有验收项已满足。/);
+  } finally {
+    if (originalOpenAiKey === undefined) {
+      delete process.env.OPENAI_API_KEY;
+    } else {
+      process.env.OPENAI_API_KEY = originalOpenAiKey;
+    }
+  }
+});
+
+test('/agent runAgentJob retries after an interrupted provider turn and completes on the next attempt', async () => {
+  const originalOpenAiKey = process.env.OPENAI_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+  try {
+    const { runtime, openai } = makeRuntime({ defaultCwd: '/repo' });
+    await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-interrupted-1',
+      text: '/agent 检查当前项目测试并修复失败项',
+    });
+    await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-interrupted-1',
+      text: '/agent confirm',
+    });
+    const [job] = runtime.services.agentJobs.listForScope({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-interrupted-1',
+    });
+    let executionAttempts = 0;
+    const originalStartTurn = openai.startTurn.bind(openai);
+    openai.startTurn = async (params: any) => {
+      const inputText = String(params?.inputText ?? '');
+      if (inputText.includes('你正在执行 CodexBridge 后台 Agent 任务。')) {
+        executionAttempts += 1;
+        const turnId = `${params.bridgeSession.codexThreadId}-agent-attempt-${executionAttempts}`;
+        await params.onTurnStarted?.({
+          turnId,
+          threadId: params.bridgeSession.codexThreadId,
+        });
+        if (executionAttempts === 1) {
+          return {
+            outputText: '第一次执行中断。',
+            outputState: 'interrupted',
+            turnId,
+            threadId: params.bridgeSession.codexThreadId,
+            title: params.bridgeSession.title,
+          };
+        }
+        return {
+          outputText: '第二次执行完成，基础检查通过。',
+          outputState: 'complete',
+          turnId,
+          threadId: params.bridgeSession.codexThreadId,
+          title: params.bridgeSession.title,
+        };
+      }
+      return originalStartTurn(params);
+    };
+
+    const response = await runtime.services.bridgeCoordinator.runAgentJob(job);
+    const responseText = response.messages.map((message) => message.text).join('\n');
+    assert.match(responseText, /Agent 任务已完成/);
+    assert.match(responseText, /基础检查通过/);
+    assert.equal(executionAttempts, 2);
+
+    const completed = runtime.services.agentJobs.getById(job.id);
+    assert.equal(completed.status, 'completed');
+    assert.equal(completed.attemptCount, 2);
+
+    const show = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-interrupted-1',
+      text: '/agent show 1',
+    });
+    const showText = show.messages.map((message) => message.text).join('\n');
+    assert.match(showText, /尝试记录：/);
+    assert.match(showText, /#2 completed/);
+  } finally {
+    if (originalOpenAiKey === undefined) {
+      delete process.env.OPENAI_API_KEY;
+    } else {
+      process.env.OPENAI_API_KEY = originalOpenAiKey;
+    }
+  }
+});
+
+test('/agent runAgentJob continues the same attempt after a normal partial provider exit', async () => {
+  const originalOpenAiKey = process.env.OPENAI_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+  try {
+    const { runtime, openai } = makeRuntime({ defaultCwd: '/repo' });
+    await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-continuation-1',
+      text: '/agent 检查当前项目测试并修复失败项',
+    });
+    await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-continuation-1',
+      text: '/agent confirm',
+    });
+    const [job] = runtime.services.agentJobs.listForScope({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-continuation-1',
+    });
+    let executionTurns = 0;
+    const capturedInputs: string[] = [];
+    const originalStartTurn = openai.startTurn.bind(openai);
+    openai.startTurn = async (params: any) => {
+      const inputText = String(params?.inputText ?? '');
+      if (inputText.includes('你正在执行 CodexBridge 后台 Agent 任务。')) {
+        capturedInputs.push(inputText);
+        executionTurns += 1;
+        const turnId = `${params.bridgeSession.codexThreadId}-agent-continuation-${executionTurns}`;
+        await params.onTurnStarted?.({
+          turnId,
+          threadId: params.bridgeSession.codexThreadId,
+        });
+        if (executionTurns === 1) {
+          return {
+            outputText: '已收集日志，但还没有完成最终验证。',
+            previewText: '已收集日志，但还没有完成最终验证。',
+            outputState: 'partial',
+            turnId,
+            threadId: params.bridgeSession.codexThreadId,
+            title: params.bridgeSession.title,
+          };
+        }
+        return {
+          outputText: '继续同一次尝试后完成修复，并附上验证结果。',
+          outputState: 'complete',
+          turnId,
+          threadId: params.bridgeSession.codexThreadId,
+          title: params.bridgeSession.title,
+        };
+      }
+      return originalStartTurn(params);
+    };
+
+    const response = await runtime.services.bridgeCoordinator.runAgentJob(job);
+    const responseText = response.messages.map((message) => message.text).join('\n');
+    assert.match(responseText, /Agent 任务已完成/);
+    assert.match(responseText, /继续同一次尝试后完成修复/);
+    assert.equal(executionTurns, 2);
+    assert.match(capturedInputs[1] ?? '', /Continuation contract/);
+
+    const completed = runtime.services.agentJobs.getById(job.id);
+    assert.equal(completed.status, 'completed');
+    assert.equal(completed.attemptCount, 1);
+    assert.ok(completed.missionRuntimeState);
+    assert.equal(Array.isArray(completed.missionRuntimeState?.attempts), true);
+    assert.equal(completed.missionRuntimeState?.attempts.length, 1);
+    const providerTurnEvents = Array.isArray(completed.missionRuntimeState?.events)
+      ? completed.missionRuntimeState.events.filter((event: any) => event?.kind === 'attempt.started' && event?.metadata?.providerTurn === true)
+      : [];
+    assert.equal(providerTurnEvents.length, 2);
+  } finally {
+    if (originalOpenAiKey === undefined) {
+      delete process.env.OPENAI_API_KEY;
+    } else {
+      process.env.OPENAI_API_KEY = originalOpenAiKey;
+    }
+  }
+});
+
+test('/agent runAgentJob loads WORKFLOW.md and routes it into the mission-controlled execution prompt', async () => {
+  const originalOpenAiKey = process.env.OPENAI_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-workflow-prompt-'));
+  const workflowPath = path.join(cwd, '.codexbridge', 'mission', 'WORKFLOW.md');
+  fs.mkdirSync(path.dirname(workflowPath), { recursive: true });
+  fs.writeFileSync(workflowPath, `---
+version: 1
+maxTurns: 5
+finalReportSections:
+  - summary
+  - verification
+  - handoff
+---
+Always mention the workflow checkpoint before the final answer.
+Stop and hand off when you need human approval.
+`);
+  try {
+    const { runtime, openai } = makeRuntime({ defaultCwd: cwd });
+    await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-workflow-1',
+      text: '/agent 检查当前项目测试并修复失败项',
+    });
+    await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-workflow-1',
+      text: '/agent confirm',
+    });
+    const [job] = runtime.services.agentJobs.listForScope({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-workflow-1',
+    });
+    let capturedInputText = '';
+    const originalStartTurn = openai.startTurn.bind(openai);
+    openai.startTurn = async (params: any) => {
+      const inputText = String(params?.inputText ?? '');
+      if (inputText.includes('你正在执行 CodexBridge 后台 Agent 任务。')) {
+        capturedInputText = inputText;
+        const turnId = `${params.bridgeSession.codexThreadId}-agent-workflow-turn-1`;
+        await params.onTurnStarted?.({
+          turnId,
+          threadId: params.bridgeSession.codexThreadId,
+        });
+        return {
+          outputText: '已按 workflow 执行并完成验证。',
+          outputState: 'complete',
+          turnId,
+          threadId: params.bridgeSession.codexThreadId,
+          title: params.bridgeSession.title,
+        };
+      }
+      return originalStartTurn(params);
+    };
+
+    const response = await runtime.services.bridgeCoordinator.runAgentJob(job);
+    const responseText = response.messages.map((message) => message.text).join('\n');
+    assert.match(responseText, /Agent 任务已完成/);
+    assert.match(capturedInputText, /Workflow source:/);
+    assert.match(capturedInputText, /Always mention the workflow checkpoint before the final answer/);
+    assert.match(capturedInputText, /Final report contract/);
+  } finally {
+    if (originalOpenAiKey === undefined) {
+      delete process.env.OPENAI_API_KEY;
+    } else {
+      process.env.OPENAI_API_KEY = originalOpenAiKey;
+    }
+  }
+});
+
+test('/agent runAgentJob forwards provider approval requests to the supplied approval callback', async () => {
+  const originalOpenAiKey = process.env.OPENAI_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+  try {
+    const { runtime, openai } = makeRuntime({ defaultCwd: '/repo' });
+    await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-approval-1',
+      text: '/agent 检查当前项目测试并修复失败项',
+    });
+    await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-approval-1',
+      text: '/agent confirm',
+    });
+    const [job] = runtime.services.agentJobs.listForScope({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-approval-1',
+    });
+    const approvalRequests: any[] = [];
+    const originalStartTurn = openai.startTurn.bind(openai);
+    openai.startTurn = async (params: any) => {
+      const inputText = String(params?.inputText ?? '');
+      if (inputText.includes('你正在执行 CodexBridge 后台 Agent 任务。')) {
+        const turnId = `${params.bridgeSession.codexThreadId}-agent-approval-turn-1`;
+        await params.onTurnStarted?.({
+          turnId,
+          threadId: params.bridgeSession.codexThreadId,
+        });
+        await params.onApprovalRequest?.({
+          requestId: 'approval-agent-1',
+          command: 'npm test',
+          reason: 'Need to run the requested verification command.',
+          options: [
+            { index: 1, label: 'Approve' },
+            { index: 2, label: 'Deny' },
+          ],
+        });
+        return {
+          outputText: '审批后执行完成，基础检查通过。',
+          outputState: 'complete',
+          turnId,
+          threadId: params.bridgeSession.codexThreadId,
+          title: params.bridgeSession.title,
+        };
+      }
+      return originalStartTurn(params);
+    };
+
+    const response = await runtime.services.bridgeCoordinator.runAgentJob(job, {
+      onApprovalRequest: (request) => {
+        approvalRequests.push(request);
+      },
+    });
+    const responseText = response.messages.map((message) => message.text).join('\n');
+    assert.match(responseText, /Agent 任务已完成/);
+    assert.equal(approvalRequests.length, 1);
+    assert.equal(approvalRequests[0]?.requestId, 'approval-agent-1');
   } finally {
     if (originalOpenAiKey === undefined) {
       delete process.env.OPENAI_API_KEY;
@@ -10101,6 +10604,49 @@ test('/auto rename and /auto del update and remove automation jobs', async () =>
   assert.equal(listed.messages[0]?.text ?? '', '自动化任务 | 0 项');
 });
 
+test('/auto pause and /auto resume update automation job status', async () => {
+  const { runtime } = makeRuntime({
+    defaultCwd: '/tmp/codexbridge-auto-pause-resume',
+  });
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-pause-resume',
+    text: '/auto add daily 09:00 | 每天整理昨天的提交摘要',
+  });
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-pause-resume',
+    text: '/auto confirm',
+  });
+
+  const paused = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-pause-resume',
+    text: '/auto pause 1',
+  });
+  assert.match(paused.messages[0]?.text ?? '', /自动化任务已暂停/);
+
+  let [job] = runtime.services.automationJobs.listForScope({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-pause-resume',
+  });
+  assert.equal(job.status, 'paused');
+
+  const resumed = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-pause-resume',
+    text: '/auto resume 1',
+  });
+  assert.match(resumed.messages[0]?.text ?? '', /自动化任务已恢复/);
+
+  [job] = runtime.services.automationJobs.listForScope({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-pause-resume',
+  });
+  assert.equal(job.status, 'active');
+});
+
 test('/auto natural language proposes deleting a matching job before confirm', async () => {
   const { runtime, openai } = makeRuntime({
     defaultCwd: '/tmp/codexbridge-auto-natural-delete',
@@ -10263,6 +10809,50 @@ test('/auto cancel clears the pending automation draft', async () => {
     text: '/auto confirm',
   });
   assert.match(confirmed.messages[0]?.text ?? '', /当前没有待确认的自动化草案/);
+});
+
+test('/auto scheduled runs stay on the one-shot automation path and do not persist Mission Control state', async () => {
+  const { runtime, openai } = makeRuntime({
+    defaultCwd: '/tmp/codexbridge-auto-mission-run',
+  });
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-mission-run',
+    text: '/auto add every 30m | 检查部署状态并发给我',
+  });
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-mission-run',
+    text: '/auto confirm',
+  });
+
+  const [job] = runtime.services.automationJobs.listForScope({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-auto-mission-run',
+  });
+  assert.ok(job);
+
+  openai.startTurn = async ({ bridgeSession, onTurnStarted }) => {
+    const turnId = `${bridgeSession.codexThreadId}-turn-auto-mission-1`;
+    await onTurnStarted?.({
+      turnId,
+      threadId: bridgeSession.codexThreadId,
+    });
+    return {
+      outputText: '部署状态正常，未发现异常。',
+      turnId,
+      threadId: bridgeSession.codexThreadId,
+      title: bridgeSession.title,
+    };
+  };
+
+  const response = await runtime.services.bridgeCoordinator.runAutomationJob(job);
+  const liveJob = runtime.services.automationJobs.getById(job.id) as any;
+
+  assert.match(response.messages[0]?.text ?? '', /部署状态正常，未发现异常/);
+  assert.equal('missionRuntimeState' in liveJob, false);
+  assert.equal('missionAttemptHistory' in liveJob, false);
 });
 
 test('ordinary messages after /stop do not eagerly resume the thread when startTurn succeeds', async () => {
@@ -10525,6 +11115,28 @@ test('AGENT_COMMAND_SKILL_ACTIONS matches actions declared in docs/command-skill
     missingInDoc,
     [],
     `Actions in AGENT_COMMAND_SKILL_ACTIONS but missing from agent.md: ${missingInDoc.join(', ')}`,
+  );
+});
+
+test('AUTO_COMMAND_SKILL_ACTIONS matches actions declared in docs/command-skills/auto.md', () => {
+  const docPath = path.resolve('docs/command-skills/auto.md');
+  const markdown = fs.readFileSync(docPath, 'utf-8');
+  const inlineActions = extractMarkdownInlineActions(markdown);
+
+  assert.ok(inlineActions.size > 0, 'should extract at least one action from auto.md');
+
+  const missingInCode = [...inlineActions].filter((a) => !AUTO_COMMAND_SKILL_ACTIONS.has(a as any));
+  const missingInDoc = [...AUTO_COMMAND_SKILL_ACTIONS].filter((a) => !inlineActions.has(a));
+
+  assert.deepEqual(
+    missingInCode,
+    [],
+    `Actions declared in auto.md but missing from AUTO_COMMAND_SKILL_ACTIONS: ${missingInCode.join(', ')}`,
+  );
+  assert.deepEqual(
+    missingInDoc,
+    [],
+    `Actions in AUTO_COMMAND_SKILL_ACTIONS but missing from auto.md: ${missingInDoc.join(', ')}`,
   );
 });
 

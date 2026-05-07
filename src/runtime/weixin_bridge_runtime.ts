@@ -68,6 +68,13 @@ interface BridgeCoordinatorLike {
       onApprovalRequest?: ((request: ProviderApprovalRequest) => Promise<void>) | null;
     },
   ): Promise<RuntimeResponse>;
+  runAutomationJob?(
+    job: any,
+    options: {
+      onProgress?: ((progress: ProviderTurnProgress) => Promise<void>) | null;
+      onApprovalRequest?: ((request: ProviderApprovalRequest) => Promise<void>) | null;
+    },
+  ): Promise<RuntimeResponse>;
   cleanupInternalProviderThreads?(params?: { dryRun?: boolean; limit?: number }): Promise<unknown>;
 }
 
@@ -1459,10 +1466,12 @@ export class WeixinBridgeRuntime {
           bridgeSessionId: reboundBridgeSessionId,
         });
       }
-      const preview = buildAutomationResultPreview(response);
+      const liveJob = this.automationJobs?.getById?.(job.id) ?? job;
+      const preview = liveJob?.lastResultPreview ?? buildAutomationResultPreview(response);
+      const error = liveJob?.lastError ?? null;
       this.automationJobs?.completeJob?.(job.id, {
         resultPreview: preview,
-        error: null,
+        error,
         deliveredAt: Date.now(),
       });
       return response;

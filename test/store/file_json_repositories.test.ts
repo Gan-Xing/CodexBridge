@@ -398,10 +398,28 @@ test('file-backed repositories preserve agent jobs across repository reloads', a
     cwd: '/repo',
     locale: 'zh-CN',
   });
+  runtimeA.services.agentJobs.markRunning(job.id, {
+    attempt: 1,
+    workflowPath: '/repo/.codexbridge/mission/WORKFLOW.md',
+    workflowSourceLabel: 'configured workflow (/repo/.codexbridge/mission/WORKFLOW.md)',
+  });
+  runtimeA.services.agentJobs.markVerifying(job.id, 1);
+  runtimeA.services.agentJobs.markRepairing(job.id, '需要补充验证结果');
+  runtimeA.services.agentJobs.completeJob(job.id, {
+    resultPreview: '已恢复并完成 Agent 结果',
+    resultText: '已恢复并完成 Agent 结果，验证通过。',
+    verificationSummary: '验证通过',
+  });
 
   const repositoriesB = createFileJsonRepositories(stateDir);
   const restored = repositoriesB.agentJobs.getById(job.id);
   assert.equal(restored?.title, '测试 Agent');
   assert.equal(restored?.goal, '测试持久化');
   assert.equal(restored?.bridgeSessionId, session.id);
+  assert.equal(restored?.missionWorkflowPath, '/repo/.codexbridge/mission/WORKFLOW.md');
+  assert.equal(restored?.missionWorkflowSourceLabel, 'configured workflow (/repo/.codexbridge/mission/WORKFLOW.md)');
+  assert.equal(restored?.missionWorkpadLatestVerifierSummary, '验证通过');
+  assert.equal(restored?.missionWorkpadFinalResultSummary, '已恢复并完成 Agent 结果');
+  assert.equal(restored?.missionAttemptHistory.length, 4);
+  assert.equal(restored?.missionAttemptHistory.at(-1)?.status, 'completed');
 });

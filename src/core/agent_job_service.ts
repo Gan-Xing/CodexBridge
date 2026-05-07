@@ -1,8 +1,18 @@
 import crypto from 'node:crypto';
+import { shouldMissionRetryReuseAccumulatedContext } from '../../packages/mission-control/src/index.js';
 import { NotFoundError } from './errors.js';
+import {
+  createMissionControlledAgentJobView,
+  createResumedMissionRuntimeStateForAgentJob,
+  createRetriedMissionRuntimeStateForAgentJob,
+  createStoppedMissionRuntimeStateForAgentJob,
+  loadAgentJobMissionRuntimeState,
+  serializeAgentJobMissionRuntimeState,
+} from './mission_control_agent_job_adapter.js';
 import { createI18n, type Translator } from '../i18n/index.js';
 import type {
   AgentJob,
+  AgentJobAttemptHistoryEntry,
   AgentJobCategory,
   AgentJobMode,
   AgentJobRiskLevel,
@@ -49,6 +59,12 @@ export class AgentJobService {
     return this.agentJobs
       .list()
       .filter((job) => job.platform === scopeRef.platform && job.externalScopeId === scopeRef.externalScopeId)
+      .sort((left, right) => left.createdAt - right.createdAt);
+  }
+
+  listAllJobs(): AgentJob[] {
+    return this.agentJobs
+      .list()
       .sort((left, right) => left.createdAt - right.createdAt);
   }
 
@@ -125,6 +141,13 @@ export class AgentJobService {
       resultArtifacts: null,
       lastError: null,
       verificationSummary: null,
+      missionWorkflowPath: null,
+      missionWorkflowSourceLabel: null,
+      missionWorkpadLatestBlocker: null,
+      missionWorkpadLatestVerifierSummary: null,
+      missionWorkpadFinalResultSummary: null,
+      missionAttemptHistory: [],
+      missionRuntimeState: null,
       createdAt: now,
       updatedAt: now,
     };
@@ -138,6 +161,9 @@ export class AgentJobService {
       ...current,
       ...updates,
       plan: updates.plan ? normalizePlan(updates.plan) : current.plan,
+      missionAttemptHistory: hasOwn(updates, 'missionAttemptHistory')
+        ? normalizeAttemptHistory(updates.missionAttemptHistory ?? [])
+        : current.missionAttemptHistory,
       updatedAt: this.now(),
     };
     this.agentJobs.save(next);
@@ -152,25 +178,73 @@ export class AgentJobService {
 
   requestStop(id: string): AgentJob {
     const current = this.requireById(id);
+    const effectiveJob = createMissionControlledAgentJobView(current);
+    const stoppedState = createStoppedMissionRuntimeStateForAgentJob(current, {
+      reason: 'Agent job stop requested.',
+      now: this.now(),
+    });
     return this.updateJob(id, {
       stopRequested: true,
       running: false,
-      status: current.status === 'completed' || current.status === 'failed' ? current.status : 'stopped',
+      status: effectiveJob.status === 'completed' || effectiveJob.status === 'failed'
+        ? effectiveJob.status
+        : 'stopped',
+      missionRuntimeState: stoppedState ? serializeAgentJobMissionRuntimeState(stoppedState) : current.missionRuntimeState,
     });
   }
 
   retryJob(id: string): AgentJob {
     const current = this.requireById(id);
+    const effectiveJob = createMissionControlledAgentJobView(current);
+    const runtimeState = loadAgentJobMissionRuntimeState(current);
+    if (runtimeState.mission && shouldMissionRetryReuseAccumulatedContext(runtimeState.mission)) {
+      const mission = runtimeState.mission;
+      const resumedState = createResumedMissionRuntimeStateForAgentJob(current, {
+        reason: 'Agent mission queued to continue after human input.',
+        now: this.now(),
+      });
+      if (resumedState) {
+        return this.updateJob(id, {
+          status: 'queued',
+          running: false,
+          stopRequested: false,
+          attemptCount: mission.attemptCount,
+          lastRunAt: mission.lastRunAt,
+          completedAt: null,
+          lastResultPreview: mission.lastResultPreview,
+          resultText: mission.resultText,
+          resultArtifacts: effectiveJob.resultArtifacts ?? null,
+          lastError: null,
+          verificationSummary: null,
+          missionWorkpadLatestBlocker: null,
+          missionWorkpadLatestVerifierSummary: null,
+          missionWorkpadFinalResultSummary: mission.workpad.finalResultSummary,
+          missionAttemptHistory: effectiveJob.missionAttemptHistory,
+          missionRuntimeState: serializeAgentJobMissionRuntimeState(resumedState),
+        });
+      }
+    }
+    const resetState = createRetriedMissionRuntimeStateForAgentJob(current, {
+      now: this.now(),
+      codexThreadId: this.getSession(current)?.codexThreadId ?? null,
+    });
     return this.updateJob(id, {
       status: 'queued',
       running: false,
       stopRequested: false,
       attemptCount: 0,
+      lastRunAt: null,
       completedAt: null,
+      lastResultPreview: null,
       lastError: null,
       resultText: null,
       resultArtifacts: null,
       verificationSummary: null,
+      missionWorkpadLatestBlocker: null,
+      missionWorkpadLatestVerifierSummary: null,
+      missionWorkpadFinalResultSummary: null,
+      missionAttemptHistory: [],
+      missionRuntimeState: serializeAgentJobMissionRuntimeState(resetState),
     });
   }
 
@@ -211,27 +285,63 @@ export class AgentJobService {
     return jobs.map((job) => this.requireById(job.id));
   }
 
-  markRunning(id: string): AgentJob {
+  markRunning(id: string, params: {
+    attempt: number;
+    workflowPath?: string | null;
+    workflowSourceLabel?: string | null;
+  }): AgentJob {
+    const current = this.requireById(id);
     return this.updateJob(id, {
       status: 'running',
       running: true,
+      attemptCount: params.attempt,
       lastRunAt: this.now(),
+      missionWorkflowPath: params.workflowPath ?? current.missionWorkflowPath,
+      missionWorkflowSourceLabel: params.workflowSourceLabel ?? current.missionWorkflowSourceLabel,
+      missionAttemptHistory: appendAttemptHistoryEntry(current.missionAttemptHistory, {
+        attempt: params.attempt,
+        status: 'running',
+        verifierSummary: null,
+        outputPreview: null,
+        error: null,
+        recordedAt: this.now(),
+      }),
     });
   }
 
   markVerifying(id: string, attemptCount: number): AgentJob {
+    const current = this.requireById(id);
     return this.updateJob(id, {
       status: 'verifying',
       running: true,
       attemptCount,
+      missionAttemptHistory: appendAttemptHistoryEntry(current.missionAttemptHistory, {
+        attempt: attemptCount,
+        status: 'verifying',
+        verifierSummary: null,
+        outputPreview: null,
+        error: null,
+        recordedAt: this.now(),
+      }),
     });
   }
 
   markRepairing(id: string, verificationSummary: string | null): AgentJob {
+    const current = this.requireById(id);
     return this.updateJob(id, {
       status: 'repairing',
       running: true,
       verificationSummary: normalizeNullableString(verificationSummary),
+      missionWorkpadLatestBlocker: normalizeNullableString(verificationSummary),
+      missionWorkpadLatestVerifierSummary: normalizeNullableString(verificationSummary),
+      missionAttemptHistory: appendAttemptHistoryEntry(current.missionAttemptHistory, {
+        attempt: Math.max(1, current.attemptCount),
+        status: 'repairing',
+        verifierSummary: normalizeNullableString(verificationSummary),
+        outputPreview: current.lastResultPreview,
+        error: normalizeNullableString(verificationSummary),
+        recordedAt: this.now(),
+      }),
     });
   }
 
@@ -241,16 +351,30 @@ export class AgentJobService {
     resultArtifacts?: TurnArtifactDeliveredItem[] | null;
     verificationSummary?: string | null;
   } = {}): AgentJob {
+    const current = this.requireById(id);
+    const normalizedResultPreview = normalizeNullableString(params.resultPreview);
+    const normalizedVerificationSummary = normalizeNullableString(params.verificationSummary);
     return this.updateJob(id, {
       status: 'completed',
       running: false,
       stopRequested: false,
       completedAt: this.now(),
-      lastResultPreview: normalizeNullableString(params.resultPreview),
+      lastResultPreview: normalizedResultPreview,
       resultText: normalizeNullableString(params.resultText),
       resultArtifacts: normalizeResultArtifacts(params.resultArtifacts ?? null),
       lastError: null,
-      verificationSummary: normalizeNullableString(params.verificationSummary),
+      verificationSummary: normalizedVerificationSummary,
+      missionWorkpadLatestBlocker: null,
+      missionWorkpadLatestVerifierSummary: normalizedVerificationSummary,
+      missionWorkpadFinalResultSummary: normalizedResultPreview,
+      missionAttemptHistory: appendAttemptHistoryEntry(current.missionAttemptHistory, {
+        attempt: Math.max(1, current.attemptCount),
+        status: 'completed',
+        verifierSummary: normalizedVerificationSummary,
+        outputPreview: normalizedResultPreview,
+        error: null,
+        recordedAt: this.now(),
+      }),
     });
   }
 
@@ -259,15 +383,29 @@ export class AgentJobService {
     resultPreview?: string | null;
     verificationSummary?: string | null;
   }): AgentJob {
+    const current = this.requireById(id);
+    const normalizedError = normalizeNullableString(params.error);
+    const normalizedResultPreview = normalizeNullableString(params.resultPreview);
+    const normalizedVerificationSummary = normalizeNullableString(params.verificationSummary);
     return this.updateJob(id, {
       status: 'failed',
       running: false,
       completedAt: this.now(),
-      lastResultPreview: normalizeNullableString(params.resultPreview),
-      resultText: normalizeNullableString(params.resultPreview),
+      lastResultPreview: normalizedResultPreview,
+      resultText: normalizedResultPreview,
       resultArtifacts: null,
-      lastError: normalizeNullableString(params.error),
-      verificationSummary: normalizeNullableString(params.verificationSummary),
+      lastError: normalizedError,
+      verificationSummary: normalizedVerificationSummary,
+      missionWorkpadLatestBlocker: normalizedVerificationSummary ?? normalizedError,
+      missionWorkpadLatestVerifierSummary: normalizedVerificationSummary,
+      missionAttemptHistory: appendAttemptHistoryEntry(current.missionAttemptHistory, {
+        attempt: Math.max(1, current.attemptCount),
+        status: 'failed',
+        verifierSummary: normalizedVerificationSummary,
+        outputPreview: normalizedResultPreview,
+        error: normalizedError,
+        recordedAt: this.now(),
+      }),
     });
   }
 
@@ -347,6 +485,60 @@ function normalizeTitle(value: string, fallback: string): string {
 function normalizeNullableString(value: unknown): string | null {
   const normalized = String(value ?? '').trim();
   return normalized || null;
+}
+
+function normalizeAttemptHistory(value: AgentJobAttemptHistoryEntry[]): AgentJobAttemptHistoryEntry[] {
+  const items = Array.isArray(value) ? value : [];
+  return items
+    .map((entry) => ({
+      attempt: Number.isInteger(entry?.attempt) && Number(entry.attempt) > 0 ? Number(entry.attempt) : 1,
+      status: normalizeAgentJobStatus(entry?.status),
+      verifierSummary: normalizeNullableString(entry?.verifierSummary),
+      outputPreview: normalizeNullableString(entry?.outputPreview),
+      error: normalizeNullableString(entry?.error),
+      recordedAt: normalizeRecordedAt(entry?.recordedAt),
+    }))
+    .slice(-16);
+}
+
+function appendAttemptHistoryEntry(
+  history: AgentJobAttemptHistoryEntry[],
+  entry: AgentJobAttemptHistoryEntry,
+): AgentJobAttemptHistoryEntry[] {
+  return normalizeAttemptHistory([
+    ...(Array.isArray(history) ? history : []),
+    entry,
+  ]);
+}
+
+function normalizeAgentJobStatus(value: unknown): AgentJobStatus {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (
+    normalized === 'queued'
+    || normalized === 'planning'
+    || normalized === 'running'
+    || normalized === 'verifying'
+    || normalized === 'repairing'
+    || normalized === 'waiting_user'
+    || normalized === 'needs_human'
+    || normalized === 'handoff'
+    || normalized === 'blocked'
+    || normalized === 'completed'
+    || normalized === 'failed'
+    || normalized === 'stopped'
+  ) {
+    return normalized;
+  }
+  return 'queued';
+}
+
+function normalizeRecordedAt(value: unknown): number {
+  const normalized = Number(value ?? NaN);
+  return Number.isFinite(normalized) && normalized > 0 ? normalized : Date.now();
+}
+
+function hasOwn<T extends object, K extends PropertyKey>(value: T, key: K): value is T & Record<K, unknown> {
+  return Object.prototype.hasOwnProperty.call(value, key);
 }
 
 function normalizeCategory(value: unknown): AgentJobCategory {

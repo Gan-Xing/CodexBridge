@@ -118,9 +118,9 @@ Detailed checklist:
 
 ### P2: Mission Control summary
 
-- [ ] Preserve Symphony's real core ideas: workflow-owned policy, single orchestrator authority, stable workspace identity, continuation retries after normal exit, and handoff/wait-user states
-- [ ] Add workflow loading, workpad persistence, workspace isolation, and bounded run/verify/repair loop
-- [ ] Keep WeChat as the control and notification entrypoint while Mission Control owns orchestration
+- [x] Preserve Symphony's real core ideas: workflow-owned policy, single orchestrator authority, stable workspace identity, continuation retries after normal exit, and handoff/wait-user states
+- [x] Add workflow loading, workpad persistence, workspace isolation, and bounded run/verify/repair loop
+- [x] Keep WeChat as the control and notification entrypoint while Mission Control owns orchestration
 
 Detailed checklist:
 

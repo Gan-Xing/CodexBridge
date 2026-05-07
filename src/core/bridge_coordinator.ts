@@ -11,6 +11,12 @@ import {
   normalizeAssistantRecordForStorage,
   type AssistantRecordDraft,
 } from './assistant_record_service.js';
+import {
+  createMissionControlledAgentJobView,
+  createAgentJobStatusView,
+  loadMissionWorkflowForAgentJob,
+} from './mission_control_agent_job_adapter.js';
+import { runAgentJobWithMissionControl } from './mission_control_agent_job_runner.js';
 import { computeNextRunAt as computeAutomationNextRunAt } from './automation_job_service.js';
 import {
   createPendingTurnArtifactDeliveryState,
@@ -40,6 +46,7 @@ import type {
   AssistantRecordPriority,
   AssistantRecordStatus,
   AssistantRecordType,
+  AutomationJob,
   AutomationMode,
   AutomationSchedule,
   BridgeSession,
@@ -107,6 +114,21 @@ export const AGENT_COMMAND_SKILL_ACTIONS = new Set([
   'propose_retry_job',
   'propose_delete_job',
   'propose_rename_job',
+  'clarify',
+  'reject',
+  'local_only',
+] as const);
+
+export const AUTO_COMMAND_SKILL_ACTIONS = new Set([
+  'create_draft',
+  'update_pending_draft',
+  'propose_update_job',
+  'propose_delete_job',
+  'propose_pause_job',
+  'propose_resume_job',
+  'propose_rename_job',
+  'query_jobs',
+  'show_job',
   'clarify',
   'reject',
   'local_only',
@@ -5993,7 +6015,7 @@ export class BridgeCoordinator {
 
   handleAgentListCommand(event) {
     const scopeRef = toScopeRef(event);
-    const jobs = this.agentJobs.listForScope(scopeRef);
+    const jobs = this.agentJobs.listForScope(scopeRef).map((job) => createMissionControlledAgentJobView(job));
     if (jobs.length === 0) {
       return messageResponse([
         this.t('coordinator.agent.listTitle', { count: 0 }),
@@ -6038,7 +6060,10 @@ export class BridgeCoordinator {
         this.t('coordinator.agent.notFound', { value: token || '?' }),
       ], this.buildScopedSessionMeta(event));
     }
-    const job = resolved.job;
+    const job = createMissionControlledAgentJobView(resolved.job);
+    const workflowLoadResult = loadMissionWorkflowForAgentJob(job);
+    const workflow = workflowLoadResult.workflow;
+    const missionStatusView = createAgentJobStatusView(job, workflow);
     const lines = [
       this.t('coordinator.agent.detailTitle', { title: job.title }),
       this.t('coordinator.agent.status', { value: formatAgentStatusLabel(job.status, job.running, this.currentI18n) }),
@@ -6047,12 +6072,23 @@ export class BridgeCoordinator {
       this.t('coordinator.agent.risk', { value: formatAgentRisk(job.riskLevel, this.currentI18n) }),
       this.t('coordinator.agent.providerProfile', { value: job.providerProfileId }),
       this.t('coordinator.agent.workingDirectory', { value: job.cwd ?? this.t('common.notSet') }),
+      this.t('coordinator.agent.workflow', {
+        value: workflow
+          ? workflow.source.label
+          : workflowLoadResult.error?.message ?? job.missionWorkflowSourceLabel ?? this.t('common.notSet'),
+      }),
       this.t('coordinator.agent.goal', { value: job.goal }),
       this.t('coordinator.agent.expectedOutput', { value: job.expectedOutput }),
       this.t('coordinator.agent.planTitle'),
       ...job.plan.map((line, index) => `${index + 1}. ${line}`),
       this.t('coordinator.agent.attempts', { value: `${job.attemptCount}/${job.maxAttempts}` }),
     ];
+    if (missionStatusView.summary) {
+      lines.push(this.t('coordinator.agent.workpadSummary', { value: missionStatusView.summary }));
+    }
+    if (missionStatusView.latestBlocker) {
+      lines.push(this.t('coordinator.agent.workpadBlocker', { value: missionStatusView.latestBlocker }));
+    }
     if (job.verificationSummary) {
       lines.push(this.t('coordinator.agent.verification', { value: job.verificationSummary }));
     }
@@ -6068,6 +6104,10 @@ export class BridgeCoordinator {
     if (job.lastError) {
       lines.push(this.t('coordinator.agent.lastError', { value: job.lastError }));
     }
+    if (job.missionAttemptHistory.length > 0) {
+      lines.push(this.t('coordinator.agent.attemptHistoryTitle'));
+      lines.push(...missionStatusView.attemptHistory.map((line) => `- ${line}`));
+    }
     lines.push(this.t('coordinator.agent.detailActions', { index: resolved.index }));
     return messageResponse(lines, this.buildScopedSessionMeta(event));
   }
@@ -6079,21 +6119,23 @@ export class BridgeCoordinator {
         this.t('coordinator.agent.notFound', { value: token || '?' }),
       ], this.buildScopedSessionMeta(event));
     }
-    const resultText = await this.resolveAgentJobResultText(resolved.job);
+    const rawJob = resolved.job;
+    const job = createMissionControlledAgentJobView(rawJob);
+    const resultText = await this.resolveAgentJobResultText(job);
     if (!resultText) {
       return messageResponse([
         this.t('coordinator.agent.noResultText'),
-        this.t('coordinator.agent.title', { value: resolved.job.title }),
+        this.t('coordinator.agent.title', { value: job.title }),
       ], this.buildScopedSessionMeta(event));
     }
-    const isPreviewOnly = isAgentResultPreviewOnly(resolved.job, resultText);
-    if (!resolved.job.resultText || isAgentResultPreviewOnly(resolved.job, resolved.job.resultText)) {
-      this.agentJobs.updateJob(resolved.job.id, {
+    const isPreviewOnly = isAgentResultPreviewOnly(job, resultText);
+    if (!rawJob.resultText || isAgentResultPreviewOnly(rawJob, rawJob.resultText)) {
+      this.agentJobs.updateJob(rawJob.id, {
         resultText,
       });
     }
     const normalizedAction = String(pageOrAction ?? '').trim().toLowerCase();
-    const commandToken = resolved.index ?? resolved.job.id;
+    const commandToken = resolved.index ?? job.id;
     if (['file', 'md', 'markdown', 'export'].includes(normalizedAction)) {
       if (isPreviewOnly) {
         return messageResponse([
@@ -6101,10 +6143,10 @@ export class BridgeCoordinator {
           this.t('coordinator.agent.resultRetryHint', { index: commandToken }),
         ], this.buildScopedSessionMeta(event));
       }
-      const artifact = this.createAgentResultTextArtifact(resolved.job, resultText);
-      const existingArtifacts = normalizeAgentArtifacts(resolved.job.resultArtifacts ?? null);
+      const artifact = this.createAgentResultTextArtifact(job, resultText);
+      const existingArtifacts = normalizeAgentArtifacts(job.resultArtifacts ?? null);
       if (!existingArtifacts.some((item) => item.path === artifact.path)) {
-        this.agentJobs.updateJob(resolved.job.id, {
+        this.agentJobs.updateJob(job.id, {
           resultText,
           resultArtifacts: [
             ...existingArtifacts,
@@ -6114,7 +6156,7 @@ export class BridgeCoordinator {
       }
       const response = messageResponse([
         this.t('coordinator.agent.resultFileReady'),
-        this.t('coordinator.agent.title', { value: resolved.job.title }),
+        this.t('coordinator.agent.title', { value: job.title }),
       ], this.buildScopedSessionMeta(event));
       response.messages.push({
         artifact,
@@ -6130,7 +6172,7 @@ export class BridgeCoordinator {
       : 1;
     const pageText = pages[page - 1] ?? '';
     const lines = [
-      this.t('coordinator.agent.resultTitle', { title: resolved.job.title }),
+      this.t('coordinator.agent.resultTitle', { title: job.title }),
       this.t('coordinator.agent.resultPage', { page, pages: pages.length }),
       '',
       pageText,
@@ -6149,16 +6191,17 @@ export class BridgeCoordinator {
         this.t('coordinator.agent.notFound', { value: token || '?' }),
       ], this.buildScopedSessionMeta(event));
     }
-    const artifacts = this.resolveAgentJobArtifacts(resolved.job);
+    const job = createMissionControlledAgentJobView(resolved.job);
+    const artifacts = this.resolveAgentJobArtifacts(job);
     if (artifacts.length === 0) {
       return messageResponse([
         this.t('coordinator.agent.noAttachments'),
-        this.t('coordinator.agent.title', { value: resolved.job.title }),
+        this.t('coordinator.agent.title', { value: job.title }),
       ], this.buildScopedSessionMeta(event));
     }
     const response = messageResponse([
       this.t('coordinator.agent.resendingAttachments'),
-      this.t('coordinator.agent.title', { value: resolved.job.title }),
+      this.t('coordinator.agent.title', { value: job.title }),
       this.t('coordinator.agent.attachments', { value: formatAgentArtifactSummary(artifacts, this.currentI18n) }),
     ], this.buildScopedSessionMeta(event));
     response.messages.push(...artifacts.map((artifact) => ({
@@ -6801,23 +6844,25 @@ export class BridgeCoordinator {
   }
 
   resolveAgentJobArtifacts(job: AgentJob): TurnArtifactDeliveredItem[] {
-    const direct = normalizeAgentArtifacts(job.resultArtifacts ?? null);
+    const effectiveJob = createMissionControlledAgentJobView(job);
+    const direct = normalizeAgentArtifacts(effectiveJob.resultArtifacts ?? null);
     if (direct.length > 0) {
       return direct;
     }
-    const session = this.agentJobs?.getSession?.(job) ?? this.bridgeSessions.getSessionById(job.bridgeSessionId);
+    const session = this.agentJobs?.getSession?.(effectiveJob) ?? this.bridgeSessions.getSessionById(effectiveJob.bridgeSessionId);
     const settings = session ? this.bridgeSessions.getSessionSettings(session.id) : null;
     return normalizeAgentArtifacts(resolveStoredArtifactDelivery(settings)?.deliveredArtifacts ?? null);
   }
 
   async resolveAgentJobResultText(job: AgentJob): Promise<string> {
-    const stored = stripAgentArtifactProtocol(job.resultText ?? '').trim();
-    if (stored && !isAgentResultPreviewOnly(job, stored)) {
+    const effectiveJob = createMissionControlledAgentJobView(job);
+    const stored = stripAgentArtifactProtocol(effectiveJob.resultText ?? '').trim();
+    if (stored && !isAgentResultPreviewOnly(effectiveJob, stored)) {
       return stored;
     }
-    const session = this.agentJobs?.getSession?.(job) ?? this.bridgeSessions.getSessionById(job.bridgeSessionId);
+    const session = this.agentJobs?.getSession?.(effectiveJob) ?? this.bridgeSessions.getSessionById(effectiveJob.bridgeSessionId);
     if (!session) {
-      return stored || String(job.lastResultPreview ?? '').trim();
+      return stored || String(effectiveJob.lastResultPreview ?? '').trim();
     }
     try {
       const thread = await this.bridgeSessions.readProviderThread(
@@ -6826,17 +6871,17 @@ export class BridgeCoordinator {
         { includeTurns: true },
       );
       const recovered = stripAgentArtifactProtocol(extractLastAssistantThreadText(thread));
-      if (recovered && !isAgentResultPreviewOnly(job, recovered)) {
+      if (recovered && !isAgentResultPreviewOnly(effectiveJob, recovered)) {
         return recovered;
       }
     } catch {
       // Keep the command usable even if the provider thread cannot be reopened.
     }
     const rolloutRecovered = stripAgentArtifactProtocol(readCodexRolloutLastAgentMessage(session.codexThreadId));
-    if (rolloutRecovered && !isAgentResultPreviewOnly(job, rolloutRecovered)) {
+    if (rolloutRecovered && !isAgentResultPreviewOnly(effectiveJob, rolloutRecovered)) {
       return rolloutRecovered;
     }
-    return stored || String(job.lastResultPreview ?? '').trim();
+    return stored || String(effectiveJob.lastResultPreview ?? '').trim();
   }
 
   createAgentResultTextArtifact(job: AgentJob, resultText: string): TurnArtifactDeliveredItem {
@@ -10444,167 +10489,133 @@ export class BridgeCoordinator {
         externalScopeId: current.externalScopeId,
       }));
     }
-
-    let lastResult = null;
-    let lastSession = session;
-    let lastVerification: AgentVerificationResult | null = null;
-    for (let attempt = Math.max(1, current.attemptCount + 1); attempt <= current.maxAttempts; attempt += 1) {
-      const live = this.agentJobs.getById(current.id) ?? current;
-      if (live.stopRequested || live.status === 'stopped') {
-        this.agentJobs.requestStop(current.id);
-        return messageResponse([
-          this.t('coordinator.agent.stopped'),
-          this.t('coordinator.agent.title', { value: live.title }),
-        ], buildSessionMeta(lastSession));
-      }
-      this.agentJobs.markRunning(current.id);
-      await emitProgressUpdate(
-        options.onProgress ?? null,
-        this.t('coordinator.agent.progressRunning', {
-          title: current.title,
-          attempt,
-          max: current.maxAttempts,
-        }),
-        'commentary',
-      );
-      const agentEvent = {
-        platform: current.platform,
-        externalScopeId: current.externalScopeId,
-        text: buildAgentExecutionPrompt(current, {
-          attempt,
-          previousVerification: lastVerification,
-          previousResultPreview: lastResult?.result ? summarizeAgentResult(lastResult.result) : null,
-          locale: current.locale ?? this.currentI18n.locale,
-        }),
-        cwd: current.cwd,
-        locale: current.locale,
-        attachments: [],
-        metadata: {
-          codexbridge: {
-            overrideBridgeSessionId: current.bridgeSessionId,
-            agentJobId: current.id,
-            agentAttempt: attempt,
-          },
+    let missionRun;
+    try {
+      missionRun = await runAgentJobWithMissionControl({
+        job: current,
+        agentJobs: this.agentJobs,
+        resolveSession: (liveJob) => this.agentJobs.getSession(liveJob),
+        startTurnWithRecovery: (nextScopeRef, nextSession, event, turnOptions) => {
+          this.activeTurns?.beginScopeTurn(nextScopeRef, {
+            bridgeSessionId: nextSession.id,
+            providerProfileId: nextSession.providerProfileId,
+            threadId: nextSession.codexThreadId,
+          });
+          return this.startTurnWithRecovery(nextScopeRef, nextSession, event, turnOptions)
+            .finally(() => this.releaseActiveTurnIfStillRunning(nextScopeRef));
         },
-      };
-      this.activeTurns?.beginScopeTurn(scopeRef, {
-        bridgeSessionId: lastSession.id,
-        providerProfileId: lastSession.providerProfileId,
-        threadId: lastSession.codexThreadId,
-      });
-      try {
-        const turnResult = await this.startTurnWithRecovery(scopeRef, lastSession, agentEvent, options);
-        lastResult = turnResult;
-        lastSession = turnResult.session;
-      } catch (error) {
-        await this.releaseActiveTurnIfStillRunning(scopeRef);
-        const message = formatUserError(error);
-        this.agentJobs.failJob(current.id, {
-          error: message,
-        });
-        return messageResponse([
-          this.t('coordinator.agent.failed'),
-          this.t('coordinator.agent.lastError', { value: message }),
-        ], buildSessionMeta(lastSession));
-      } finally {
-        await this.releaseActiveTurnIfStillRunning(scopeRef);
-      }
-
-      this.agentJobs.markVerifying(current.id, attempt);
-      await emitProgressUpdate(
-        options.onProgress ?? null,
-        this.t('coordinator.agent.progressVerifying', {
-          title: current.title,
-        }),
-        'commentary',
-      );
-      lastVerification = await this.verifyAgentJob(current, lastResult.result, lastSession).catch((error) => ({
-        pass: false,
-        summary: this.t('coordinator.agent.verifyFailed', { error: formatUserError(error) }),
-        issues: [formatUserError(error)],
-        nextAction: 'retry' as const,
-      }));
-      const resultPreview = summarizeAgentResult(lastResult.result);
-      if (lastVerification.pass || lastVerification.nextAction === 'complete') {
-        const resultArtifacts = normalizeAgentArtifactsForStorage(normalizeArtifactsForResponse(lastResult.result));
-        const response = turnResponse(lastResult.result, this.currentI18n, buildSessionMeta(lastSession));
-        const resultText = extractCoordinatorResponseText(response) || resultPreview;
-        this.agentJobs.completeJob(current.id, {
-          resultPreview,
-          resultText,
-          resultArtifacts,
-          verificationSummary: lastVerification.summary,
-        });
-        const artifactMessages = response.messages.filter((message) => message.artifact || message.mediaPath);
-        const completionLines = [
-          this.t('coordinator.agent.completed'),
-          this.t('coordinator.agent.title', { value: current.title }),
-          this.t('coordinator.agent.verification', { value: truncateText(lastVerification.summary, 180) }),
-        ];
-        if (resultArtifacts.length > 0) {
-          completionLines.push(this.t('coordinator.agent.attachmentSending', { count: resultArtifacts.length }));
-        } else {
-          if (resultText) {
-            completionLines.push('');
-            completionLines.push(resultText);
-          }
-        }
-        response.messages = [
-          {
-            text: completionLines.filter((line) => line !== '').join('\n'),
-          },
-          ...artifactMessages,
-        ];
-        response.meta = {
-          ...(response.meta ?? {}),
-          codexTurn: {
-            outputState: lastResult.result.outputState ?? 'complete',
-            previewText: lastResult.result.previewText ?? '',
-            finalSource: lastResult.result.finalSource ?? 'agent_job',
-            errorMessage: lastResult.result.errorMessage ?? '',
-          },
-        };
-        return response;
-      }
-      if (attempt < current.maxAttempts && lastVerification.nextAction === 'retry') {
-        this.agentJobs.markRepairing(current.id, lastVerification.summary);
-        await emitProgressUpdate(
-          options.onProgress ?? null,
-          this.t('coordinator.agent.progressRetrying', {
+        stopSession: async (nextScopeRef, nextSession) => {
+          await this.stopThreadForSession(nextScopeRef, nextSession, { waitForSettleMs: 0 });
+        },
+        verifyJob: async (liveJob, result, liveSession) => this.verifyAgentJob(liveJob, result, liveSession),
+        progressText: {
+          running: (attempt, maxAttempts) => this.t('coordinator.agent.progressRunning', {
+            title: current.title,
+            attempt,
+            max: maxAttempts,
+          }),
+          verifying: () => this.t('coordinator.agent.progressVerifying', {
             title: current.title,
           }),
-          'commentary',
-        );
-        continue;
-      }
+          retrying: () => this.t('coordinator.agent.progressRetrying', {
+            title: current.title,
+          }),
+        },
+        now: this.now,
+        onProgress: options.onProgress ?? null,
+        onApprovalRequest: options.onApprovalRequest ?? null,
+      });
+    } catch (error) {
+      const message = formatUserError(error);
       this.agentJobs.failJob(current.id, {
-        error: lastVerification.summary,
-        resultPreview,
-        verificationSummary: lastVerification.summary,
+        error: message,
       });
       return messageResponse([
         this.t('coordinator.agent.failed'),
-        this.t('coordinator.agent.title', { value: current.title }),
-        this.t('coordinator.agent.verification', { value: lastVerification.summary }),
-        ...(lastVerification.issues.length > 0
-          ? [
-            this.t('coordinator.agent.issuesTitle'),
-            ...lastVerification.issues.map((issue) => `- ${issue}`),
-          ]
-          : []),
-        this.t('coordinator.agent.retryHint'),
-      ], buildSessionMeta(lastSession));
+        this.t('coordinator.agent.lastError', { value: message }),
+      ], buildSessionMeta(session));
     }
-    const fallbackSummary = this.t('coordinator.agent.maxAttemptsReached');
-    this.agentJobs.failJob(current.id, {
-      error: fallbackSummary,
-      resultPreview: lastResult?.result ? summarizeAgentResult(lastResult.result) : null,
-      verificationSummary: lastVerification?.summary ?? fallbackSummary,
-    });
+
+    const completed = missionRun.finalJob;
+    const finalSession = missionRun.finalSession ?? session;
+    const finalBridgeResult = missionRun.finalBridgeResult;
+    const statusLabel = formatAgentStatusLabel(completed.status, completed.running, this.currentI18n);
+    const verificationSummary = completed.verificationSummary
+      ?? completed.lastError
+      ?? missionRun.runResult.mission.statusReason
+      ?? statusLabel;
+
+    if (missionRun.runResult.mission.status === 'completed') {
+      const artifacts = this.resolveAgentJobArtifacts(completed);
+      const resultText = completed.resultText ?? completed.lastResultPreview ?? '';
+      const response = messageResponse([], buildSessionMeta(finalSession));
+      const completionLines = [
+        this.t('coordinator.agent.completed'),
+        this.t('coordinator.agent.title', { value: completed.title }),
+        this.t('coordinator.agent.verification', { value: truncateText(verificationSummary, 180) }),
+      ];
+      if (artifacts.length > 0) {
+        completionLines.push(this.t('coordinator.agent.attachmentSending', { count: artifacts.length }));
+      } else if (resultText) {
+        completionLines.push('');
+        completionLines.push(resultText);
+      }
+      response.messages = [
+        {
+          text: completionLines.filter((line) => line !== '').join('\n'),
+        },
+        ...artifacts.map((artifact) => ({
+          artifact,
+          mediaPath: artifact.path,
+          caption: artifact.caption ?? artifact.displayName ?? null,
+        })),
+      ];
+      response.meta = {
+        ...(response.meta ?? {}),
+        codexTurn: {
+          outputState: finalBridgeResult?.outputState ?? 'complete',
+          previewText: finalBridgeResult?.previewText ?? completed.lastResultPreview ?? '',
+          finalSource: finalBridgeResult?.finalSource ?? 'agent_job_mission_control',
+          errorMessage: finalBridgeResult?.errorMessage ?? '',
+        },
+      };
+      return response;
+    }
+
+    if (missionRun.runResult.mission.status === 'stopped') {
+      return messageResponse([
+        this.t('coordinator.agent.stopped'),
+        this.t('coordinator.agent.title', { value: completed.title }),
+      ], buildSessionMeta(finalSession));
+    }
+
+    if (
+      missionRun.runResult.mission.status === 'waiting_user'
+      || missionRun.runResult.mission.status === 'needs_human'
+      || missionRun.runResult.mission.status === 'handoff'
+      || missionRun.runResult.mission.status === 'blocked'
+    ) {
+      return messageResponse([
+        this.t('coordinator.agent.paused'),
+        this.t('coordinator.agent.title', { value: completed.title }),
+        this.t('coordinator.agent.status', { value: statusLabel }),
+        this.t('coordinator.agent.verification', { value: verificationSummary }),
+      ], buildSessionMeta(finalSession));
+    }
+
+    const verifierIssues = missionRun.runResult.verifierResult?.missingAcceptanceCriteria ?? [];
     return messageResponse([
       this.t('coordinator.agent.failed'),
-      this.t('coordinator.agent.lastError', { value: fallbackSummary }),
-    ], buildSessionMeta(lastSession));
+      this.t('coordinator.agent.title', { value: completed.title }),
+      this.t('coordinator.agent.verification', { value: verificationSummary }),
+      ...(verifierIssues.length > 0
+        ? [
+          this.t('coordinator.agent.issuesTitle'),
+          ...verifierIssues.map((issue) => `- ${issue}`),
+        ]
+        : []),
+      this.t('coordinator.agent.retryHint'),
+    ], buildSessionMeta(finalSession));
   }
 
   async verifyAgentJob(job: AgentJob, result, session): Promise<AgentVerificationResult> {
@@ -10631,6 +10642,43 @@ export class BridgeCoordinator {
       issues: [],
       nextAction: 'complete',
     };
+  }
+
+  async runAutomationJob(job: AutomationJob, options: StartTurnOptions = {}): Promise<CoordinatorResponse> {
+    if (!this.automationJobs) {
+      return messageResponse([
+        this.t('coordinator.auto.unsupported'),
+      ]);
+    }
+    const current = this.automationJobs.getById(job.id) ?? job;
+    const session = this.automationJobs.getSession(current);
+    if (!session) {
+      const message = this.t('coordinator.auto.sessionMissing');
+      this.automationJobs.updateJob(current.id, {
+        lastError: message,
+      });
+      return messageResponse([
+        message,
+      ], this.buildScopedSessionMeta({
+        platform: current.platform,
+        externalScopeId: current.externalScopeId,
+      }));
+    }
+
+    return this.handleInboundEvent({
+      platform: current.platform,
+      externalScopeId: current.externalScopeId,
+      text: String(current.prompt ?? '').trim(),
+      cwd: typeof current.cwd === 'string' ? current.cwd : null,
+      locale: typeof current.locale === 'string' ? current.locale : null,
+      metadata: {
+        codexbridge: {
+          overrideBridgeSessionId: current.bridgeSessionId,
+          automationJobId: current.id,
+          automationMode: current.mode,
+        },
+      },
+    }, options);
   }
 
   async verifyAgentResultWithCodex(job: AgentJob, result, session): Promise<AgentVerificationResult | null> {
@@ -12122,45 +12170,6 @@ ${JSON.stringify(currentDraft, null, 2)}
 Edit instruction:
 ${instruction}`;
   return localizedInstruction.trim();
-}
-
-function buildAgentExecutionPrompt(job: AgentJob, params: {
-  attempt: number;
-  previousVerification: AgentVerificationResult | null;
-  previousResultPreview: string | null;
-  locale: string | null;
-}): string {
-  const language = normalizeLocale(params.locale) === 'zh-CN' ? '中文' : 'English';
-  const lines = [
-    `你正在执行 CodexBridge 后台 Agent 任务。请用${language}回复最终结果。`,
-    '',
-    `任务标题：${job.title}`,
-    `目标：${job.goal}`,
-    `最终交付物：${job.expectedOutput}`,
-    `执行模式：${job.mode}`,
-    `当前尝试：${params.attempt}/${job.maxAttempts}`,
-    '',
-    '计划：',
-    ...job.plan.map((line, index) => `${index + 1}. ${line}`),
-    '',
-    '执行要求：',
-    '- 你有 full-access 配置；除非确实必须，不要向用户请求审批。',
-    '- 如果需要修改代码，请直接修改、测试并说明结果。',
-    '- 如果是研究或文档任务，请给出可直接使用的结构化结果。',
-    '- 最终回复必须包含：完成内容、验证结果、未完成风险。',
-  ];
-  if (params.previousVerification) {
-    lines.push(
-      '',
-      '上一轮 verifier 未通过：',
-      params.previousVerification.summary,
-      ...params.previousVerification.issues.map((issue) => `- ${issue}`),
-    );
-  }
-  if (params.previousResultPreview) {
-    lines.push('', `上一轮输出摘要：${params.previousResultPreview}`);
-  }
-  return lines.join('\n');
 }
 
 function buildAgentVerifierPrompt(job: AgentJob, result, locale: string | null): string {
@@ -14225,23 +14234,9 @@ function parseAutomationCommandSkillResult(value: unknown): AutomationCommandSki
 
 function normalizeAutomationCommandSkillAction(value: unknown): AutomationCommandSkillResult['action'] | null {
   const normalized = compactWhitespace(value).toLowerCase();
-  switch (normalized) {
-    case 'create_draft':
-    case 'update_pending_draft':
-    case 'propose_update_job':
-    case 'propose_delete_job':
-    case 'propose_pause_job':
-    case 'propose_resume_job':
-    case 'propose_rename_job':
-    case 'query_jobs':
-    case 'show_job':
-    case 'clarify':
-    case 'reject':
-    case 'local_only':
-      return normalized;
-    default:
-      return null;
-  }
+  return AUTO_COMMAND_SKILL_ACTIONS.has(normalized as AutomationCommandSkillResult['action'])
+    ? normalized as AutomationCommandSkillResult['action']
+    : null;
 }
 
 function parseAutomationOperationTarget(value: unknown): AutomationOperationTarget | null {
@@ -14643,6 +14638,68 @@ function formatAutomationStatusLabel(status: string, running: boolean, i18n: Tra
     return i18n.t('coordinator.auto.status.paused');
   }
   return i18n.t('coordinator.auto.status.active');
+}
+
+function formatMissionRuntimeStatusLabel(status: string, i18n: Translator): string {
+  switch (status) {
+    case 'queued':
+    case 'planning':
+    case 'running':
+    case 'verifying':
+    case 'repairing':
+    case 'waiting_user':
+    case 'needs_human':
+    case 'handoff':
+    case 'blocked':
+    case 'completed':
+    case 'failed':
+    case 'stopped':
+      return i18n.t(`coordinator.agent.status.${status}`);
+    case 'archived':
+      return i18n.t('coordinator.agent.status.completed');
+    default:
+      return String(status ?? '').trim() || i18n.t('common.unknown');
+  }
+}
+
+function mapMissionArtifactsToResponseMessages(artifacts: Array<{
+  type: string;
+  path: string | null;
+  name?: string | null;
+  mimeType?: string | null;
+  caption?: string | null;
+}>): Array<{
+  artifact?: OutputArtifact | null;
+  mediaPath?: string | null;
+  caption?: string | null;
+}> {
+  return (Array.isArray(artifacts) ? artifacts : [])
+    .map((artifact) => {
+      const path = typeof artifact?.path === 'string' ? artifact.path.trim() : '';
+      if (!path) {
+        return null;
+      }
+      const kind = artifact.type === 'image' || artifact.type === 'video' || artifact.type === 'audio'
+        ? artifact.type
+        : 'file';
+      return {
+        artifact: {
+          kind,
+          path,
+          displayName: typeof artifact?.name === 'string' ? artifact.name.trim() || null : null,
+          mimeType: typeof artifact?.mimeType === 'string' ? artifact.mimeType.trim() || null : null,
+          caption: typeof artifact?.caption === 'string' ? artifact.caption.trim() || null : null,
+          source: 'provider_native',
+        },
+        mediaPath: path,
+        caption: typeof artifact?.caption === 'string' ? artifact.caption.trim() || null : null,
+      };
+    })
+    .filter(Boolean) as Array<{
+      artifact?: OutputArtifact | null;
+      mediaPath?: string | null;
+      caption?: string | null;
+    }>;
 }
 
 function buildThreadBrowserKey(event) {
