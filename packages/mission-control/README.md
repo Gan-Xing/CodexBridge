@@ -36,7 +36,7 @@ It must not own bridge behavior:
 
 Current phase:
 
-- `phase-9i-source-sync-lineage`: package-owned mission
+- `phase-9j-host-neutral-contract`: package-owned mission
   domain/workflow/workspace/provider/verifier/runtime foundations, first-class
   `WorkItem` / `ChecklistSnapshot` / `PlanChangeRequest` /
   `MissionGeneration` lineage, direct in-process `commands / queries / streams`
@@ -68,6 +68,10 @@ Current phase:
   checklist progress, and workpad/attempt status views so host surfaces such
   as `/agent show` can read those package-owned views instead of loading
   `WORKFLOW.md` or reconstructing mission state from compatibility fields.
+  The outward-facing host-binding contract now also prefers generic
+  `hostSessionId` / `providerThreadId` fields while keeping
+  `bridgeSessionId` / `codexThreadId` as compatibility aliases during the
+  CodexBridge migration.
 
 This package should preserve the Symphony-style separation between:
 

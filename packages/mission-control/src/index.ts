@@ -1,6 +1,6 @@
 export const MISSION_CONTROL_PACKAGE_NAME = '@codexbridge/mission-control' as const;
 
-export const MISSION_CONTROL_PACKAGE_PHASE = 'phase-9i-source-sync-lineage' as const;
+export const MISSION_CONTROL_PACKAGE_PHASE = 'phase-9j-host-neutral-contract' as const;
 
 export const MISSION_CONTROL_OWNS = [
   'mission-domain-model',

@@ -612,7 +612,15 @@ appends `mission.source_synced` audit events so repeated queued `/agent rename`
 or other pristine source refreshes retain replayable lineage inside Mission
 Control.
 
-Phase 9i is the current validated baseline, but several behaviors above are
+Phase 9j landed: package-owned command/query and host-adapter boundaries now
+prefer generic `hostSessionId` / `providerThreadId` fields while preserving
+`bridgeSessionId` / `codexThreadId` as compatibility aliases for the current
+CodexBridge `/agent` migration. Direct Mission Control API create/retry paths
+now accept that host-neutral surface without bridge-specific field names, and
+package/core adapter tests prove the same contract can be consumed outside a
+CodexBridge-only naming scheme.
+
+Phase 9j is the current validated baseline, but several behaviors above are
 still transitional:
 
 - `AgentJob` still carries bridge-side compatibility state that should keep
@@ -685,6 +693,8 @@ Completion criteria:
   - execution refs / host bindings / artifact refs
 - [x] Add explicit host adapter boundaries for session/thread/approval/artifact
   delivery/notification/auth context
+- [x] Expose generic `hostSessionId` / `providerThreadId` boundary fields
+  while keeping transitional CodexBridge compatibility aliases
 - [x] Move `/agent` reads and control actions further onto package-owned query
   and command contracts
 - [x] Keep stripping bridge-owned runtime truth out of `AgentJob` until it is a

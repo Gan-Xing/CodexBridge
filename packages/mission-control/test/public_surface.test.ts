@@ -11,7 +11,7 @@ import {
 
 test('mission control package exposes the package boundary contract', () => {
   assert.equal(MISSION_CONTROL_PACKAGE_NAME, '@codexbridge/mission-control');
-  assert.equal(MISSION_CONTROL_PACKAGE_PHASE, 'phase-9i-source-sync-lineage');
+  assert.equal(MISSION_CONTROL_PACKAGE_PHASE, 'phase-9j-host-neutral-contract');
   assert.equal(MISSION_CYCLE_RESULT_SCHEMA_VERSION, 'mission-cycle/v1');
   assert.ok(MISSION_CONTROL_OWNS.includes('mission-domain-model'));
   assert.ok(MISSION_CONTROL_OWNS.includes('provider-abstraction'));
@@ -30,8 +30,11 @@ test('mission control package exposes a no-op host adapter baseline', async () =
   const context = await adapter.getContext('mission-host-1');
   assert.equal(context.missionId, 'mission-host-1');
   assert.equal(context.platform, 'manual');
+  assert.equal(context.hostSessionId, null);
+  assert.equal(context.bridgeSessionId, null);
   await adapter.bindProviderThread({
     missionId: 'mission-host-1',
+    hostSessionId: null,
     bridgeSessionId: null,
     providerThreadId: null,
   });

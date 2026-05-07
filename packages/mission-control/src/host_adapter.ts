@@ -8,7 +8,8 @@ export interface MissionHostContext {
   missionId: string;
   platform: string;
   externalScopeId: string;
-  bridgeSessionId: string | null;
+  hostSessionId: string | null;
+  bridgeSessionId?: string | null;
   providerThreadId: string | null;
   actorId: string | null;
   actorDisplayName: string | null;
@@ -19,7 +20,8 @@ export interface MissionHostContext {
 
 export interface MissionHostThreadBinding {
   missionId: string;
-  bridgeSessionId: string | null;
+  hostSessionId: string | null;
+  bridgeSessionId?: string | null;
   providerThreadId: string | null;
 }
 
@@ -74,6 +76,7 @@ export function createNoopMissionHostAdapter(
         missionId,
         platform: 'manual',
         externalScopeId: missionId,
+        hostSessionId: null,
         bridgeSessionId: null,
         providerThreadId: null,
         actorId: null,

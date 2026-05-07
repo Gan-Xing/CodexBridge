@@ -61,7 +61,8 @@ test('CodexBridgeMissionHostAdapter forwards context, binding, progress, and app
   const session = createBridgeSession();
   const bound: Array<{
     missionId: string;
-    bridgeSessionId: string | null;
+    hostSessionId: string | null;
+    bridgeSessionId?: string | null;
     providerThreadId: string | null;
   }> = [];
   const progress: Array<Record<string, unknown>> = [];
@@ -83,17 +84,19 @@ test('CodexBridgeMissionHostAdapter forwards context, binding, progress, and app
   });
 
   const context = await adapter.getContext(job.id);
+  assert.equal(context.hostSessionId, session.id);
   assert.equal(context.bridgeSessionId, session.id);
   assert.equal(context.providerThreadId, session.codexThreadId);
   assert.equal(context.locale, 'zh-CN');
 
   await adapter.bindProviderThread({
     missionId: job.id,
-    bridgeSessionId: 'session-host-adapter-2',
+    hostSessionId: 'session-host-adapter-2',
     providerThreadId: 'thread-host-adapter-2',
   });
   assert.deepEqual(bound[0], {
     missionId: job.id,
+    hostSessionId: 'session-host-adapter-2',
     bridgeSessionId: 'session-host-adapter-2',
     providerThreadId: 'thread-host-adapter-2',
   });

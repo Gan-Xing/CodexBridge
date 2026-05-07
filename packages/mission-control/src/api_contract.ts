@@ -55,6 +55,8 @@ export interface MissionHostBindingView {
   source: MissionSource;
   sourceRef: string | null;
   providerProfileId: string;
+  hostSessionId: string | null;
+  providerThreadId: string | null;
   bridgeSessionId: string | null;
   codexThreadId: string | null;
 }
@@ -193,6 +195,8 @@ export interface GetMissionExecutionInput {
 export interface RetryMissionInput {
   missionId: string;
   reason?: string | null;
+  hostSessionId?: string | null;
+  providerThreadId?: string | null;
   bridgeSessionId?: string | null;
   codexThreadId?: string | null;
   workflowPath?: string | null;
@@ -212,6 +216,8 @@ export interface CreateMissionCommandInput {
   cwd?: string | null;
   workspacePath?: string | null;
   workflowPath?: string | null;
+  hostSessionId?: string | null;
+  providerThreadId?: string | null;
   bridgeSessionId?: string | null;
   codexThreadId?: string | null;
   immutableGoal?: string | null;

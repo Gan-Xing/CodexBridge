@@ -146,26 +146,28 @@ export async function runAgentJobWithMissionControl(
   });
   const bindThread = (input: {
     missionId: string;
-    bridgeSessionId: string | null;
+    hostSessionId: string | null;
+    bridgeSessionId?: string | null;
     providerThreadId: string | null;
   }) => {
+    const hostSessionId = input.hostSessionId ?? input.bridgeSessionId ?? null;
     const currentJob = options.agentJobs.getById(options.job.id);
-    if (currentJob && input.bridgeSessionId && currentJob.bridgeSessionId !== input.bridgeSessionId) {
+    if (currentJob && hostSessionId && currentJob.bridgeSessionId !== hostSessionId) {
       options.agentJobs.updateJob(currentJob.id, {
-        bridgeSessionId: input.bridgeSessionId,
+        bridgeSessionId: hostSessionId,
       });
     }
     const currentMission = repository.getMissionById(input.missionId);
     if (
       currentMission
       && (
-        currentMission.bridgeSessionId !== input.bridgeSessionId
+        currentMission.bridgeSessionId !== hostSessionId
         || currentMission.codexThreadId !== input.providerThreadId
       )
     ) {
       repository.saveMission({
         ...currentMission,
-        bridgeSessionId: input.bridgeSessionId,
+        bridgeSessionId: hostSessionId,
         codexThreadId: input.providerThreadId,
         updatedAt: now(),
       });
@@ -525,7 +527,7 @@ class BridgeMissionProvider implements MissionProvider {
         attachments: [],
         metadata: {
           codexbridge: {
-            overrideBridgeSessionId: hostContext.bridgeSessionId ?? session.id,
+            overrideBridgeSessionId: hostContext.hostSessionId ?? hostContext.bridgeSessionId ?? session.id,
             agentJobId: this.options.jobId,
             agentAttempt: input.attempt.index,
             missionId: input.mission.id,
@@ -567,6 +569,7 @@ class BridgeMissionProvider implements MissionProvider {
     const normalizedResult = normalizeBridgeMissionProviderResult(execution.result);
     await this.options.hostAdapter.bindProviderThread({
       missionId: input.mission.id,
+      hostSessionId: execution.session.id,
       bridgeSessionId: execution.session.id,
       providerThreadId: execution.session.codexThreadId,
     });

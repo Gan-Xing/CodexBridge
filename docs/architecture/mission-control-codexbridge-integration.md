@@ -157,6 +157,16 @@ Main remaining integration gap:
     identity
   - the bridge therefore keeps package-owned source metadata refreshes without
     rewriting away earlier authoritative source-sync history
+- Phase 9j now hardens the outward package boundary so later hosts do not have
+  to inherit CodexBridge-only naming:
+  - package-owned `commands / queries / host adapter` contracts now expose
+    generic `hostSessionId` / `providerThreadId` fields
+  - current `/agent` integration keeps `bridgeSessionId` / `codexThreadId`
+    only as compatibility aliases while bridge-side storage and execution still
+    use those names internally
+  - the bridge can therefore keep migrating toward a host adapter/projection
+    role without forcing future Telegram, CLI, or service wrappers to speak
+    CodexBridge-specific field names at the package boundary
 - `/agent` `list/show/stop/retry` now consume that package API through an
   authoritative mission repository plus `AgentJob` projection instead of
   rebuilding runtime truth directly from bridge compatibility fields

@@ -52,6 +52,7 @@ export class CodexBridgeMissionHostAdapter implements MissionHostAdapter {
       missionId: job.id,
       platform: job.platform,
       externalScopeId: job.externalScopeId,
+      hostSessionId: session?.id ?? job.bridgeSessionId ?? null,
       bridgeSessionId: session?.id ?? job.bridgeSessionId ?? null,
       providerThreadId: session?.codexThreadId ?? null,
       actorId: null,
@@ -64,7 +65,11 @@ export class CodexBridgeMissionHostAdapter implements MissionHostAdapter {
 
   async bindProviderThread(input: MissionHostThreadBinding): Promise<void> {
     this.requireJob(input.missionId);
-    await this.bindThread?.(input);
+    await this.bindThread?.({
+      ...input,
+      hostSessionId: input.hostSessionId ?? input.bridgeSessionId ?? null,
+      bridgeSessionId: input.bridgeSessionId ?? input.hostSessionId ?? null,
+    });
   }
 
   async publishProgress(update: MissionHostProgressUpdate): Promise<void> {

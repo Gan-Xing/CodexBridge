@@ -189,8 +189,8 @@ export class DirectMissionControlApi implements MissionControlApi {
       cwd: request.input.cwd,
       workspacePath: request.input.workspacePath,
       workflowPath: request.input.workflowPath,
-      bridgeSessionId: request.input.bridgeSessionId,
-      codexThreadId: request.input.codexThreadId,
+      bridgeSessionId: resolveHostSessionId(request.input),
+      codexThreadId: resolveProviderThreadId(request.input),
       immutableGoal: request.input.immutableGoal,
       immutablePrompt: request.input.immutablePrompt,
       maxAttempts: request.input.maxAttempts,
@@ -247,8 +247,8 @@ export class DirectMissionControlApi implements MissionControlApi {
     const retried = createMissionRetryAggregate(mission, {
       at,
       reason: request.input.reason,
-      bridgeSessionId: request.input.bridgeSessionId,
-      codexThreadId: request.input.codexThreadId,
+      bridgeSessionId: resolveHostSessionId(request.input),
+      codexThreadId: resolveProviderThreadId(request.input),
       workflowPath: request.input.workflowPath,
       workspacePath: request.input.workspacePath,
     });
@@ -686,9 +686,23 @@ function buildMissionHostBindings(mission: Mission): MissionHostBindingView {
     source: mission.source,
     sourceRef: mission.sourceRef,
     providerProfileId: mission.providerProfileId,
+    hostSessionId: mission.bridgeSessionId,
+    providerThreadId: mission.codexThreadId,
     bridgeSessionId: mission.bridgeSessionId,
     codexThreadId: mission.codexThreadId,
   };
+}
+
+function resolveHostSessionId(
+  input: Pick<CreateMissionCommandInput | RetryMissionInput, 'hostSessionId' | 'bridgeSessionId'>,
+): string | null {
+  return normalizeText(input.hostSessionId) ?? normalizeText(input.bridgeSessionId);
+}
+
+function resolveProviderThreadId(
+  input: Pick<CreateMissionCommandInput | RetryMissionInput, 'providerThreadId' | 'codexThreadId'>,
+): string | null {
+  return normalizeText(input.providerThreadId) ?? normalizeText(input.codexThreadId);
 }
 
 function buildMissionArtifactRefs(resultArtifacts: unknown[]): MissionArtifactRefView[] {

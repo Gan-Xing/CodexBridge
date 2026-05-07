@@ -84,8 +84,8 @@ test('direct mission control api can create a queued mission from a source-backe
       platform: 'weixin',
       externalScopeId: 'wx-user-create-1',
       providerProfileId: 'codex-default',
-      bridgeSessionId: 'session-api-create-1',
-      codexThreadId: 'thread-api-create-1',
+      hostSessionId: 'session-api-create-1',
+      providerThreadId: 'thread-api-create-1',
       cwd: '/repo',
       riskLevel: 'medium',
       maxAttempts: 3,
@@ -104,6 +104,10 @@ test('direct mission control api can create a queued mission from a source-backe
   assert.equal(created.data.mission.source, 'manual');
   assert.equal(created.data.hostBindings.platform, 'weixin');
   assert.equal(created.data.hostBindings.source, 'manual');
+  assert.equal(created.data.hostBindings.hostSessionId, 'session-api-create-1');
+  assert.equal(created.data.hostBindings.providerThreadId, 'thread-api-create-1');
+  assert.equal(created.data.hostBindings.bridgeSessionId, 'session-api-create-1');
+  assert.equal(created.data.hostBindings.codexThreadId, 'thread-api-create-1');
   assert.equal(created.data.workItem?.sourceRevision, 'manual-rev-1');
   assert.deepEqual(created.data.workItem?.metadata, { category: 'code' });
   assert.equal(created.data.activeGeneration?.id, 'mission-api-create-1:generation:1');
@@ -148,6 +152,45 @@ test('direct mission control api can create a queued mission from a source-backe
   assert.equal(repo.getChecklistSnapshotById('mission-api-create-1:checklist:1')?.hash?.length, 64);
   assert.deepEqual(events.map((event) => event.id), ['event-1701200050000', 'event-1701200050001']);
   assert.equal(nowRef.value, 1_701_200_050_002);
+});
+
+test('direct mission control api exposes host-neutral binding views from generic session and provider thread fields', async () => {
+  const { api } = createApiHarness(1_701_200_055_000);
+
+  const created = await api.commands.createMission({
+    meta: {
+      requestId: 'req-create-cli-1',
+      correlationId: null,
+      idempotencyKey: null,
+    },
+    input: {
+      missionId: 'mission-api-cli-create-1',
+      workItem: {
+        source: 'manual',
+        sourceRef: 'manual:api-cli-create-1',
+        sourceRevision: 'manual-cli-rev-1',
+        title: 'Inspect the CLI host contract',
+        goal: 'Create a mission through generic host-neutral bindings.',
+        expectedOutput: 'A host-neutral mission detail view.',
+        acceptanceCriteria: ['Mission is created'],
+        plan: ['Create the mission'],
+        metadata: null,
+      },
+      platform: 'cli',
+      externalScopeId: 'cli-user-create-1',
+      providerProfileId: 'codex-default',
+      hostSessionId: 'cli-session-1',
+      providerThreadId: 'thread-cli-create-1',
+      initialStatus: 'queued',
+    },
+  });
+
+  assert.equal(created.data.hostBindings.platform, 'cli');
+  assert.equal(created.data.hostBindings.externalScopeId, 'cli-user-create-1');
+  assert.equal(created.data.hostBindings.hostSessionId, 'cli-session-1');
+  assert.equal(created.data.hostBindings.providerThreadId, 'thread-cli-create-1');
+  assert.equal(created.data.hostBindings.bridgeSessionId, 'cli-session-1');
+  assert.equal(created.data.hostBindings.codexThreadId, 'thread-cli-create-1');
 });
 
 test('direct mission control api can sync a pristine mission from a refreshed source summary before attempts start', async () => {
@@ -622,6 +665,8 @@ test('direct mission control api exposes package-owned query views with boundary
       missionId: verifying.id,
     },
   });
+  assert.equal(executionResult.data?.hostBindings.hostSessionId, 'session-api-1');
+  assert.equal(executionResult.data?.hostBindings.providerThreadId, 'thread-api-1');
   assert.equal(executionResult.data?.hostBindings.bridgeSessionId, 'session-api-1');
   assert.equal(executionResult.data?.executionRefs.workflowPath, '/repo/.codexbridge/mission/WORKFLOW.md');
   assert.equal(executionResult.data?.artifactRefs[0]?.name, 'report.md');
@@ -728,7 +773,7 @@ test('direct mission control api commands persist retry, resume, and stop transi
     input: {
       missionId: completedMission.id,
       reason: 'User requested another pass.',
-      codexThreadId: 'thread-api-retry-2',
+      providerThreadId: 'thread-api-retry-2',
       actor: {
         actorId: 'wx-user-1',
         actorType: 'user',
