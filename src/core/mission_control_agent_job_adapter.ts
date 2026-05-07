@@ -2,17 +2,26 @@ import {
   MissionWorkflowLoader,
   createMission,
   createMissionAttemptPromptContract,
-  createMissionRetrySnapshot,
+  createMissionChecklistSnapshot,
+  createMissionGeneration,
+  createMissionRetryAggregate,
   createMissionResumeSnapshot,
+  createMissionWorkItem,
   createMissionWorkpadStatusView,
+  mapMissionStatusToGenerationStatus,
+  normalizeMissionRecord,
   renderMissionAttemptPromptContract,
   transitionMission,
+  type ChecklistSnapshot,
   type LoadedMissionWorkflow,
   type Mission,
   type MissionAttempt,
   type MissionAttemptStatus,
   type MissionEvent,
+  type MissionGeneration,
+  type PlanChangeRequest,
   type MissionStatus,
+  type WorkItem,
 } from '../../packages/mission-control/src/index.js';
 import type {
   AgentJob,
@@ -46,10 +55,24 @@ const TERMINAL_ATTEMPT_STATUS_SET = new Set<MissionAttempt['status']>([
 ]);
 
 export interface AgentJobMissionRuntimeStateView {
+  workItem: WorkItem | null;
   mission: Mission | null;
+  generations: MissionGeneration[];
+  checklistSnapshots: ChecklistSnapshot[];
+  planChangeRequests: PlanChangeRequest[];
   attempts: MissionAttempt[];
   events: MissionEvent[];
 }
+
+type AgentJobMissionRuntimeStateLike = {
+  workItem?: WorkItem | null;
+  mission: Mission | null;
+  generations?: MissionGeneration[];
+  checklistSnapshots?: ChecklistSnapshot[];
+  planChangeRequests?: PlanChangeRequest[];
+  attempts?: MissionAttempt[];
+  events?: MissionEvent[];
+};
 
 export function loadMissionWorkflowForAgentJob(job: AgentJob):
   | { workflow: LoadedMissionWorkflow; error: null }
@@ -169,7 +192,17 @@ export function createMissionControlledAgentJobView(job: AgentJob): AgentJob {
 export function loadAgentJobMissionRuntimeState(job: AgentJob): AgentJobMissionRuntimeStateView {
   const raw = job.missionRuntimeState;
   return {
-    mission: raw?.mission ? cloneValue(raw.mission as unknown as Mission) : null,
+    workItem: raw?.workItem ? cloneValue(raw.workItem as unknown as WorkItem) : null,
+    mission: raw?.mission ? normalizeMissionRecord(cloneValue(raw.mission as unknown as Mission)) : null,
+    generations: Array.isArray(raw?.generations)
+      ? raw.generations.map((generation) => cloneValue(generation as unknown as MissionGeneration))
+      : [],
+    checklistSnapshots: Array.isArray(raw?.checklistSnapshots)
+      ? raw.checklistSnapshots.map((snapshot) => cloneValue(snapshot as unknown as ChecklistSnapshot))
+      : [],
+    planChangeRequests: Array.isArray(raw?.planChangeRequests)
+      ? raw.planChangeRequests.map((changeRequest) => cloneValue(changeRequest as unknown as PlanChangeRequest))
+      : [],
     attempts: Array.isArray(raw?.attempts)
       ? raw.attempts.map((attempt) => cloneValue(attempt as unknown as MissionAttempt))
       : [],
@@ -180,12 +213,16 @@ export function loadAgentJobMissionRuntimeState(job: AgentJob): AgentJobMissionR
 }
 
 export function serializeAgentJobMissionRuntimeState(
-  state: AgentJobMissionRuntimeStateView,
+  state: AgentJobMissionRuntimeStateLike,
 ): AgentJobMissionRuntimeState {
   return {
+    workItem: state.workItem ? (cloneValue(state.workItem) as unknown as Record<string, unknown>) : null,
     mission: state.mission ? (cloneValue(state.mission) as unknown as Record<string, unknown>) : null,
-    attempts: state.attempts.map((attempt) => cloneValue(attempt) as unknown as Record<string, unknown>),
-    events: state.events.map((event) => cloneValue(event) as unknown as Record<string, unknown>),
+    generations: (state.generations ?? []).map((generation) => cloneValue(generation) as unknown as Record<string, unknown>),
+    checklistSnapshots: (state.checklistSnapshots ?? []).map((snapshot) => cloneValue(snapshot) as unknown as Record<string, unknown>),
+    planChangeRequests: (state.planChangeRequests ?? []).map((changeRequest) => cloneValue(changeRequest) as unknown as Record<string, unknown>),
+    attempts: (state.attempts ?? []).map((attempt) => cloneValue(attempt) as unknown as Record<string, unknown>),
+    events: (state.events ?? []).map((event) => cloneValue(event) as unknown as Record<string, unknown>),
   };
 }
 
@@ -197,31 +234,42 @@ export function createFreshMissionRuntimeStateForAgentJob(
   } = {},
 ): AgentJobMissionRuntimeStateView {
   const now = options.now ?? Date.now();
+  const mission = transitionMission(createMission({
+    id: job.id,
+    source: mapPlatformToMissionSource(job.platform),
+    sourceRef: job.id,
+    platform: job.platform,
+    externalScopeId: job.externalScopeId,
+    title: job.title,
+    goal: job.goal,
+    expectedOutput: job.expectedOutput,
+    acceptanceCriteria: job.expectedOutput ? [job.expectedOutput] : [],
+    plan: [...job.plan],
+    riskLevel: job.riskLevel,
+    cwd: job.cwd,
+    workflowPath: job.missionWorkflowPath ?? null,
+    providerProfileId: job.providerProfileId,
+    bridgeSessionId: job.bridgeSessionId,
+    codexThreadId: options.codexThreadId ?? null,
+    maxAttempts: job.maxAttempts,
+    maxTurns: 8,
+    now,
+  }), 'queued', {
+    at: now,
+    reason: 'Agent mission queued through the bridge adapter.',
+  });
   return {
-    mission: transitionMission(createMission({
-      id: job.id,
-      source: mapPlatformToMissionSource(job.platform),
-      sourceRef: job.id,
-      platform: job.platform,
-      externalScopeId: job.externalScopeId,
-      title: job.title,
-      goal: job.goal,
-      expectedOutput: job.expectedOutput,
-      acceptanceCriteria: job.expectedOutput ? [job.expectedOutput] : [],
-      plan: [...job.plan],
-      riskLevel: job.riskLevel,
-      cwd: job.cwd,
-      workflowPath: job.missionWorkflowPath ?? null,
-      providerProfileId: job.providerProfileId,
-      bridgeSessionId: job.bridgeSessionId,
-      codexThreadId: options.codexThreadId ?? null,
-      maxAttempts: job.maxAttempts,
-      maxTurns: 8,
-      now,
-    }), 'queued', {
+    workItem: createMissionWorkItem(mission, { at: now }),
+    mission,
+    generations: [createMissionGeneration(mission, {
       at: now,
-      reason: 'Agent mission queued through the bridge adapter.',
-    }),
+      trigger: 'initial',
+    })],
+    checklistSnapshots: [createMissionChecklistSnapshot(mission, {
+      at: now,
+      generationId: mission.activeGenerationId,
+    })],
+    planChangeRequests: [],
     attempts: [],
     events: [],
   };
@@ -239,14 +287,34 @@ export function createRetriedMissionRuntimeStateForAgentJob(
     return createFreshMissionRuntimeStateForAgentJob(job, options);
   }
   const now = options.now ?? Date.now();
+  const currentMission = normalizeMissionRecord(state.mission);
+  const currentGeneration = createMissionGeneration(currentMission, {
+    at: now,
+    id: currentMission.activeGenerationId,
+    index: currentMission.activeGenerationIndex,
+    checklistSnapshotId: currentMission.currentChecklistSnapshotId,
+    status: mapMissionStatusToGenerationStatus(currentMission.status),
+    trigger: currentMission.activeGenerationIndex === 1 ? 'initial' : 'retry',
+  });
+  const retried = createMissionRetryAggregate(currentMission, {
+    at: now,
+    codexThreadId: options.codexThreadId ?? currentMission.codexThreadId,
+    reason: 'Agent mission re-queued through Mission Control retry.',
+  });
   return {
-    mission: createMissionRetrySnapshot(state.mission, {
-      at: now,
-      codexThreadId: options.codexThreadId ?? state.mission.codexThreadId,
-      reason: 'Agent mission re-queued through Mission Control retry.',
-    }),
-    attempts: [],
-    events: [],
+    workItem: state.workItem ? cloneValue(state.workItem) : createMissionWorkItem(currentMission, { at: now }),
+    mission: retried.mission,
+    generations: upsertById(
+      upsertById(state.generations, currentGeneration),
+      retried.generation,
+    ).sort((left, right) => left.index - right.index),
+    checklistSnapshots: upsertById(
+      state.checklistSnapshots,
+      retried.checklistSnapshot,
+    ).sort((left, right) => left.version - right.version),
+    planChangeRequests: state.planChangeRequests.map((changeRequest) => cloneValue(changeRequest)),
+    attempts: state.attempts.map((attempt) => cloneValue(attempt)),
+    events: state.events.map((event) => cloneValue(event)),
   };
 }
 
@@ -263,10 +331,14 @@ export function createResumedMissionRuntimeStateForAgentJob(
   }
   const now = options.now ?? Date.now();
   return {
+    workItem: state.workItem ? cloneValue(state.workItem) : createMissionWorkItem(state.mission, { at: now }),
     mission: createMissionResumeSnapshot(state.mission, {
       at: now,
       reason: options.reason,
     }),
+    generations: state.generations.map((generation) => cloneValue(generation)),
+    checklistSnapshots: state.checklistSnapshots.map((snapshot) => cloneValue(snapshot)),
+    planChangeRequests: state.planChangeRequests.map((changeRequest) => cloneValue(changeRequest)),
     attempts: state.attempts.map((attempt) => cloneValue(attempt)),
     events: state.events.map((event) => cloneValue(event)),
   };
@@ -304,7 +376,11 @@ export function createStoppedMissionRuntimeStateForAgentJob(
       activeAttemptId: state.mission.activeAttemptId,
     });
   return {
+    workItem: state.workItem ? cloneValue(state.workItem) : createMissionWorkItem(state.mission, { at: now }),
     mission,
+    generations: state.generations.map((generation) => cloneValue(generation)),
+    checklistSnapshots: state.checklistSnapshots.map((snapshot) => cloneValue(snapshot)),
+    planChangeRequests: state.planChangeRequests.map((changeRequest) => cloneValue(changeRequest)),
     attempts: state.attempts.map((attempt) => {
       if (attempt.id !== state.mission?.activeAttemptId || TERMINAL_ATTEMPT_STATUS_SET.has(attempt.status)) {
         return cloneValue(attempt);
@@ -343,13 +419,34 @@ function createMissionFromAgentJob(
   const summary = job.missionWorkpadFinalResultSummary
     ?? job.lastResultPreview
     ?? null;
-  return {
+  return normalizeMissionRecord({
     id: job.id,
+    workItemId: `${job.id}:work-item`,
     source: mapPlatformToMissionSource(job.platform),
     sourceRef: job.id,
     platform: job.platform,
     externalScopeId: job.externalScopeId,
     title: job.title,
+    immutableGoal: job.goal,
+    immutablePrompt: [
+      `Mission title: ${job.title}`,
+      'Immutable goal:',
+      job.goal,
+      '',
+      'Expected output:',
+      job.expectedOutput,
+    ].join('\n'),
+    loopPolicy: {
+      maxAttempts: job.maxAttempts,
+      maxTurns: 1,
+      maxCycles: null,
+      maxNoProgressCycles: null,
+    },
+    activeGenerationId: `${job.id}:generation:1`,
+    activeGenerationIndex: 1,
+    generationCount: 1,
+    currentChecklistSnapshotId: `${job.id}:checklist:1`,
+    currentChecklistSnapshotVersion: 1,
     goal: job.goal,
     expectedOutput: job.expectedOutput,
     acceptanceCriteria: [],
@@ -389,7 +486,7 @@ function createMissionFromAgentJob(
     },
     createdAt: job.createdAt,
     updatedAt: job.updatedAt,
-  };
+  });
 }
 
 function createSyntheticAttempt(
@@ -400,6 +497,9 @@ function createSyntheticAttempt(
   return {
     id: `${job.id}-attempt-${attemptIndex}`,
     missionId: job.id,
+    generationId: `${job.id}:generation:1`,
+    generationIndex: 1,
+    checklistSnapshotId: `${job.id}:checklist:1`,
     index: attemptIndex,
     status,
     providerRunId: null,
@@ -421,6 +521,9 @@ function createSyntheticAttemptFromHistory(job: AgentJob, entry: AgentJobAttempt
   return {
     id: `${job.id}-attempt-${entry.attempt}-${entry.recordedAt}`,
     missionId: job.id,
+    generationId: `${job.id}:generation:1`,
+    generationIndex: 1,
+    checklistSnapshotId: `${job.id}:checklist:1`,
     index: entry.attempt,
     status: mapAgentStatusToMissionAttemptStatus(entry.status),
     providerRunId: null,
@@ -440,7 +543,14 @@ function createSyntheticAttemptFromHistory(job: AgentJob, entry: AgentJobAttempt
 
 function buildAttemptHistoryFromMissionAttempts(attempts: MissionAttempt[]): AgentJobAttemptHistoryEntry[] {
   return [...attempts]
-    .sort((left, right) => left.index - right.index)
+    .sort((left, right) => {
+      const leftGeneration = left.generationIndex ?? 0;
+      const rightGeneration = right.generationIndex ?? 0;
+      if (leftGeneration !== rightGeneration) {
+        return leftGeneration - rightGeneration;
+      }
+      return left.index - right.index;
+    })
     .map((attempt) => ({
       attempt: attempt.index,
       status: mapMissionAttemptStatusToAgentJobStatus(attempt.status),
@@ -613,4 +723,15 @@ function compactString(value: unknown): string | null {
 
 function cloneValue<T>(value: T): T {
   return structuredClone(value);
+}
+
+function upsertById<T extends { id: string }>(items: T[], value: T): T[] {
+  const next = items.map((item) => cloneValue(item));
+  const index = next.findIndex((item) => item.id === value.id);
+  if (index === -1) {
+    next.push(cloneValue(value));
+    return next;
+  }
+  next[index] = cloneValue(value);
+  return next;
 }

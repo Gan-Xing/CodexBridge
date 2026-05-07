@@ -1,4 +1,4 @@
-import { createMissionWorkpad } from './state_machine.js';
+import { createMissionRetryAggregate } from './domain_records.js';
 import type { Mission } from './types.js';
 
 const RESUMABLE_CONTROL_STATUS_SET = new Set<Mission['status']>([
@@ -38,42 +38,7 @@ export function createMissionRetrySnapshot(
   if (mission.status === 'archived') {
     throw new Error(`mission ${mission.id} cannot be retried from status archived`);
   }
-  const at = options.at ?? Date.now();
-  const workpad = createMissionWorkpad(at);
-  return {
-    ...mission,
-    status: 'queued',
-    bridgeSessionId: options.bridgeSessionId !== undefined
-      ? options.bridgeSessionId
-      : mission.bridgeSessionId,
-    codexThreadId: options.codexThreadId !== undefined
-      ? options.codexThreadId
-      : mission.codexThreadId,
-    workflowPath: options.workflowPath !== undefined
-      ? options.workflowPath
-      : mission.workflowPath,
-    workspacePath: options.workspacePath !== undefined
-      ? options.workspacePath
-      : mission.workspacePath,
-    activeAttemptId: null,
-    attemptCount: 0,
-    lastRunAt: null,
-    completedAt: null,
-    archivedAt: null,
-    stoppedAt: null,
-    lastResultPreview: null,
-    resultText: null,
-    resultArtifacts: [],
-    lastError: null,
-    statusReason: normalizeText(options.reason) ?? 'Mission queued for retry.',
-    pendingApproval: null,
-    lease: null,
-    workpad: {
-      ...workpad,
-      latestPlan: [...mission.plan],
-    },
-    updatedAt: at,
-  };
+  return createMissionRetryAggregate(mission, options).mission;
 }
 
 export function createMissionResumeSnapshot(

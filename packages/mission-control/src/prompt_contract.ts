@@ -5,6 +5,7 @@ export interface MissionAttemptPromptContract {
   workflowSourceLabel: string;
   missionId: string;
   missionTitle: string;
+  generationIndex: number | null;
   attemptIndex: number | null;
   objective: string;
   expectedOutput: string;
@@ -44,8 +45,9 @@ export function createMissionAttemptPromptContract(
     workflowSourceLabel: input.workflow.source.label,
     missionId: input.mission.id,
     missionTitle: input.mission.title,
+    generationIndex: input.attempt?.generationIndex ?? input.mission.activeGenerationIndex ?? null,
     attemptIndex: input.attempt?.index ?? null,
-    objective: input.mission.goal,
+    objective: input.mission.immutableGoal,
     expectedOutput: input.mission.expectedOutput,
     acceptanceCriteria: [...input.mission.acceptanceCriteria],
     currentPlan: [...input.mission.plan],
@@ -67,6 +69,9 @@ export function renderMissionAttemptPromptContract(contract: MissionAttemptPromp
   lines.push(`Mission ID: ${contract.missionId}`);
   lines.push(`Mission title: ${contract.missionTitle}`);
   lines.push(`Workflow source: ${contract.workflowSourceLabel}`);
+  if (contract.generationIndex !== null) {
+    lines.push(`Generation index: ${contract.generationIndex}`);
+  }
   if (contract.attemptIndex !== null) {
     lines.push(`Attempt index: ${contract.attemptIndex}`);
   }

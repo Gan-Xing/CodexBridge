@@ -35,7 +35,7 @@ It must not own bridge behavior:
 
 Current phase:
 
-- `phase-6-codexbridge-integration`: package boundary plus durable mission
+- `phase-7a-work-item-lineage-foundations`: package boundary plus durable mission
   domain, repository-backed persistence, typed workflow loading, canonical
   attempt prompt contract, workpad status rendering helpers, deterministic
   workspace assignment, recovery-safe lease coordination, provider port,
@@ -44,7 +44,10 @@ Current phase:
   repository-backed bounded mission runtime that drives continuation,
   repair/retry, verifier authority, and stop/interrupt control, with
   CodexBridge `/agent` delegating into the Mission Control runtime without
-  introducing a separate `/mission` surface
+  introducing a separate `/mission` surface, while first-class `WorkItem`,
+  `ChecklistSnapshot`, `PlanChangeRequest`, and `MissionGeneration` records
+  now preserve fresh-rerun lineage instead of destructively clearing prior
+  attempt/event history
 
 This package should preserve the Symphony-style separation between:
 

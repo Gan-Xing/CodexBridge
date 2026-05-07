@@ -177,7 +177,7 @@ test('AgentJobService retryJob preserves Mission Control runtime history when re
   assert.equal(runtimeState.attempts[0]?.status, 'waiting_user');
 });
 
-test('AgentJobService retryJob still clears runtime history for fresh reruns', () => {
+test('AgentJobService retryJob preserves prior runtime history for fresh reruns via a new mission generation', () => {
   const now = 1_701_100_010_000;
   const service = makeAgentJobService(now, {
     id: 'session-agent-service-1',
@@ -292,10 +292,13 @@ test('AgentJobService retryJob still clears runtime history for fresh reruns', (
   assert.equal(retried.lastResultPreview, null);
   assert.equal(retried.resultText, null);
   assert.equal(retried.verificationSummary, null);
-  assert.equal(retried.missionAttemptHistory.length, 0);
+  assert.equal(retried.missionAttemptHistory.length, 1);
+  assert.equal(retried.missionAttemptHistory[0]?.status, 'completed');
   assert.equal(runtimeState.mission?.status, 'queued');
   assert.equal(runtimeState.mission?.attemptCount, 0);
   assert.equal(runtimeState.mission?.codexThreadId, 'thread-after-retry');
-  assert.equal(runtimeState.attempts.length, 0);
-  assert.equal(runtimeState.events.length, 0);
+  assert.equal(runtimeState.mission?.activeGenerationIndex, 2);
+  assert.equal(runtimeState.generations.length, 2);
+  assert.equal(runtimeState.attempts.length, 1);
+  assert.equal(runtimeState.events.length, 1);
 });

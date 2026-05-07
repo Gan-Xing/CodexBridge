@@ -27,6 +27,25 @@ export type MissionPriority = 'low' | 'normal' | 'high';
 
 export type MissionRiskLevel = 'low' | 'medium' | 'high';
 
+export type MissionGenerationTrigger = 'initial' | 'retry' | 'resume';
+
+export type MissionGenerationStatus =
+  | 'active'
+  | 'completed'
+  | 'failed'
+  | 'stopped'
+  | 'blocked'
+  | 'waiting_user'
+  | 'needs_human'
+  | 'handoff'
+  | 'superseded';
+
+export type ChecklistItemKind = 'deliverable' | 'acceptance' | 'plan';
+
+export type ChecklistItemStatus = 'pending' | 'completed' | 'blocked' | 'skipped';
+
+export type PlanChangeRequestStatus = 'proposed' | 'approved' | 'rejected' | 'applied';
+
 export type MissionAttemptStatus =
   | 'queued'
   | 'running'
@@ -109,13 +128,104 @@ export interface MissionWorkpad {
   updatedAt: number;
 }
 
-export interface Mission {
+export interface MissionLoopPolicy {
+  maxAttempts: number | null;
+  maxTurns: number | null;
+  maxCycles: number | null;
+  maxNoProgressCycles: number | null;
+}
+
+export interface WorkItem {
   id: string;
   source: MissionSource;
   sourceRef: string | null;
   platform: string;
   externalScopeId: string;
   title: string;
+  immutableGoal: string;
+  immutablePrompt: string;
+  expectedOutput: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ChecklistItem {
+  id: string;
+  kind: ChecklistItemKind;
+  title: string;
+  detail: string | null;
+  order: number;
+  status: ChecklistItemStatus;
+  sourceRef: string | null;
+  completionSummary: string | null;
+  completedAt: number | null;
+}
+
+export interface ChecklistSnapshot {
+  id: string;
+  missionId: string;
+  workItemId: string;
+  generationId: string | null;
+  version: number;
+  source: MissionSource;
+  sourceRef: string | null;
+  expectedOutput: string | null;
+  acceptanceCriteria: string[];
+  plan: string[];
+  items: ChecklistItem[];
+  supersededAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface PlanChangeRequest {
+  id: string;
+  missionId: string;
+  generationId: string | null;
+  checklistSnapshotId: string | null;
+  status: PlanChangeRequestStatus;
+  rationale: string;
+  proposedExpectedOutput: string | null;
+  proposedAcceptanceCriteria: string[];
+  proposedPlan: string[];
+  createdAt: number;
+  decidedAt: number | null;
+  decidedBy: string | null;
+}
+
+export interface MissionGeneration {
+  id: string;
+  missionId: string;
+  workItemId: string;
+  index: number;
+  trigger: MissionGenerationTrigger;
+  parentGenerationId: string | null;
+  checklistSnapshotId: string | null;
+  status: MissionGenerationStatus;
+  attemptCount: number;
+  summary: string | null;
+  createdAt: number;
+  updatedAt: number;
+  completedAt: number | null;
+  supersededAt: number | null;
+}
+
+export interface Mission {
+  id: string;
+  workItemId: string;
+  source: MissionSource;
+  sourceRef: string | null;
+  platform: string;
+  externalScopeId: string;
+  title: string;
+  immutableGoal: string;
+  immutablePrompt: string;
+  loopPolicy: MissionLoopPolicy;
+  activeGenerationId: string;
+  activeGenerationIndex: number;
+  generationCount: number;
+  currentChecklistSnapshotId: string;
+  currentChecklistSnapshotVersion: number;
   goal: string;
   expectedOutput: string;
   acceptanceCriteria: string[];
@@ -152,6 +262,9 @@ export interface Mission {
 export interface MissionAttempt {
   id: string;
   missionId: string;
+  generationId?: string | null;
+  generationIndex?: number | null;
+  checklistSnapshotId?: string | null;
   index: number;
   status: MissionAttemptStatus;
   providerRunId: string | null;
@@ -172,6 +285,8 @@ export interface MissionEvent {
   id: string;
   missionId: string;
   attemptId: string | null;
+  generationId?: string | null;
+  generationIndex?: number | null;
   kind: MissionEventKind;
   summary: string;
   detail: string | null;
@@ -181,15 +296,19 @@ export interface MissionEvent {
 
 export interface CreateMissionInput {
   id: string;
+  workItemId?: string | null;
   source: MissionSource;
   sourceRef?: string | null;
   platform: string;
   externalScopeId: string;
   title: string;
+  immutableGoal?: string | null;
+  immutablePrompt?: string | null;
   goal: string;
   expectedOutput: string;
   acceptanceCriteria?: string[];
   plan?: string[];
+  loopPolicy?: Partial<MissionLoopPolicy> | null;
   priority?: MissionPriority;
   riskLevel?: MissionRiskLevel;
   cwd?: string | null;
@@ -198,6 +317,11 @@ export interface CreateMissionInput {
   providerProfileId: string;
   bridgeSessionId?: string | null;
   codexThreadId?: string | null;
+  activeGenerationId?: string | null;
+  activeGenerationIndex?: number | null;
+  generationCount?: number | null;
+  currentChecklistSnapshotId?: string | null;
+  currentChecklistSnapshotVersion?: number | null;
   maxAttempts?: number;
   maxTurns?: number;
   now?: number;

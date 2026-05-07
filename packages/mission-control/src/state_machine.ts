@@ -6,6 +6,14 @@ import type {
   MissionStatus,
   MissionWorkpad,
 } from './types.js';
+import {
+  buildChecklistSnapshotId,
+  buildDefaultImmutablePrompt,
+  buildMissionGenerationId,
+  buildMissionWorkItemId,
+  normalizeMissionLoopPolicy,
+  normalizeMissionRecord,
+} from './domain_records.js';
 
 export const MISSION_STATUS_TRANSITIONS: Readonly<Record<MissionStatus, readonly MissionStatus[]>> = Object.freeze({
   draft: ['queued', 'stopped', 'archived'],
@@ -47,13 +55,39 @@ export function createMissionWorkpad(now: number): MissionWorkpad {
 
 export function createMission(input: CreateMissionInput): Mission {
   const now = input.now ?? Date.now();
-  return {
+  const loopPolicy = normalizeMissionLoopPolicy(input.loopPolicy, {
+    maxAttempts: input.maxAttempts,
+    maxTurns: input.maxTurns,
+  });
+  const activeGenerationIndex = normalizePositiveInteger(input.activeGenerationIndex) ?? 1;
+  const generationCount = Math.max(
+    normalizePositiveInteger(input.generationCount) ?? activeGenerationIndex,
+    activeGenerationIndex,
+  );
+  const currentChecklistSnapshotVersion = normalizePositiveInteger(input.currentChecklistSnapshotVersion) ?? 1;
+  return normalizeMissionRecord({
     id: input.id,
+    workItemId: normalizeText(input.workItemId) ?? buildMissionWorkItemId(input.id),
     source: input.source,
     sourceRef: input.sourceRef ?? null,
     platform: input.platform,
     externalScopeId: input.externalScopeId,
     title: input.title,
+    immutableGoal: normalizeText(input.immutableGoal) ?? input.goal,
+    immutablePrompt: normalizeText(input.immutablePrompt) ?? buildDefaultImmutablePrompt({
+      title: input.title,
+      goal: input.goal,
+      expectedOutput: input.expectedOutput,
+      plan: input.plan ?? [],
+    }),
+    loopPolicy,
+    activeGenerationId: normalizeText(input.activeGenerationId)
+      ?? buildMissionGenerationId(input.id, activeGenerationIndex),
+    activeGenerationIndex,
+    generationCount,
+    currentChecklistSnapshotId: normalizeText(input.currentChecklistSnapshotId)
+      ?? buildChecklistSnapshotId(input.id, currentChecklistSnapshotVersion),
+    currentChecklistSnapshotVersion,
     goal: input.goal,
     expectedOutput: input.expectedOutput,
     acceptanceCriteria: [...(input.acceptanceCriteria ?? [])],
@@ -69,8 +103,8 @@ export function createMission(input: CreateMissionInput): Mission {
     codexThreadId: input.codexThreadId ?? null,
     activeAttemptId: null,
     attemptCount: 0,
-    maxAttempts: input.maxAttempts ?? 1,
-    maxTurns: input.maxTurns ?? 1,
+    maxAttempts: loopPolicy.maxAttempts ?? 1,
+    maxTurns: loopPolicy.maxTurns ?? 1,
     lastRunAt: null,
     completedAt: null,
     archivedAt: null,
@@ -85,7 +119,7 @@ export function createMission(input: CreateMissionInput): Mission {
     workpad: createMissionWorkpad(now),
     createdAt: now,
     updatedAt: now,
-  };
+  });
 }
 
 export function canTransitionMissionStatus(from: MissionStatus, to: MissionStatus): boolean {
@@ -171,3 +205,18 @@ export function isMissionResumable(mission: Mission, now = Date.now()): boolean 
   return mission.lease.expiresAt <= now;
 }
 
+function normalizePositiveInteger(value: number | null | undefined): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return null;
+  }
+  const normalized = Math.trunc(value);
+  return normalized > 0 ? normalized : null;
+}
+
+function normalizeText(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}

@@ -243,7 +243,7 @@ export class AgentJobService {
       missionWorkpadLatestBlocker: null,
       missionWorkpadLatestVerifierSummary: null,
       missionWorkpadFinalResultSummary: null,
-      missionAttemptHistory: [],
+      missionAttemptHistory: effectiveJob.missionAttemptHistory,
       missionRuntimeState: serializeAgentJobMissionRuntimeState(resetState),
     });
   }

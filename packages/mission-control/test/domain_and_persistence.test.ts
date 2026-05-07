@@ -8,12 +8,16 @@ import {
   MISSION_CONTROL_PACKAGE_PHASE,
   canTransitionMissionStatus,
   createMission,
+  createMissionChecklistSnapshot,
+  createMissionGeneration,
+  createMissionRetryAggregate,
+  createMissionWorkItem,
   transitionMission,
 } from '../src/index.js';
 import type { MissionAttempt, MissionEvent } from '../src/index.js';
 
 test('mission control package exposes the current Mission Control phase marker', () => {
-  assert.equal(MISSION_CONTROL_PACKAGE_PHASE, 'phase-6-codexbridge-integration');
+  assert.equal(MISSION_CONTROL_PACKAGE_PHASE, 'phase-7a-work-item-lineage-foundations');
 });
 
 test('mission state transitions are explicit and reject invalid transitions', () => {
@@ -144,4 +148,98 @@ test('json repository can create, update, stop, and recover resumable missions a
   assert.equal(finalMission?.status, 'stopped');
   assert.equal(finalMission?.statusReason, 'User requested stop.');
   assert.equal(finalRepo.listResumableMissions(1_700_000_100_500).length, 0);
+});
+
+test('json repository persists work items, generations, and checklist snapshots while keeping prior attempt history across fresh reruns', () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mission-control-phase7a-'));
+  const repo = new JsonFileMissionRepository(stateDir);
+  const draft = createMission({
+    id: 'mission-phase7a-1',
+    source: 'manual',
+    platform: 'weixin',
+    externalScopeId: 'wx-user-phase7a-1',
+    title: 'Preserve rerun lineage',
+    goal: 'Keep prior mission history when starting a fresh rerun.',
+    expectedOutput: 'A lineage-preserving retry snapshot.',
+    acceptanceCriteria: ['History is still queryable after retry'],
+    plan: ['Complete one generation', 'Queue a fresh rerun'],
+    providerProfileId: 'openai-default',
+    maxAttempts: 3,
+    maxTurns: 8,
+    now: 1_700_000_200_000,
+  });
+  const queued = transitionMission(draft, 'queued', {
+    at: 1_700_000_200_010,
+  });
+  const running = transitionMission(queued, 'running', {
+    at: 1_700_000_200_020,
+    activeAttemptId: 'attempt-phase7a-1',
+  });
+  const verifying = transitionMission(running, 'verifying', {
+    at: 1_700_000_200_030,
+  });
+  const mission = transitionMission(verifying, 'completed', {
+    at: 1_700_000_200_100,
+    reason: 'Generation one completed.',
+    resultText: 'Generation one passed.',
+  });
+  mission.attemptCount = 1;
+  repo.saveMission(mission);
+  repo.saveWorkItem(createMissionWorkItem(mission, { at: 1_700_000_200_100 }));
+  repo.saveGeneration(createMissionGeneration(mission, {
+    at: 1_700_000_200_100,
+    trigger: 'initial',
+  }));
+  repo.saveChecklistSnapshot(createMissionChecklistSnapshot(mission, {
+    at: 1_700_000_200_100,
+    generationId: mission.activeGenerationId,
+  }));
+
+  const attempt: MissionAttempt = {
+    id: 'attempt-phase7a-1',
+    missionId: mission.id,
+    index: 1,
+    status: 'completed',
+    providerRunId: 'run-phase7a-1',
+    providerThreadId: 'thread-phase7a-1',
+    promptDigest: 'digest-phase7a-1',
+    verifierVerdict: 'complete',
+    verifierSummary: 'Generation one passed.',
+    missingAcceptanceCriteria: [],
+    outputPreview: 'Generation one passed.',
+    error: null,
+    startedAt: 1_700_000_200_010,
+    endedAt: 1_700_000_200_090,
+    createdAt: 1_700_000_200_010,
+    updatedAt: 1_700_000_200_090,
+  };
+  const event: MissionEvent = {
+    id: 'event-phase7a-1',
+    missionId: mission.id,
+    attemptId: attempt.id,
+    kind: 'mission.completed',
+    summary: 'Mission completed.',
+    detail: null,
+    metadata: {},
+    createdAt: 1_700_000_200_095,
+  };
+  repo.saveAttempt(attempt);
+  repo.appendEvent(event);
+
+  const retried = createMissionRetryAggregate(mission, {
+    at: 1_700_000_200_200,
+    reason: 'Open a fresh generation.',
+  });
+  repo.saveMission(retried.mission);
+  repo.saveGeneration(retried.generation);
+  repo.saveChecklistSnapshot(retried.checklistSnapshot);
+
+  const restarted = new JsonFileMissionRepository(stateDir);
+  assert.equal(restarted.getWorkItemById(mission.workItemId)?.id, mission.workItemId);
+  assert.equal(restarted.listGenerations(mission.id).length, 2);
+  assert.equal(restarted.listChecklistSnapshots(mission.id).length, 2);
+  assert.equal(restarted.listAttempts(mission.id).length, 1);
+  assert.equal(restarted.listEvents(mission.id).length, 1);
+  assert.equal(restarted.getMissionById(mission.id)?.activeGenerationIndex, 2);
+  assert.equal(restarted.getMissionById(mission.id)?.attemptCount, 0);
 });

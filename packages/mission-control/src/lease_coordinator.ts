@@ -126,7 +126,7 @@ export class MissionLeaseCoordinator {
       releasedAt: null,
     }, now);
     this.repository.saveMission(next);
-    this.appendLeaseEvent(next.id, 'lease.acquired', 'Mission lease acquired.', {
+    this.appendLeaseEvent(next, 'lease.acquired', 'Mission lease acquired.', {
       ownerId: params.ownerId,
       expiresAt: now + ttlMs,
     }, now);
@@ -185,7 +185,7 @@ export class MissionLeaseCoordinator {
       releasedAt: now,
     }, now, params.reason ?? mission.statusReason);
     this.repository.saveMission(next);
-    this.appendLeaseEvent(next.id, 'lease.released', params.reason ?? 'Mission lease released.', {
+    this.appendLeaseEvent(next, 'lease.released', params.reason ?? 'Mission lease released.', {
       ownerId: lease.ownerId,
     }, now);
     return next;
@@ -227,7 +227,7 @@ export class MissionLeaseCoordinator {
         next = saveMissionLease(mission, releasedLease, now, mission.statusReason);
       }
       this.repository.saveMission(next);
-      this.appendLeaseEvent(next.id, 'lease.released', 'Recovered stale mission lease.', {
+      this.appendLeaseEvent(next, 'lease.released', 'Recovered stale mission lease.', {
         ownerId: lease.ownerId,
         stale: true,
       }, now);
@@ -287,7 +287,7 @@ export class MissionLeaseCoordinator {
       releasedAt: null,
     }, now);
     this.repository.saveMission(next);
-    this.appendLeaseEvent(next.id, kind, summary, {
+    this.appendLeaseEvent(next, kind, summary, {
       ownerId: mission.lease!.ownerId,
       expiresAt: now + ttlMs,
     }, now);
@@ -295,7 +295,7 @@ export class MissionLeaseCoordinator {
   }
 
   private appendLeaseEvent(
-    missionId: string,
+    mission: Mission,
     kind: MissionEvent['kind'],
     summary: string,
     metadata: Record<string, unknown>,
@@ -303,8 +303,10 @@ export class MissionLeaseCoordinator {
   ): void {
     this.repository.appendEvent({
       id: crypto.randomUUID(),
-      missionId,
+      missionId: mission.id,
       attemptId: null,
+      generationId: mission.activeGenerationId,
+      generationIndex: mission.activeGenerationIndex,
       kind,
       summary,
       detail: null,

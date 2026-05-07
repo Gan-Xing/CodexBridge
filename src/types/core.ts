@@ -195,7 +195,11 @@ export type AgentJobStatus =
   | 'stopped';
 
 export interface MissionRuntimeStateSnapshot {
+  workItem?: Record<string, unknown> | null;
   mission: Record<string, unknown> | null;
+  generations?: Record<string, unknown>[];
+  checklistSnapshots?: Record<string, unknown>[];
+  planChangeRequests?: Record<string, unknown>[];
   attempts: Record<string, unknown>[];
   events: Record<string, unknown>[];
 }

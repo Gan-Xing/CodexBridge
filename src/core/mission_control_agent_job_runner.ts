@@ -4,11 +4,15 @@ import {
   createMissionVerifierResult,
   isMissionResumable,
   normalizeCodexMissionDriverResult,
+  normalizeMissionRecord,
   transitionMission,
+  type ChecklistSnapshot,
   type Mission,
   type MissionAttempt,
   type MissionEvent,
+  type MissionGeneration,
   type MissionExecutionInput,
+  type PlanChangeRequest,
   type MissionProvider,
   type MissionProviderArtifact,
   type MissionProviderResult,
@@ -17,6 +21,7 @@ import {
   type MissionStatus,
   type MissionVerifier,
   type MissionVerifierResult,
+  type WorkItem,
 } from '../../packages/mission-control/src/index.js';
 import { AgentJobService } from './agent_job_service.js';
 import type {
@@ -103,7 +108,11 @@ export interface MissionControlAgentJobRunOutput {
 }
 
 type MissionRuntimeState = {
+  workItem: WorkItem | null;
   mission: Mission | null;
+  generations: MissionGeneration[];
+  checklistSnapshots: ChecklistSnapshot[];
+  planChangeRequests: PlanChangeRequest[];
   attempts: MissionAttempt[];
   events: MissionEvent[];
 };
@@ -206,6 +215,31 @@ class AgentJobMissionRepository implements MissionRepository {
     return job ? loadMissionRuntimeState(job).mission : null;
   }
 
+  getWorkItemById(id: string): WorkItem | null {
+    for (const job of this.agentJobs.listAllJobs()) {
+      const workItem = loadMissionRuntimeState(job).workItem;
+      if (workItem?.id === id) {
+        return cloneValue(workItem);
+      }
+    }
+    return null;
+  }
+
+  saveWorkItem(workItem: WorkItem): WorkItem {
+    const currentJob = this.agentJobs
+      .listAllJobs()
+      .find((job) => loadMissionRuntimeState(job).mission?.workItemId === workItem.id);
+    if (!currentJob) {
+      return workItem;
+    }
+    const currentState = loadMissionRuntimeState(currentJob);
+    this.persistState(currentJob, {
+      ...currentState,
+      workItem: cloneValue(workItem),
+    });
+    return workItem;
+  }
+
   listMissions(): Mission[] {
     return this.agentJobs
       .listAllJobs()
@@ -226,6 +260,82 @@ class AgentJobMissionRepository implements MissionRepository {
     };
     this.persistState(currentJob, nextState);
     return mission;
+  }
+
+  getGenerationById(id: string): MissionGeneration | null {
+    for (const job of this.agentJobs.listAllJobs()) {
+      const generation = loadMissionRuntimeState(job).generations.find((entry) => entry.id === id);
+      if (generation) {
+        return cloneValue(generation);
+      }
+    }
+    return null;
+  }
+
+  listGenerations(missionId: string): MissionGeneration[] {
+    const job = this.agentJobs.getById(missionId);
+    return job ? loadMissionRuntimeState(job).generations : [];
+  }
+
+  saveGeneration(generation: MissionGeneration): MissionGeneration {
+    const currentJob = this.agentJobs.requireById(generation.missionId);
+    const currentState = loadMissionRuntimeState(currentJob);
+    this.persistState(currentJob, {
+      ...currentState,
+      generations: upsertById(currentState.generations, generation).sort((left, right) => left.index - right.index),
+    });
+    return generation;
+  }
+
+  getChecklistSnapshotById(id: string): ChecklistSnapshot | null {
+    for (const job of this.agentJobs.listAllJobs()) {
+      const snapshot = loadMissionRuntimeState(job).checklistSnapshots.find((entry) => entry.id === id);
+      if (snapshot) {
+        return cloneValue(snapshot);
+      }
+    }
+    return null;
+  }
+
+  listChecklistSnapshots(missionId: string): ChecklistSnapshot[] {
+    const job = this.agentJobs.getById(missionId);
+    return job ? loadMissionRuntimeState(job).checklistSnapshots : [];
+  }
+
+  saveChecklistSnapshot(snapshot: ChecklistSnapshot): ChecklistSnapshot {
+    const currentJob = this.agentJobs.requireById(snapshot.missionId);
+    const currentState = loadMissionRuntimeState(currentJob);
+    this.persistState(currentJob, {
+      ...currentState,
+      checklistSnapshots: upsertById(currentState.checklistSnapshots, snapshot)
+        .sort((left, right) => left.version - right.version),
+    });
+    return snapshot;
+  }
+
+  getPlanChangeRequestById(id: string): PlanChangeRequest | null {
+    for (const job of this.agentJobs.listAllJobs()) {
+      const changeRequest = loadMissionRuntimeState(job).planChangeRequests.find((entry) => entry.id === id);
+      if (changeRequest) {
+        return cloneValue(changeRequest);
+      }
+    }
+    return null;
+  }
+
+  listPlanChangeRequests(missionId: string): PlanChangeRequest[] {
+    const job = this.agentJobs.getById(missionId);
+    return job ? loadMissionRuntimeState(job).planChangeRequests : [];
+  }
+
+  savePlanChangeRequest(changeRequest: PlanChangeRequest): PlanChangeRequest {
+    const currentJob = this.agentJobs.requireById(changeRequest.missionId);
+    const currentState = loadMissionRuntimeState(currentJob);
+    this.persistState(currentJob, {
+      ...currentState,
+      planChangeRequests: upsertById(currentState.planChangeRequests, changeRequest),
+    });
+    return changeRequest;
   }
 
   getAttemptById(id: string): MissionAttempt | null {
@@ -274,7 +384,11 @@ class AgentJobMissionRepository implements MissionRepository {
   resetMission(mission: Mission): Mission {
     const currentJob = this.agentJobs.requireById(mission.id);
     this.persistState(currentJob, {
+      workItem: null,
       mission: cloneValue(mission),
+      generations: [],
+      checklistSnapshots: [],
+      planChangeRequests: [],
       attempts: [],
       events: [],
     });
@@ -520,7 +634,14 @@ function buildAgentJobMissionPatch(job: AgentJob, state: MissionRuntimeState): P
       missionAttemptHistory: [],
     };
   }
-  const attempts = [...state.attempts].sort((left, right) => left.index - right.index);
+  const attempts = [...state.attempts].sort((left, right) => {
+    const leftGeneration = left.generationIndex ?? 0;
+    const rightGeneration = right.generationIndex ?? 0;
+    if (leftGeneration !== rightGeneration) {
+      return leftGeneration - rightGeneration;
+    }
+    return left.index - right.index;
+  });
   return {
     status: mapMissionStatusToAgentJobStatus(mission.status),
     running: ACTIVE_MISSION_JOB_STATUS_SET.has(mission.status),
@@ -639,7 +760,17 @@ function mapMissionArtifactsToAgentArtifacts(value: unknown[]): TurnArtifactDeli
 function loadMissionRuntimeState(job: AgentJob): MissionRuntimeState {
   const raw = job.missionRuntimeState;
   return {
-    mission: raw?.mission ? cloneValue(raw.mission as unknown as Mission) : null,
+    workItem: raw?.workItem ? cloneValue(raw.workItem as unknown as WorkItem) : null,
+    mission: raw?.mission ? normalizeMissionRecord(cloneValue(raw.mission as unknown as Mission)) : null,
+    generations: Array.isArray(raw?.generations)
+      ? raw.generations.map((generation) => cloneValue(generation as unknown as MissionGeneration))
+      : [],
+    checklistSnapshots: Array.isArray(raw?.checklistSnapshots)
+      ? raw.checklistSnapshots.map((snapshot) => cloneValue(snapshot as unknown as ChecklistSnapshot))
+      : [],
+    planChangeRequests: Array.isArray(raw?.planChangeRequests)
+      ? raw.planChangeRequests.map((changeRequest) => cloneValue(changeRequest as unknown as PlanChangeRequest))
+      : [],
     attempts: Array.isArray(raw?.attempts)
       ? raw.attempts.map((attempt) => cloneValue(attempt as unknown as MissionAttempt))
       : [],
@@ -651,7 +782,11 @@ function loadMissionRuntimeState(job: AgentJob): MissionRuntimeState {
 
 function serializeMissionRuntimeState(state: MissionRuntimeState): AgentJobMissionRuntimeState {
   return {
+    workItem: state.workItem ? (cloneValue(state.workItem) as unknown as Record<string, unknown>) : null,
     mission: state.mission ? (cloneValue(state.mission) as unknown as Record<string, unknown>) : null,
+    generations: state.generations.map((generation) => cloneValue(generation) as unknown as Record<string, unknown>),
+    checklistSnapshots: state.checklistSnapshots.map((snapshot) => cloneValue(snapshot) as unknown as Record<string, unknown>),
+    planChangeRequests: state.planChangeRequests.map((changeRequest) => cloneValue(changeRequest) as unknown as Record<string, unknown>),
     attempts: state.attempts.map((attempt) => cloneValue(attempt) as unknown as Record<string, unknown>),
     events: state.events.map((event) => cloneValue(event) as unknown as Record<string, unknown>),
   };

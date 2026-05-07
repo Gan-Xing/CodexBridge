@@ -1,6 +1,6 @@
 export const MISSION_CONTROL_PACKAGE_NAME = '@codexbridge/mission-control' as const;
 
-export const MISSION_CONTROL_PACKAGE_PHASE = 'phase-6-codexbridge-integration' as const;
+export const MISSION_CONTROL_PACKAGE_PHASE = 'phase-7a-work-item-lineage-foundations' as const;
 
 export const MISSION_CONTROL_OWNS = [
   'mission-domain-model',
@@ -35,6 +35,7 @@ export type MissionControlExcludedResponsibility =
   typeof MISSION_CONTROL_DOES_NOT_OWN[number];
 
 export * from './types.js';
+export * from './domain_records.js';
 export * from './state_machine.js';
 export * from './repository.js';
 export * from './json_file_mission_repository.js';

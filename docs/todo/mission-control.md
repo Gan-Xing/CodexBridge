@@ -99,6 +99,18 @@ These are no longer open product questions for the current loop:
 Phases 0-6 established the package, Codex provider, verifier loop, workspace
 identity, and `/agent` baseline integration.
 
+Phase 7a then added the first authoritative Mission Control runtime records
+that sit above host jobs and prompt turns:
+
+- `WorkItem`
+- `ChecklistSnapshot` / `ChecklistItem`
+- `PlanChangeRequest`
+- `MissionGeneration`
+
+Fresh reruns now open a new mission generation instead of destructively
+clearing prior attempt/event history, but completion semantics and typed
+cycle-result protocol work are still pending inside Phase 7.
+
 That baseline is useful, but it is **not** the final target shape.
 The remaining work is to converge the current implementation toward the
 host-neutral architecture locked in the two architecture documents above.
@@ -469,13 +481,13 @@ Phase 6 source-of-truth tests:
   - `/agent runAgentJob forwards provider approval requests to the supplied approval callback`
 - `test/core/agent_job_service.test.ts`
   - `AgentJobService retryJob preserves Mission Control runtime history when re-queueing waiting-human missions`
-  - `AgentJobService retryJob still clears runtime history for fresh reruns`
+  - `AgentJobService retryJob preserves prior runtime history for fresh reruns via a new mission generation`
 
 Phase 6e landed: public package metadata and checklist status now track the
 verified CodexBridge integration state so that:
 
-- `@codexbridge/mission-control` publishes a `phase-6-codexbridge-integration`
-  marker instead of the stale Phase 5 label
+- `@codexbridge/mission-control` publishes a validated package phase marker
+  instead of a stale earlier-phase label
 - package README and public-surface tests reflect that `/agent` delegates into
   Mission Control without introducing a separate `/mission` surface
 - checklist items backed by Mission Control package tests, bridge integration
@@ -521,16 +533,21 @@ transitional:
 
 ## Phase 7: Checklist-First Domain Hardening
 
-- [ ] Add first-class `WorkItem` domain modeling distinct from host job/thread
+Phase 7a landed: the package now persists `WorkItem`, `ChecklistSnapshot`,
+`ChecklistItem`, `PlanChangeRequest`, and `MissionGeneration` records, and
+bridge-side fresh retries preserve prior runtime history by opening a new
+generation instead of wiping attempts/events.
+
+- [x] Add first-class `WorkItem` domain modeling distinct from host job/thread
   ids
-- [ ] Add first-class `Checklist`, `ChecklistSnapshot`, and `ChecklistItem`
+- [x] Add first-class `Checklist`, `ChecklistSnapshot`, and `ChecklistItem`
   models
-- [ ] Add `PlanChangeRequest` so AI-proposed checklist changes become explicit
+- [x] Add `PlanChangeRequest` so AI-proposed checklist changes become explicit
   versioned requests instead of implicit prompt drift
-- [ ] Add fixed `immutableGoal`, fixed `immutablePrompt`, and explicit
+- [x] Add fixed `immutableGoal`, fixed `immutablePrompt`, and explicit
   `loopPolicy` fields to the authoritative mission model
 - [ ] Add a typed `CycleResult` contract as the package-owned loop protocol
-- [ ] Add `MissionGeneration`/run lineage so fresh reruns no longer clear prior
+- [x] Add `MissionGeneration`/run lineage so fresh reruns no longer clear prior
   history
 - [ ] Move completion semantics to:
   - all checklist items complete
@@ -542,7 +559,7 @@ Completion criteria:
   models
 - [ ] Item-level verifier outcomes can drive continuation, repair, waiting, or
   completion without host-local heuristics
-- [ ] Fresh reruns preserve prior mission history through generation/lineage
+- [x] Fresh reruns preserve prior mission history through generation/lineage
   instead of destructive reset
 
 ## Phase 8: Host-Neutral API and Projection Cleanup

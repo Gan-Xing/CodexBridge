@@ -1,6 +1,12 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import {
+  createMissionChecklistSnapshot,
+  createMissionGeneration,
+  createMissionWorkItem,
+  normalizeMissionRecord,
+} from './domain_records.js';
+import {
   applyMissionProviderStartToAttempt,
   type MissionProvider,
   type MissionProviderArtifact,
@@ -95,7 +101,7 @@ export class MissionRuntime {
     missionId: string,
     options: MissionRunOptions,
   ): Promise<MissionRunResult> {
-    let mission = this.requireMission(missionId);
+    let mission = this.ensureMissionDomainRecords(this.requireMission(missionId));
     mission = this.leaseCoordinator.claimMission(mission.id, {
       ownerId: options.ownerId,
     });
@@ -709,8 +715,19 @@ export class MissionRuntime {
   }
 
   private resolveBudgetUsage(missionId: string, activeAttempt: MissionAttempt | null, now: number) {
-    const attempts = this.repository.listAttempts(missionId);
-    const events = this.repository.listEvents(missionId);
+    const mission = this.requireMission(missionId);
+    const attempts = this.repository
+      .listAttempts(missionId)
+      .filter((attempt) => !mission.activeGenerationId
+        || attempt.generationId === mission.activeGenerationId
+        || attempt.generationId === null
+        || attempt.generationId === undefined);
+    const events = this.repository
+      .listEvents(missionId)
+      .filter((event) => !mission.activeGenerationId
+        || event.generationId === mission.activeGenerationId
+        || event.generationId === null
+        || event.generationId === undefined);
     let runtimeMs = 0;
     for (const attempt of attempts) {
       if (attempt.startedAt === null) {
@@ -799,7 +816,7 @@ export class MissionRuntime {
     updates: Partial<Pick<Mission, 'workflowPath' | 'workspacePath' | 'codexThreadId' | 'resultArtifacts' | 'activeAttemptId'>>,
   ): Mission {
     const next: Mission = {
-      ...mission,
+      ...normalizeMissionRecord(mission),
       workflowPath: updates.workflowPath !== undefined ? updates.workflowPath : mission.workflowPath,
       workspacePath: updates.workspacePath !== undefined ? updates.workspacePath : mission.workspacePath,
       codexThreadId: updates.codexThreadId !== undefined ? updates.codexThreadId : mission.codexThreadId,
@@ -853,13 +870,17 @@ export class MissionRuntime {
     status: MissionAttempt['status'],
     at: number,
   ): MissionAttempt {
+    const normalizedMission = normalizeMissionRecord(mission);
     return {
       id: this.generateId(),
-      missionId: mission.id,
+      missionId: normalizedMission.id,
+      generationId: normalizedMission.activeGenerationId,
+      generationIndex: normalizedMission.activeGenerationIndex,
+      checklistSnapshotId: normalizedMission.currentChecklistSnapshotId,
       index,
       status,
       providerRunId: null,
-      providerThreadId: mission.codexThreadId,
+      providerThreadId: normalizedMission.codexThreadId,
       promptDigest: null,
       verifierVerdict: null,
       verifierSummary: null,
@@ -878,7 +899,7 @@ export class MissionRuntime {
     if (!mission) {
       throw new Error(`unknown mission: ${missionId}`);
     }
-    return mission;
+    return normalizeMissionRecord(mission);
   }
 
   private requireAttempt(attemptId: string): MissionAttempt {
@@ -897,7 +918,9 @@ export class MissionRuntime {
   }
 
   private saveMission(mission: Mission): Mission {
-    return this.repository.saveMission(mission);
+    const savedMission = this.repository.saveMission(normalizeMissionRecord(mission));
+    this.syncMissionDomainRecords(savedMission);
+    return savedMission;
   }
 
   private appendMissionEvent(
@@ -907,10 +930,13 @@ export class MissionRuntime {
     attempt: MissionAttempt | null,
     metadata: Record<string, unknown>,
   ): MissionEvent {
+    const normalizedMission = normalizeMissionRecord(mission);
     return this.repository.appendEvent({
       id: this.generateId(),
-      missionId: mission.id,
+      missionId: normalizedMission.id,
       attemptId: attempt?.id ?? null,
+      generationId: attempt?.generationId ?? normalizedMission.activeGenerationId,
+      generationIndex: attempt?.generationIndex ?? normalizedMission.activeGenerationIndex,
       kind,
       summary,
       detail: null,
@@ -927,6 +953,53 @@ export class MissionRuntime {
     metadata: Record<string, unknown>,
   ): MissionEvent {
     return this.appendMissionEvent(mission, kind, summary, attempt, metadata);
+  }
+
+  private ensureMissionDomainRecords(mission: Mission): Mission {
+    const normalizedMission = normalizeMissionRecord(mission);
+    const persistedMission = this.repository.saveMission(normalizedMission);
+    if (!this.repository.getWorkItemById(persistedMission.workItemId)) {
+      this.repository.saveWorkItem(createMissionWorkItem(persistedMission, {
+        at: persistedMission.updatedAt,
+      }));
+    }
+    if (!this.repository.getChecklistSnapshotById(persistedMission.currentChecklistSnapshotId)) {
+      this.repository.saveChecklistSnapshot(createMissionChecklistSnapshot(persistedMission, {
+        at: persistedMission.updatedAt,
+      }));
+    }
+    if (!this.repository.getGenerationById(persistedMission.activeGenerationId)) {
+      this.repository.saveGeneration(createMissionGeneration(persistedMission, {
+        at: persistedMission.updatedAt,
+        trigger: persistedMission.activeGenerationIndex === 1 ? 'initial' : 'retry',
+      }));
+    } else {
+      this.syncMissionDomainRecords(persistedMission);
+    }
+    return persistedMission;
+  }
+
+  private syncMissionDomainRecords(mission: Mission): void {
+    const normalizedMission = normalizeMissionRecord(mission);
+    const existingWorkItem = this.repository.getWorkItemById(normalizedMission.workItemId);
+    const nextWorkItem = createMissionWorkItem(normalizedMission, {
+      at: normalizedMission.updatedAt,
+    });
+    if (!existingWorkItem || JSON.stringify(existingWorkItem) !== JSON.stringify(nextWorkItem)) {
+      this.repository.saveWorkItem(nextWorkItem);
+    }
+
+    const existingGeneration = this.repository.getGenerationById(normalizedMission.activeGenerationId);
+    const nextGeneration = createMissionGeneration(normalizedMission, {
+      at: normalizedMission.updatedAt,
+      id: normalizedMission.activeGenerationId,
+      index: normalizedMission.activeGenerationIndex,
+      checklistSnapshotId: normalizedMission.currentChecklistSnapshotId,
+      trigger: normalizedMission.activeGenerationIndex === 1 ? 'initial' : 'retry',
+    });
+    if (!existingGeneration || JSON.stringify(existingGeneration) !== JSON.stringify(nextGeneration)) {
+      this.repository.saveGeneration(nextGeneration);
+    }
   }
 }
 

@@ -7969,7 +7969,8 @@ test('/agent list, show, result, stop, and retry prefer Mission Control runtime 
 
     const retriedJob = runtime.services.agentJobs.getById(job.id);
     assert.equal((retriedJob?.missionRuntimeState?.mission as Record<string, unknown> | null)?.status, 'queued');
-    assert.equal(retriedJob?.missionRuntimeState?.attempts.length ?? -1, 0);
+    assert.equal(retriedJob?.missionRuntimeState?.attempts.length ?? -1, 1);
+    assert.equal((retriedJob?.missionRuntimeState?.mission as Record<string, unknown> | null)?.activeGenerationIndex, 2);
 
     const showRetried = await runtime.services.bridgeCoordinator.handleInboundEvent({
       platform: 'weixin',

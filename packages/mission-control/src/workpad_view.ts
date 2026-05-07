@@ -23,7 +23,14 @@ export interface CreateMissionWorkpadStatusViewInput {
 export function createMissionWorkpadStatusView(
   input: CreateMissionWorkpadStatusViewInput,
 ): MissionWorkpadStatusView {
-  const attempts = [...(input.attempts ?? [])].sort((left, right) => left.index - right.index);
+  const attempts = [...(input.attempts ?? [])].sort((left, right) => {
+    const leftGeneration = left.generationIndex ?? 0;
+    const rightGeneration = right.generationIndex ?? 0;
+    if (leftGeneration !== rightGeneration) {
+      return leftGeneration - rightGeneration;
+    }
+    return left.index - right.index;
+  });
   const workflowSourceLabel = input.workflow?.source.label
     ?? (input.mission.workflowPath
       ? `configured workflow (${input.mission.workflowPath})`
@@ -39,7 +46,10 @@ export function createMissionWorkpadStatusView(
     latestVerifierSummary: input.mission.workpad.latestVerifierSummary,
     finalResultSummary: input.mission.workpad.finalResultSummary,
     attemptHistory: attempts.map((attempt) => {
-      const parts = [`#${attempt.index} ${attempt.status}`];
+      const prefix = attempt.generationIndex && attempt.generationIndex > 1
+        ? `g${attempt.generationIndex}/#${attempt.index}`
+        : `#${attempt.index}`;
+      const parts = [`${prefix} ${attempt.status}`];
       if (attempt.verifierVerdict) {
         parts.push(`verdict=${attempt.verifierVerdict}`);
       }

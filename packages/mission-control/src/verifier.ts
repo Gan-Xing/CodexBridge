@@ -224,12 +224,20 @@ export function createMissionRepairPrompt(input: CreateMissionRepairPromptInput)
 }
 
 export function resolveMissionVerifierBudget(input: {
-  mission: Pick<Mission, 'maxAttempts' | 'maxTurns'>;
+  mission: Pick<Mission, 'maxAttempts' | 'maxTurns' | 'loopPolicy'>;
   workflow: Pick<LoadedMissionWorkflow, 'policy'>;
 }): MissionVerifierBudget {
   return {
-    maxAttempts: chooseSmallestPositiveInteger(input.mission.maxAttempts, input.workflow.policy.maxAttempts),
-    maxTurns: chooseSmallestPositiveInteger(input.mission.maxTurns, input.workflow.policy.maxTurns),
+    maxAttempts: chooseSmallestPositiveInteger(
+      input.mission.loopPolicy.maxAttempts,
+      input.mission.maxAttempts,
+      input.workflow.policy.maxAttempts,
+    ),
+    maxTurns: chooseSmallestPositiveInteger(
+      input.mission.loopPolicy.maxTurns,
+      input.mission.maxTurns,
+      input.workflow.policy.maxTurns,
+    ),
     maxRuntimeMs: input.workflow.policy.maxRuntimeMs,
     maxArtifactCount: input.workflow.policy.maxArtifactCount,
     maxArtifactBytes: input.workflow.policy.maxArtifactBytes,
@@ -288,14 +296,12 @@ function buildDefaultMissionVerifierSummary(
   return 'Mission verification failed.';
 }
 
-function chooseSmallestPositiveInteger(left: number | null, right: number | null): number | null {
-  if (left === null) {
-    return right;
+function chooseSmallestPositiveInteger(...values: Array<number | null | undefined>): number | null {
+  const normalized = values.filter((value): value is number => typeof value === 'number' && value > 0);
+  if (normalized.length === 0) {
+    return null;
   }
-  if (right === null) {
-    return left;
-  }
-  return Math.min(left, right);
+  return Math.min(...normalized);
 }
 
 function normalizeText(value: string | null | undefined): string | null {
