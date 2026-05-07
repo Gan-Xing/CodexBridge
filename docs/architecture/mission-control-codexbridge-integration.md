@@ -200,6 +200,15 @@ Main remaining integration gap:
   - CodexBridge `/agent show` now renders those package-backed loop fields
     directly from mission detail state, so the first host can inspect runtime
     progress without loading `WORKFLOW.md` or inspecting `loop.sh` output
+- Phase 9n now adds the first host-side paused-state continuation flow on top
+  of those package-backed detail views:
+  - CodexBridge `/agent show` now surfaces the latest required user action plus
+    an explicit `/agent confirm` continuation hint for paused
+    `waiting_user` / `needs_human` / `handoff` / `blocked` missions
+  - `/agent confirm` now routes those paused missions through package-owned
+    `resumeMission`, preserving the active mission generation instead of
+    forcing users onto `/agent retry` or raw shell-log inspection for simple
+    continuation
 - `/agent` `list/show/stop/retry` now consume that package API through an
   authoritative mission repository plus `AgentJob` projection instead of
   rebuilding runtime truth directly from bridge compatibility fields
@@ -215,8 +224,8 @@ Main remaining integration gap:
   beyond the current manual create path, append-oriented pristine pre-attempt
   sync path, and first local todo adapter; continuing to shrink `AgentJob`
   compatibility caches; and finishing the first-host product flow around:
-  - host-side resolution for `PlanChangeRequest`, `waiting_user`, and
-    `needs_human`
+  - host-side resolution for `PlanChangeRequest` plus richer paused-state
+    approval/input cases beyond the new simple resume flow
   - checklist-backed loop continuation/resolution UX that does not depend on
     raw shell logs or external `loop.sh` as the primary operator surface
 

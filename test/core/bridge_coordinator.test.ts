@@ -8029,8 +8029,30 @@ test('/agent list, show, result, stop, and retry prefer Mission Control runtime 
     assert.match(showWaitingText, /总体完成：0%/);
     assert.match(showWaitingText, /当前清单项：/);
     assert.match(showWaitingText, /下一步：等待用户提供发布时间窗口后再继续。/);
+    assert.match(showWaitingText, /需补充信息：请确认发布时间窗口。/);
+    assert.match(showWaitingText, /满足继续条件后：\/agent confirm 1/);
     assert.match(showWaitingText, /阻塞：等待用户确认。|阻塞：发布窗口尚未确认。/);
     assert.match(showWaitingText, /验证：等待用户确认。/);
+
+    const resumed = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-mission-state-1',
+      text: '/agent confirm 1',
+    });
+    assert.match(resumed.messages.map((message) => message.text).join('\n'), /Agent 任务已确认继续，现已重新排队/);
+    assert.equal(resumed.meta?.systemAction?.kind, 'run_agent_sweep');
+
+    const resumedJob = runtime.services.agentJobs.getById(job.id);
+    assert.equal((resumedJob?.missionRuntimeState?.mission as Record<string, unknown> | null)?.status, 'queued');
+    assert.equal((resumedJob?.missionRuntimeState?.mission as Record<string, unknown> | null)?.activeGenerationIndex, 1);
+    assert.equal(resumedJob?.missionRuntimeState?.attempts.length ?? -1, 1);
+
+    runtime.services.agentJobs.updateJob(job.id, {
+      status: 'completed',
+      running: false,
+      stopRequested: false,
+      missionRuntimeState: structuredClone(waitingUserState),
+    });
 
     const stopped = await runtime.services.bridgeCoordinator.handleInboundEvent({
       platform: 'weixin',

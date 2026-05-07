@@ -287,6 +287,23 @@ export class AgentJobService {
     return this.requireById(id);
   }
 
+  resumeJob(id: string, reason = 'Agent mission queued to continue after host confirmation.'): AgentJob {
+    this.requireById(id);
+    this.ensureMissionRecord(id);
+    this.createMissionControlApi().commands.resumeMission({
+      meta: this.createMissionControlMeta(`agent-resume:${id}`),
+      input: {
+        missionId: id,
+        reason,
+        actor: {
+          actorId: 'agent-job-service',
+          actorType: 'host',
+        },
+      },
+    });
+    return this.requireById(id);
+  }
+
   retryJob(id: string): AgentJob {
     const current = this.requireById(id);
     this.ensureMissionRecord(id);
@@ -298,18 +315,7 @@ export class AgentJobService {
       },
     }).data;
     if (detail?.mission && shouldMissionRetryReuseAccumulatedContext(detail.mission)) {
-      api.commands.resumeMission({
-        meta: this.createMissionControlMeta(`agent-resume:${id}`),
-        input: {
-          missionId: id,
-          reason: 'Agent mission queued to continue after human input.',
-          actor: {
-            actorId: 'agent-job-service',
-            actorType: 'host',
-          },
-        },
-      });
-      return this.requireById(id);
+      return this.resumeJob(id, 'Agent mission queued to continue after human input.');
     }
     api.commands.retryMission({
       meta: this.createMissionControlMeta(`agent-retry:${id}`),

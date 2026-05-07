@@ -6154,6 +6154,9 @@ export class BridgeCoordinator {
         value: loopSnapshot.nextStep,
       }));
     }
+    if (isAgentMissionPausedStatus(detail.mission.status)) {
+      lines.push(...this.buildAgentPausedStateLines(detail, resolved.index ?? job.id));
+    }
     if (missionStatusView.summary && missionStatusView.summary !== loopSnapshot.currentProgress) {
       lines.push(this.t('coordinator.agent.workpadSummary', { value: missionStatusView.summary }));
     }
@@ -6912,7 +6915,7 @@ export class BridgeCoordinator {
         };
       }
       const detail = this.agentJobs.getMissionDetail(resolved.job.id);
-      if (!detail || !isAgentMissionAwaitingStartStatus(detail.mission.status)) {
+      if (!detail || !isAgentMissionConfirmableStatus(detail.mission.status)) {
         return {
           status: 'none_pending',
         };
@@ -6932,7 +6935,7 @@ export class BridgeCoordinator {
         job: this.agentJobs.getById(summary.mission.id),
       }))
       .filter((candidate): candidate is { summary: any; index: number; job: AgentJob } =>
-        Boolean(candidate.job) && isAgentMissionAwaitingStartStatus(candidate.summary.mission.status))
+        Boolean(candidate.job) && isAgentMissionConfirmableStatus(candidate.summary.mission.status))
       .map((candidate) => ({
         job: candidate.job,
         index: candidate.index,
@@ -6973,6 +6976,9 @@ export class BridgeCoordinator {
       updated = this.agentJobs.startJob(job.id, {
         confirmPrompt: true,
       });
+    } else if (isAgentMissionPausedStatus(detail.mission.status)) {
+      updated = this.agentJobs.resumeJob(job.id);
+      return this.renderAgentMissionResumeResponse(event, updated, index);
     } else {
       return messageResponse([
         this.t('coordinator.agent.noStartConfirmation'),
@@ -7023,6 +7029,30 @@ export class BridgeCoordinator {
     return messageResponse(lines, this.buildScopedSessionMeta(event));
   }
 
+  renderAgentMissionResumeResponse(event, job: AgentJob, index: number) {
+    const detail = this.agentJobs.getMissionDetail(job.id);
+    if (!detail) {
+      return messageResponse([
+        this.t('coordinator.agent.notFound', { value: String(index) }),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const response = messageResponse([
+      this.t('coordinator.agent.resumeQueued'),
+      this.t('coordinator.agent.title', { value: detail.mission.title }),
+      this.t('coordinator.agent.status', {
+        value: formatAgentStatusLabel(detail.mission.status, false, this.currentI18n),
+      }),
+      this.t('coordinator.agent.showHint', { index }),
+    ], this.buildScopedSessionMeta(event));
+    response.meta = {
+      ...(response.meta ?? {}),
+      systemAction: {
+        kind: 'run_agent_sweep',
+      },
+    };
+    return response;
+  }
+
   buildAgentStartGateLines(detail, index) {
     const commandToken = String(index ?? detail.mission.id);
     if (detail.mission.status === 'awaiting_checklist_confirm') {
@@ -7049,6 +7079,21 @@ export class BridgeCoordinator {
       ];
     }
     return [];
+  }
+
+  buildAgentPausedStateLines(detail, index) {
+    if (!isAgentMissionPausedStatus(detail.mission.status)) {
+      return [];
+    }
+    const commandToken = String(index ?? detail.mission.id);
+    const lines = [];
+    if (detail.latestCycleResult?.needUserAction) {
+      lines.push(this.t('coordinator.agent.userActionRequired', {
+        value: detail.latestCycleResult.needUserAction,
+      }));
+    }
+    lines.push(this.t('coordinator.agent.resumeJobHint', { index: commandToken }));
+    return lines;
   }
 
   resolveAgentJobForScope(event, token) {
@@ -13592,6 +13637,17 @@ function isActiveMissionJobStatus(status: string): boolean {
 function isAgentMissionAwaitingStartStatus(status: string): boolean {
   return status === 'awaiting_checklist_confirm'
     || status === 'awaiting_prompt_confirm';
+}
+
+function isAgentMissionPausedStatus(status: string): boolean {
+  return status === 'waiting_user'
+    || status === 'needs_human'
+    || status === 'handoff'
+    || status === 'blocked';
+}
+
+function isAgentMissionConfirmableStatus(status: string): boolean {
+  return isAgentMissionAwaitingStartStatus(status) || isAgentMissionPausedStatus(status);
 }
 
 function formatAgentStatusLabel(status: string, running: boolean, i18n: Translator): string {

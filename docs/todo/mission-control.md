@@ -644,7 +644,15 @@ carry a normalized `loopSnapshot`, the package exports
 inspect current cycle, stage, checklist item, overall completion, next step,
 blocker, and verifier summary without depending on raw shell log output.
 
-Phase 9m is the current validated baseline, but several behaviors above are
+Phase 9n landed: CodexBridge now exposes a first package-backed paused-state
+continuation UX on top of those loop snapshots. `/agent show` now surfaces the
+latest required user action plus an explicit `/agent confirm` continue hint for
+`waiting_user` / `needs_human` / `handoff` / `blocked` missions, and
+`/agent confirm` now routes those paused missions through package-owned
+`resumeMission` instead of forcing users onto `/agent retry` or raw shell-log
+inspection for simple continuation.
+
+Phase 9n is the current validated baseline, but several behaviors above are
 still transitional:
 
 - `AgentJob` still carries bridge-side compatibility state that should keep
@@ -656,9 +664,10 @@ still transitional:
   first assistant-record-backed `local-todo` adapter, but broader source
   sync/reconciliation still belongs to the unfinished backlog
 - package/runtime support for `PlanChangeRequest`, `waiting_user`, and
-  `needs_human` exists, but the first host still needs a complete user-facing
-  resolution flow before Mission Control can be treated as a fully productized
-  looping experience
+  `needs_human` exists, and the first host now has a package-backed simple
+  paused-state continue path, but plan-change resolution plus richer paused
+  input/approval flows still need to be productized before Mission Control can
+  be treated as a complete looping experience
 - the formal Mission Control spec now expects explicit
   `awaiting_checklist_confirm`, `awaiting_prompt_confirm`,
   `scope_change_pending`, and `max_loops_reached` lifecycle semantics plus
@@ -812,6 +821,14 @@ generation identity, and append `mission.source_synced` events so CodexBridge
 queued `/agent rename` no longer rewrites away prior source-sync audit
 history.
 
+Phase 9n landed: CodexBridge now exposes a first package-backed paused-state
+continuation flow on top of those mission detail and loop snapshot views.
+`/agent show` surfaces the latest required user action plus an explicit
+`/agent confirm` continue hint for `waiting_user` / `needs_human` /
+`handoff` / `blocked` missions, and `/agent confirm` now routes those paused
+missions through package-owned `resumeMission` instead of requiring `/agent
+retry` or shell-log inspection for simple continuation.
+
 - [x] Add `WorkItemSourceAdapter` as the source abstraction
 - [x] Support manual host-created source-backed work items through the
   package-owned create command
@@ -847,9 +864,11 @@ history.
   - overall completion
   - next step
   - latest blocker / verifier summary
-- [ ] Add first-host resolution flows for `PlanChangeRequest`,
-  `waiting_user`, `needs_human`, and related paused states without requiring
-  raw shell/loop log inspection
+- [x] Add first-host resume/continue flows for `waiting_user`,
+  `needs_human`, `handoff`, and `blocked` missions without requiring raw
+  shell/loop log inspection
+- [ ] Add first-host resolution flows for `PlanChangeRequest` and richer
+  paused-state approval/input cases that need more than a simple resume signal
 - [ ] Let the first host start and continue a checklist-backed looping mission
   without external `loop.sh` as the primary user-facing control surface
 - [ ] Support future issue/board integrations
@@ -880,7 +899,7 @@ Completion criteria:
 - [x] A first host can require explicit `immutablePrompt` plus initial
   checklist confirmation before the first autonomous cycle starts
 - [ ] A first host can inspect package-owned cycle/stage/completion snapshots
-  and resolve plan changes or paused states without reading shell logs
+  and resolve plan changes or richer paused states without reading shell logs
 - [ ] A user can run a checklist-backed looping mission from the first host
   surface without external `loop.sh` as the primary UX
 
