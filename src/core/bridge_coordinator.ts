@@ -35,6 +35,7 @@ import {
   CodexInstructionsManager,
   type CodexInstructionsSnapshot,
 } from '../providers/codex/instructions_state.js';
+import { CodexNativeRuntime } from '../providers/codex/native_runtime.js';
 import type { WeiboHotSearchServiceLike } from '../services/weibo_hot_search.js';
 import type {
   AgentJob,
@@ -52,6 +53,7 @@ import type {
   AutomationSchedule,
   BridgeSession,
   DeveloperPromptContext,
+  DeveloperPromptMode,
   PlatformScopeRef,
   PluginAlias,
   SessionSettings,
@@ -214,6 +216,16 @@ type RetryableRequestSnapshot = {
   attachments: InboundAttachment[];
   cwd: string | null;
   storedAt: number;
+};
+
+type CodexIsolatedInheritedSettings = Pick<SessionSettings, 'model' | 'reasoningEffort' | 'serviceTier'>;
+
+type CodexIsolatedExecutionContext = {
+  providerProfile: ProviderProfile;
+  providerPlugin: ProviderPluginContract;
+  inheritedSettings: CodexIsolatedInheritedSettings | null;
+  locale: string | null;
+  cwd: string | null;
 };
 
 type AutomationDraftCandidate = {
@@ -837,6 +849,7 @@ export class BridgeCoordinator {
 
   codexAuthManager: CodexAuthManagerLike | null;
   codexInstructionsManager: CodexInstructionsManagerLike;
+  codexNativeRuntime: CodexNativeRuntime;
   now: any;
   threadBrowserStates: Map<any, any>;
   skillBrowserStates: Map<any, SkillBrowserState>;
@@ -868,6 +881,7 @@ export class BridgeCoordinator {
     restartBridge = null,
     codexAuthManager = null,
     codexInstructionsManager = null,
+    codexNativeRuntime = null,
     weiboHotSearch = null,
     now = () => Date.now(),
     locale = null,
@@ -886,6 +900,7 @@ export class BridgeCoordinator {
     this.weiboHotSearch = weiboHotSearch;
     this.codexAuthManager = codexAuthManager;
     this.codexInstructionsManager = codexInstructionsManager ?? new CodexInstructionsManager();
+    this.codexNativeRuntime = codexNativeRuntime ?? new CodexNativeRuntime({ now });
     this.now = now;
     this.threadBrowserStates = new Map();
     this.skillBrowserStates = new Map();
@@ -2168,87 +2183,34 @@ export class BridgeCoordinator {
     localDraft: AssistantRecordDraft,
     timezone: string | null,
   ): Promise<AssistantRecordDraft | null> {
-    const boundSession = this.bridgeSessions.resolveScopeSession(scopeRef);
-    const providerProfile = boundSession
-      ? this.requireProviderProfile(boundSession.providerProfileId)
-      : this.resolveScopeProviderProfile(scopeRef);
-    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
-    if (!providerPlugin || typeof providerPlugin.startThread !== 'function' || typeof providerPlugin.startTurn !== 'function') {
+    const runtimeContext = this.resolveCodexIsolatedExecutionContext(event, scopeRef);
+    if (!runtimeContext) {
       return null;
     }
-    const inheritedSettings = boundSession
-      ? this.bridgeSessions.getSessionSettings(boundSession.id)
-      : null;
-    const locale = inheritedSettings?.locale ?? this.resolveScopeLocale(scopeRef, event);
-    const cwd = normalizeCwd(boundSession?.cwd) ?? this.resolveEventCwd(event) ?? null;
-    const thread = await providerPlugin.startThread({
-      providerProfile,
-      cwd,
+    return this.invokeCommandSkillTurn({
+      event,
+      runtimeContext,
       title: 'Assistant Record Command Skill',
-      ephemeral: true,
       metadata: {
-        sourcePlatform: event.platform,
         source: 'assistant-record-command-skill',
         command: assistantCommandNameForType(forcedType),
+        subcommand: 'natural',
         operation: 'classify_new_record',
       },
+      buildPrompt: () => buildAssistantRecordCommandSkillPrompt({
+        event,
+        command: assistantCommandNameForType(forcedType),
+        subcommand: 'natural',
+        operation: 'classify_new_record',
+        userInput: rawInput,
+        forcedType,
+        locale: runtimeContext.locale,
+        now: this.now(),
+        timezone,
+        localDraft,
+      }),
+      parseResult: (outputText) => parseAssistantRecordDraftCandidate(outputText, rawInput, forcedType, localDraft, 'codex'),
     });
-    const parserSession = {
-      id: crypto.randomUUID(),
-      providerProfileId: providerProfile.id,
-      codexThreadId: thread.threadId,
-      cwd: thread.cwd ?? cwd,
-      title: thread.title ?? 'Assistant Record Command Skill',
-      createdAt: this.now(),
-      updatedAt: this.now(),
-    };
-    const prompt = buildAssistantRecordCommandSkillPrompt({
-      event,
-      command: assistantCommandNameForType(forcedType),
-      subcommand: 'natural',
-      operation: 'classify_new_record',
-      userInput: rawInput,
-      forcedType,
-      locale,
-      now: this.now(),
-      timezone,
-      localDraft,
-    });
-    const parserEvent = withDeveloperPromptContext({
-      ...event,
-      text: prompt,
-      cwd: parserSession.cwd ?? null,
-      locale,
-      attachments: [],
-    }, {
-      mode: 'command-skill-parser',
-      title: 'Assistant Record Command Skill',
-      source: 'assistant-record-command-skill',
-      command: assistantCommandNameForType(forcedType),
-      subcommand: 'natural',
-      operation: 'classify_new_record',
-    });
-    const result = await providerPlugin.startTurn({
-      providerProfile,
-      bridgeSession: parserSession,
-      sessionSettings: {
-        bridgeSessionId: parserSession.id,
-        model: inheritedSettings?.model ?? null,
-        reasoningEffort: inheritedSettings?.reasoningEffort ?? null,
-        serviceTier: inheritedSettings?.serviceTier ?? null,
-        collaborationMode: null,
-        personality: null,
-        accessPreset: 'read-only',
-        approvalPolicy: 'never',
-        sandboxMode: 'read-only',
-        locale,
-        metadata: {},
-        updatedAt: this.now(),
-      },
-      event: parserEvent,
-      inputText: prompt,
-    });
-    return parseAssistantRecordDraftCandidate(result.outputText, rawInput, forcedType, localDraft, 'codex');
   }
 
   async handleAssistantShowCommand(event, args, typeFilter: AssistantRecordType | null) {
@@ -2463,94 +2425,35 @@ export class BridgeCoordinator {
     records: AssistantRecord[],
     forcedType: AssistantRecordType | null,
   ): Promise<AssistantRecordRouteDecision | null> {
-    const boundSession = this.bridgeSessions.resolveScopeSession(scopeRef);
-    const providerProfile = boundSession
-      ? this.requireProviderProfile(boundSession.providerProfileId)
-      : this.resolveScopeProviderProfile(scopeRef);
-    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
-    if (!providerPlugin || typeof providerPlugin.startThread !== 'function' || typeof providerPlugin.startTurn !== 'function') {
+    const runtimeContext = this.resolveCodexIsolatedExecutionContext(event, scopeRef);
+    if (!runtimeContext) {
       return null;
     }
-    const inheritedSettings = boundSession
-      ? this.bridgeSessions.getSessionSettings(boundSession.id)
-      : null;
-    const locale = inheritedSettings?.locale ?? this.resolveScopeLocale(scopeRef, event);
-    const cwd = normalizeCwd(boundSession?.cwd) ?? this.resolveEventCwd(event) ?? null;
     const commandName = assistantCommandNameForType(forcedType);
-    const thread = await providerPlugin.startThread({
-      providerProfile,
-      cwd,
+    return this.invokeCommandSkillTurn({
+      event,
+      runtimeContext,
       title: 'Assistant Record Command Skill',
-      ephemeral: true,
       metadata: {
-        sourcePlatform: event.platform,
         source: 'assistant-record-command-skill',
         command: commandName,
+        subcommand: 'natural',
         operation: 'route_existing_record',
       },
+      buildPrompt: () => buildAssistantRecordCommandSkillPrompt({
+        event,
+        command: commandName,
+        subcommand: 'natural',
+        operation: 'route_existing_record',
+        userInput: rawInput,
+        forcedType,
+        locale: runtimeContext.locale,
+        now: this.now(),
+        timezone: extractEventTimezone(event),
+        records,
+      }),
+      parseResult: (outputText) => parseAssistantRecordRouteDecision(outputText, records),
     });
-    const routerSession = {
-      id: crypto.randomUUID(),
-      providerProfileId: providerProfile.id,
-      codexThreadId: thread.threadId,
-      cwd: thread.cwd ?? cwd,
-      title: thread.title ?? 'Assistant Record Command Skill',
-      createdAt: this.now(),
-      updatedAt: this.now(),
-    };
-    const prompt = buildAssistantRecordCommandSkillPrompt({
-      event,
-      command: commandName,
-      subcommand: 'natural',
-      operation: 'route_existing_record',
-      userInput: rawInput,
-      forcedType,
-      locale,
-      now: this.now(),
-      timezone: extractEventTimezone(event),
-      records,
-    });
-    const routerEvent = withDeveloperPromptContext({
-      ...event,
-      text: prompt,
-      cwd: routerSession.cwd ?? null,
-      locale,
-      attachments: [],
-    }, {
-      mode: 'command-skill-parser',
-      title: 'Assistant Record Command Skill',
-      source: 'assistant-record-command-skill',
-      command: commandName,
-      subcommand: 'natural',
-      operation: 'route_existing_record',
-    });
-    const result = await providerPlugin.startTurn({
-      providerProfile,
-      bridgeSession: routerSession,
-      sessionSettings: {
-        bridgeSessionId: routerSession.id,
-        model: inheritedSettings?.model ?? null,
-        reasoningEffort: inheritedSettings?.reasoningEffort ?? null,
-        serviceTier: inheritedSettings?.serviceTier ?? null,
-        collaborationMode: null,
-        personality: null,
-        accessPreset: 'read-only',
-        approvalPolicy: 'never',
-        sandboxMode: 'read-only',
-        locale,
-        metadata: {},
-        updatedAt: this.now(),
-      },
-      event: {
-        ...event,
-        text: prompt,
-        cwd: routerSession.cwd ?? null,
-        locale,
-        attachments: [],
-      },
-      inputText: prompt,
-    });
-    return parseAssistantRecordRouteDecision(result.outputText, records);
   }
 
   async previewAssistantRecordAction(
@@ -2657,89 +2560,36 @@ export class BridgeCoordinator {
     instructions: string[],
     forcedType: AssistantRecordType | null = null,
   ): Promise<{ record: AssistantRecord; normalizedBy: 'codex'; changeSummary: string | null } | null> {
-    const boundSession = this.bridgeSessions.resolveScopeSession(scopeRef);
-    const providerProfile = boundSession
-      ? this.requireProviderProfile(boundSession.providerProfileId)
-      : this.resolveScopeProviderProfile(scopeRef);
-    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
-    if (!providerPlugin || typeof providerPlugin.startThread !== 'function' || typeof providerPlugin.startTurn !== 'function') {
+    const runtimeContext = this.resolveCodexIsolatedExecutionContext(event, scopeRef);
+    if (!runtimeContext) {
       return null;
     }
-    const inheritedSettings = boundSession
-      ? this.bridgeSessions.getSessionSettings(boundSession.id)
-      : null;
-    const locale = inheritedSettings?.locale ?? this.resolveScopeLocale(scopeRef, event);
-    const cwd = normalizeCwd(boundSession?.cwd) ?? this.resolveEventCwd(event) ?? null;
-    const thread = await providerPlugin.startThread({
-      providerProfile,
-      cwd,
+    const candidate = await this.invokeCommandSkillTurn({
+      event,
+      runtimeContext,
       title: 'Assistant Record Command Skill',
-      ephemeral: true,
       metadata: {
-        sourcePlatform: event.platform,
         source: 'assistant-record-command-skill',
         command: assistantCommandNameForType(forcedType),
+        subcommand: 'edit',
         operation: 'rewrite_record',
       },
+      buildPrompt: () => buildAssistantRecordCommandSkillPrompt({
+        event,
+        command: assistantCommandNameForType(forcedType),
+        subcommand: 'edit',
+        operation: 'rewrite_record',
+        userInput: instructions.join('\n'),
+        forcedType,
+        locale: runtimeContext.locale,
+        now: this.now(),
+        timezone: extractEventTimezone(event) ?? record.timezone,
+        pendingRecord: record.status === 'pending' ? record : null,
+        targetRecord: record,
+        instructions,
+      }),
+      parseResult: (outputText) => parseAssistantRecordRewriteCandidate(outputText, record, forcedType),
     });
-    const parserSession = {
-      id: crypto.randomUUID(),
-      providerProfileId: providerProfile.id,
-      codexThreadId: thread.threadId,
-      cwd: thread.cwd ?? cwd,
-      title: thread.title ?? 'Assistant Record Command Skill',
-      createdAt: this.now(),
-      updatedAt: this.now(),
-    };
-    const prompt = buildAssistantRecordCommandSkillPrompt({
-      event,
-      command: assistantCommandNameForType(forcedType),
-      subcommand: 'edit',
-      operation: 'rewrite_record',
-      userInput: instructions.join('\n'),
-      forcedType,
-      locale,
-      now: this.now(),
-      timezone: extractEventTimezone(event) ?? record.timezone,
-      pendingRecord: record.status === 'pending' ? record : null,
-      targetRecord: record,
-      instructions,
-    });
-    const parserEvent = withDeveloperPromptContext({
-      ...event,
-      text: prompt,
-      cwd: parserSession.cwd ?? null,
-      locale,
-      attachments: [],
-    }, {
-      mode: 'command-skill-parser',
-      title: 'Assistant Record Command Skill',
-      source: 'assistant-record-command-skill',
-      command: assistantCommandNameForType(forcedType),
-      subcommand: 'edit',
-      operation: 'rewrite_record',
-    });
-    const result = await providerPlugin.startTurn({
-      providerProfile,
-      bridgeSession: parserSession,
-      sessionSettings: {
-        bridgeSessionId: parserSession.id,
-        model: inheritedSettings?.model ?? null,
-        reasoningEffort: inheritedSettings?.reasoningEffort ?? null,
-        serviceTier: inheritedSettings?.serviceTier ?? null,
-        collaborationMode: null,
-        personality: null,
-        accessPreset: 'read-only',
-        approvalPolicy: 'never',
-        sandboxMode: 'read-only',
-        locale,
-        metadata: {},
-        updatedAt: this.now(),
-      },
-      event: parserEvent,
-      inputText: prompt,
-    });
-    const candidate = parseAssistantRecordRewriteCandidate(result.outputText, record, forcedType);
     if (!candidate) {
       return null;
     }
@@ -3972,23 +3822,13 @@ export class BridgeCoordinator {
       inventory: ThreadCommandInventoryItem[];
     },
   ): Promise<ThreadCommandSkillResult | null> {
-    const boundSession = this.bridgeSessions.resolveScopeSession(scopeRef);
-    const providerProfile = boundSession
-      ? this.requireProviderProfile(boundSession.providerProfileId)
-      : this.resolveScopeProviderProfile(scopeRef);
-    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
-    if (!providerPlugin || typeof providerPlugin.startThread !== 'function' || typeof providerPlugin.startTurn !== 'function') {
+    const runtimeContext = this.resolveCodexIsolatedExecutionContext(event, scopeRef);
+    if (!runtimeContext) {
       return null;
     }
-    const inheritedSettings = boundSession
-      ? this.bridgeSessions.getSessionSettings(boundSession.id)
-      : null;
-    const locale = inheritedSettings?.locale ?? this.resolveScopeLocale(scopeRef, event);
-    const cwd = normalizeCwd(boundSession?.cwd) ?? this.resolveEventCwd(event) ?? null;
     return this.invokeCommandSkillTurn<ThreadCommandSkillResult>({
       event,
-      providerProfile,
-      providerPlugin,
+      runtimeContext,
       title: 'Thread Command Skill',
       metadata: {
         source: 'thread-command-skill',
@@ -3996,17 +3836,12 @@ export class BridgeCoordinator {
         subcommand: subcommand ?? 'search',
         operation: subcommand ?? 'search',
       },
-      cwd,
-      locale,
-      model: inheritedSettings?.model ?? null,
-      reasoningEffort: inheritedSettings?.reasoningEffort ?? null,
-      serviceTier: inheritedSettings?.serviceTier ?? null,
       buildPrompt: (sessionCwd) => buildThreadCommandSkillPrompt({
         event,
         command,
         subcommand,
         userInput,
-        locale,
+        locale: runtimeContext.locale,
         now: this.now(),
         cwd: sessionCwd,
         inventory,
@@ -4681,39 +4516,24 @@ export class BridgeCoordinator {
       pendingDraft?: PendingInstructionsOperation | null;
     },
   ): Promise<InstructionsCommandSkillResult | null> {
-    const boundSession = this.bridgeSessions.resolveScopeSession(scopeRef);
-    const providerProfile = boundSession
-      ? this.requireProviderProfile(boundSession.providerProfileId)
-      : this.resolveScopeProviderProfile(scopeRef);
-    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
-    if (!providerPlugin || typeof providerPlugin.startThread !== 'function' || typeof providerPlugin.startTurn !== 'function') {
+    const runtimeContext = this.resolveCodexIsolatedExecutionContext(event, scopeRef);
+    if (!runtimeContext) {
       return null;
     }
-    const inheritedSettings = boundSession
-      ? this.bridgeSessions.getSessionSettings(boundSession.id)
-      : null;
-    const locale = inheritedSettings?.locale ?? this.resolveScopeLocale(scopeRef, event);
-    const cwd = normalizeCwd(boundSession?.cwd) ?? this.resolveEventCwd(event) ?? null;
     return this.invokeCommandSkillTurn<InstructionsCommandSkillResult>({
       event,
-      providerProfile,
-      providerPlugin,
+      runtimeContext,
       title: 'Instructions Command Skill',
       metadata: {
         source: 'instructions-command-skill',
         command: 'instructions',
         subcommand,
       },
-      cwd,
-      locale,
-      model: inheritedSettings?.model ?? null,
-      reasoningEffort: inheritedSettings?.reasoningEffort ?? null,
-      serviceTier: inheritedSettings?.serviceTier ?? null,
       buildPrompt: (sessionCwd) => buildInstructionsCommandSkillPrompt({
         event,
         subcommand,
         userInput,
-        locale,
+        locale: runtimeContext.locale,
         now: this.now(),
         cwd: sessionCwd,
         currentInstructions,
@@ -5613,97 +5433,62 @@ export class BridgeCoordinator {
 
   private async invokeCommandSkillTurn<T>({
     event,
-    providerProfile,
-    providerPlugin,
+    runtimeContext,
+    mode = 'command-skill-parser',
     title,
     metadata,
-    cwd,
-    locale,
-    model,
-    reasoningEffort,
-    serviceTier,
     buildPrompt,
     parseResult,
   }: {
     event: InboundTextEvent;
-    providerProfile: ProviderProfile;
-    providerPlugin: ProviderPluginContract;
+    runtimeContext: CodexIsolatedExecutionContext;
+    mode?: DeveloperPromptMode;
     title: string;
     metadata: Record<string, string>;
-    cwd: string | null;
-    locale: string | null;
-    model: string | null;
-    reasoningEffort: string | null;
-    serviceTier: string | null;
     buildPrompt: (sessionCwd: string | null) => string;
     parseResult: (outputText: unknown) => T | null;
   }): Promise<T | null> {
-    const thread = await providerPlugin.startThread({
-      providerProfile,
-      cwd,
+    const execution = await this.codexNativeRuntime.runIsolatedTurn({
+      providerProfile: runtimeContext.providerProfile,
+      providerPlugin: runtimeContext.providerPlugin,
+      cwd: runtimeContext.cwd,
       title,
-      ephemeral: true,
       metadata: {
         sourcePlatform: event.platform,
         ...metadata,
       },
-    });
-    const parserSession = {
-      id: crypto.randomUUID(),
-      providerProfileId: providerProfile.id,
-      codexThreadId: thread.threadId,
-      cwd: thread.cwd ?? cwd,
-      title: thread.title ?? title,
-      createdAt: this.now(),
-      updatedAt: this.now(),
-    };
-    const prompt = buildPrompt(parserSession.cwd ?? null);
-    const parserEvent = withDeveloperPromptContext({
-      ...event,
-      text: prompt,
-      cwd: parserSession.cwd ?? null,
-      locale,
-      attachments: [],
-    }, {
-      mode: 'command-skill-parser',
-      title,
-      source: metadata.source ?? null,
-      command: metadata.command ?? null,
-      subcommand: metadata.subcommand ?? null,
-      operation: metadata.operation ?? null,
-    });
-    const result = await providerPlugin.startTurn({
-      providerProfile,
-      bridgeSession: parserSession,
-      sessionSettings: {
-        bridgeSessionId: parserSession.id,
-        model,
-        reasoningEffort,
-        serviceTier,
-        collaborationMode: null,
-        personality: null,
-        accessPreset: 'read-only',
-        approvalPolicy: 'never',
-        sandboxMode: 'read-only',
-        locale,
-        metadata: {},
-        updatedAt: this.now(),
+      model: runtimeContext.inheritedSettings?.model ?? null,
+      reasoningEffort: runtimeContext.inheritedSettings?.reasoningEffort ?? null,
+      serviceTier: runtimeContext.inheritedSettings?.serviceTier ?? null,
+      prepareTurn: (session) => {
+        const prompt = buildPrompt(session.cwd ?? null);
+        return {
+          inputText: prompt,
+          locale: runtimeContext.locale,
+          event: withDeveloperPromptContext({
+            ...event,
+            text: prompt,
+            cwd: session.cwd ?? null,
+            locale: runtimeContext.locale,
+            attachments: [],
+          }, {
+            mode,
+            title,
+            source: metadata.source ?? null,
+            command: metadata.command ?? null,
+            subcommand: metadata.subcommand ?? null,
+            operation: metadata.operation ?? null,
+          }),
+        };
       },
-      event: parserEvent,
-      inputText: prompt,
     });
-    return parseResult(result.outputText);
+    return parseResult(execution.result.outputText);
   }
 
-  async normalizeReviewCommandWithCodex(
+  private resolveCodexIsolatedExecutionContext(
     event: InboundTextEvent,
     scopeRef: PlatformScopeRef,
-    {
-      userInput,
-    }: {
-      userInput: string;
-    },
-  ): Promise<ReviewCommandSkillResult | null> {
+  ): CodexIsolatedExecutionContext | null {
     const boundSession = this.bridgeSessions.resolveScopeSession(scopeRef);
     const providerProfile = boundSession
       ? this.requireProviderProfile(boundSession.providerProfileId)
@@ -5715,27 +5500,41 @@ export class BridgeCoordinator {
     const inheritedSettings = boundSession
       ? this.bridgeSessions.getSessionSettings(boundSession.id)
       : null;
-    const locale = inheritedSettings?.locale ?? this.resolveScopeLocale(scopeRef, event);
-    const cwd = normalizeCwd(boundSession?.cwd) ?? this.resolveEventCwd(event) ?? null;
-    return this.invokeCommandSkillTurn<ReviewCommandSkillResult>({
-      event,
+    return {
       providerProfile,
       providerPlugin,
+      inheritedSettings,
+      locale: inheritedSettings?.locale ?? this.resolveScopeLocale(scopeRef, event),
+      cwd: normalizeCwd(boundSession?.cwd) ?? this.resolveEventCwd(event) ?? null,
+    };
+  }
+
+  async normalizeReviewCommandWithCodex(
+    event: InboundTextEvent,
+    scopeRef: PlatformScopeRef,
+    {
+      userInput,
+    }: {
+      userInput: string;
+    },
+  ): Promise<ReviewCommandSkillResult | null> {
+    const runtimeContext = this.resolveCodexIsolatedExecutionContext(event, scopeRef);
+    if (!runtimeContext) {
+      return null;
+    }
+    return this.invokeCommandSkillTurn<ReviewCommandSkillResult>({
+      event,
+      runtimeContext,
       title: 'Review Command Skill',
       metadata: {
         source: 'review-command-skill',
         command: 'review',
         subcommand: 'natural',
       },
-      cwd,
-      locale,
-      model: inheritedSettings?.model ?? null,
-      reasoningEffort: inheritedSettings?.reasoningEffort ?? null,
-      serviceTier: inheritedSettings?.serviceTier ?? null,
       buildPrompt: (sessionCwd) => buildReviewCommandSkillPrompt({
         event,
         userInput,
-        locale,
+        locale: runtimeContext.locale,
         now: this.now(),
         cwd: sessionCwd,
       }),
@@ -5831,60 +5630,40 @@ export class BridgeCoordinator {
     sourceText: string,
     locale: SupportedLocale,
   ): Promise<string | null> {
-    const thread = await providerPlugin.startThread({
+    const translated = await this.codexNativeRuntime.runIsolatedTurn({
       providerProfile,
+      providerPlugin,
       cwd,
       title: 'Review Result Localizer',
-      ephemeral: true,
       metadata: {
         sourcePlatform: event.platform,
         source: 'review-result-localizer',
         command: 'review',
       },
-    });
-    const localizerSession = {
-      id: crypto.randomUUID(),
-      providerProfileId: providerProfile.id,
-      codexThreadId: thread.threadId,
-      cwd: thread.cwd ?? cwd,
-      title: thread.title ?? 'Review Result Localizer',
-      createdAt: this.now(),
-      updatedAt: this.now(),
-    };
-    const prompt = buildReviewResultLocalizationPrompt(target, sourceText, locale);
-    const localizerEvent = withDeveloperPromptContext({
-      ...event,
-      text: prompt,
-      cwd: localizerSession.cwd ?? null,
-      locale,
-      attachments: [],
-    }, {
-      mode: 'review-result-localizer',
-      title: 'Review Result Localizer',
-      source: 'review-result-localizer',
-      command: 'review',
-    });
-    const translated = await providerPlugin.startTurn({
-      providerProfile,
-      bridgeSession: localizerSession,
-      sessionSettings: {
-        bridgeSessionId: localizerSession.id,
-        model: sessionSettings?.model ?? null,
-        reasoningEffort: sessionSettings?.reasoningEffort ?? null,
-        serviceTier: sessionSettings?.serviceTier ?? null,
-        collaborationMode: null,
-        personality: null,
-        accessPreset: 'read-only',
-        approvalPolicy: 'never',
-        sandboxMode: 'read-only',
-        locale,
-        metadata: {},
-        updatedAt: this.now(),
+      model: sessionSettings?.model ?? null,
+      reasoningEffort: sessionSettings?.reasoningEffort ?? null,
+      serviceTier: sessionSettings?.serviceTier ?? null,
+      prepareTurn: (localizerSession) => {
+        const prompt = buildReviewResultLocalizationPrompt(target, sourceText, locale);
+        return {
+          inputText: prompt,
+          locale,
+          event: withDeveloperPromptContext({
+            ...event,
+            text: prompt,
+            cwd: localizerSession.cwd ?? null,
+            locale,
+            attachments: [],
+          }, {
+            mode: 'review-result-localizer',
+            title: 'Review Result Localizer',
+            source: 'review-result-localizer',
+            command: 'review',
+          }),
+        };
       },
-      event: localizerEvent,
-      inputText: prompt,
     });
-    const outputText = compactWhitespace(translated?.outputText ?? translated?.previewText ?? '');
+    const outputText = compactWhitespace(translated.result?.outputText ?? translated.result?.previewText ?? '');
     return outputText || null;
   }
 
@@ -6925,19 +6704,24 @@ export class BridgeCoordinator {
     const cwd = normalizeCwd(pendingDraft?.cwd) ?? normalizeCwd(boundSession?.cwd) ?? this.resolveEventCwd(event) ?? null;
     return this.invokeCommandSkillTurn<AgentCommandSkillResult>({
       event,
-      providerProfile,
-      providerPlugin,
+      runtimeContext: {
+        providerProfile,
+        providerPlugin,
+        inheritedSettings: {
+          ...inheritedSettings,
+          model: pendingDraft?.initialSettings.model ?? inheritedSettings?.model ?? null,
+          reasoningEffort: pendingDraft?.initialSettings.reasoningEffort ?? inheritedSettings?.reasoningEffort ?? null,
+          serviceTier: pendingDraft?.initialSettings.serviceTier ?? inheritedSettings?.serviceTier ?? null,
+        },
+        locale,
+        cwd,
+      },
       title: 'Agent Command Skill',
       metadata: {
         source: 'agent-command-skill',
         command: 'agent',
         subcommand,
       },
-      cwd,
-      locale,
-      model: pendingDraft?.initialSettings.model ?? inheritedSettings?.model ?? null,
-      reasoningEffort: pendingDraft?.initialSettings.reasoningEffort ?? inheritedSettings?.reasoningEffort ?? null,
-      serviceTier: pendingDraft?.initialSettings.serviceTier ?? inheritedSettings?.serviceTier ?? null,
       buildPrompt: () => buildAgentCommandSkillPrompt({
         event,
         subcommand,
@@ -10016,82 +9800,30 @@ export class BridgeCoordinator {
       pendingDraft?: PendingAutomationDraft | null;
     },
   ): Promise<AutomationCommandSkillResult | null> {
-    const boundSession = this.bridgeSessions.resolveScopeSession(scopeRef);
-    const providerProfile = boundSession
-      ? this.requireProviderProfile(boundSession.providerProfileId)
-      : this.resolveScopeProviderProfile(scopeRef);
-    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
-    if (!providerPlugin || typeof providerPlugin.startThread !== 'function' || typeof providerPlugin.startTurn !== 'function') {
+    const runtimeContext = this.resolveCodexIsolatedExecutionContext(event, scopeRef);
+    if (!runtimeContext) {
       return null;
     }
-    const inheritedSettings = boundSession
-      ? this.bridgeSessions.getSessionSettings(boundSession.id)
-      : null;
-    const locale = inheritedSettings?.locale ?? this.resolveScopeLocale(scopeRef, event);
-    const cwd = normalizeCwd(boundSession?.cwd) ?? this.resolveEventCwd(event) ?? null;
-    const thread = await providerPlugin.startThread({
-      providerProfile,
-      cwd,
+    return this.invokeCommandSkillTurn({
+      event,
+      runtimeContext,
       title: 'Automation Command Skill',
-      ephemeral: true,
       metadata: {
-        sourcePlatform: event.platform,
         source: 'automation-command-skill',
         command: 'auto',
         subcommand,
       },
+      buildPrompt: () => buildAutomationCommandSkillPrompt({
+        event,
+        subcommand,
+        userInput,
+        locale: runtimeContext.locale,
+        now: this.now(),
+        pendingDraft,
+        jobs: this.automationJobs.listForScope(scopeRef),
+      }),
+      parseResult: parseAutomationCommandSkillResult,
     });
-    const parserSession = {
-      id: crypto.randomUUID(),
-      providerProfileId: providerProfile.id,
-      codexThreadId: thread.threadId,
-      cwd: thread.cwd ?? cwd,
-      title: thread.title ?? 'Automation Command Skill',
-      createdAt: this.now(),
-      updatedAt: this.now(),
-    };
-    const prompt = buildAutomationCommandSkillPrompt({
-      event,
-      subcommand,
-      userInput,
-      locale,
-      now: this.now(),
-      pendingDraft,
-      jobs: this.automationJobs.listForScope(scopeRef),
-    });
-    const parserEvent = withDeveloperPromptContext({
-      ...event,
-      text: prompt,
-      cwd: parserSession.cwd ?? null,
-      locale,
-      attachments: [],
-    }, {
-      mode: 'command-skill-parser',
-      title: 'Automation Command Skill',
-      source: 'automation-command-skill',
-      command: 'auto',
-      subcommand,
-    });
-    const result = await providerPlugin.startTurn({
-      providerProfile,
-      bridgeSession: parserSession,
-      sessionSettings: {
-        bridgeSessionId: parserSession.id,
-        model: inheritedSettings?.model ?? null,
-        reasoningEffort: inheritedSettings?.reasoningEffort ?? null,
-        serviceTier: inheritedSettings?.serviceTier ?? null,
-        personality: null,
-        accessPreset: 'read-only',
-        approvalPolicy: 'never',
-        sandboxMode: 'read-only',
-        locale,
-        metadata: {},
-        updatedAt: this.now(),
-      },
-      event: parserEvent,
-      inputText: prompt,
-    });
-    return parseAutomationCommandSkillResult(result.outputText);
   }
 
   async normalizeAutomationDraftFromNaturalLanguage(event, scopeRef: PlatformScopeRef, rawInput: string): Promise<PendingAutomationDraft | null> {
@@ -11227,62 +10959,42 @@ export class BridgeCoordinator {
   async verifyAgentResultWithCodex(job: AgentJob, result, session): Promise<AgentVerificationResult | null> {
     const providerProfile = this.requireProviderProfile(job.providerProfileId);
     const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
-    const thread = await providerPlugin.startThread({
+    if (!providerPlugin || typeof providerPlugin.startThread !== 'function' || typeof providerPlugin.startTurn !== 'function') {
+      return null;
+    }
+    const verifierResult = await this.codexNativeRuntime.runIsolatedTurn({
       providerProfile,
+      providerPlugin,
       cwd: job.cwd,
       title: 'Agent Verifier',
-      ephemeral: true,
       metadata: {
         sourcePlatform: job.platform,
         source: 'agent-verifier',
         agentJobId: job.id,
       },
-    });
-    const verifierSession = {
-      id: crypto.randomUUID(),
-      providerProfileId: providerProfile.id,
-      codexThreadId: thread.threadId,
-      cwd: thread.cwd ?? job.cwd,
-      title: thread.title ?? 'Agent Verifier',
-      createdAt: this.now(),
-      updatedAt: this.now(),
-    };
-    const prompt = buildAgentVerifierPrompt(job, result, this.currentI18n.locale);
-    const verifierEvent = withDeveloperPromptContext({
-      platform: job.platform,
-      externalScopeId: job.externalScopeId,
-      text: prompt,
-      cwd: session?.cwd ?? job.cwd,
-      locale: job.locale ?? this.currentI18n.locale,
-      attachments: [],
-    }, {
-      mode: 'agent-result-verifier',
-      title: 'Agent Verifier',
-      source: 'agent-verifier',
-      command: 'agent',
-      operation: 'verify_result',
-    });
-    const verifierResult = await providerPlugin.startTurn({
-      providerProfile,
-      bridgeSession: verifierSession,
-      sessionSettings: {
-        bridgeSessionId: verifierSession.id,
-        model: null,
-        reasoningEffort: null,
-        serviceTier: null,
-        collaborationMode: null,
-        personality: null,
-        accessPreset: 'read-only',
-        approvalPolicy: 'never',
-        sandboxMode: 'read-only',
-        locale: job.locale ?? this.currentI18n.locale,
-        metadata: {},
-        updatedAt: this.now(),
+      prepareTurn: () => {
+        const prompt = buildAgentVerifierPrompt(job, result, this.currentI18n.locale);
+        return {
+          inputText: prompt,
+          locale: job.locale ?? this.currentI18n.locale,
+          event: withDeveloperPromptContext({
+            platform: job.platform,
+            externalScopeId: job.externalScopeId,
+            text: prompt,
+            cwd: session?.cwd ?? job.cwd,
+            locale: job.locale ?? this.currentI18n.locale,
+            attachments: [],
+          }, {
+            mode: 'agent-result-verifier',
+            title: 'Agent Verifier',
+            source: 'agent-verifier',
+            command: 'agent',
+            operation: 'verify_result',
+          }),
+        };
       },
-      event: verifierEvent,
-      inputText: prompt,
     });
-    return parseAgentVerificationResult(verifierResult.outputText);
+    return parseAgentVerificationResult(verifierResult.result.outputText);
   }
 
   buildReboundSessionSettings(

@@ -61,6 +61,15 @@ Reason:
 - continuation mapping and helper-thread reuse are still unstable
 - extracting too early would freeze the wrong API
 
+Current internal shape:
+
+- `src/providers/codex/native_runtime.ts` owns active-account lookup, readiness
+  probing, isolated ephemeral-thread/session creation, and default read-only
+  side-task turn settings
+- current internal helper paths in `src/core/bridge_coordinator.ts` should call
+  this substrate instead of re-implementing `startThread({ ephemeral: true })`
+  + `startTurn()` ad hoc
+
 ### Stage B: Internal workspace package
 
 Once the runtime, continuation registry, and localhost API contract are stable,

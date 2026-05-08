@@ -113,8 +113,12 @@ Evolution direction:
   - define the first localhost Responses surface
   - define continuation registry expectations
   - define internal helper call sites that should later route into native API
-- [ ] Start implementation in the ordered sequence below instead of jumping
-  between unrelated phases
+- [x] Start implementation in the ordered sequence below instead of jumping
+  between unrelated phases:
+  - extracted `src/providers/codex/native_runtime.ts` as the first internal
+    native runtime substrate
+  - routed current isolated command-skill/helper turns through that substrate
+    instead of duplicating ephemeral-thread bootstrap logic in-place
 
 ## Reference Projects
 
@@ -182,6 +186,9 @@ Upstream:
    facade over a logged-in Codex runtime.
 8. Native API and main chat flow share the same underlying Codex subscription
    pool, so routing must stay intentional.
+9. Isolated native side-task turns should be created through one runtime module
+   that owns ephemeral thread/session bootstrap and the default read-only
+   session settings for helper turns.
 
 ## Ordered Executable Sequence
 
@@ -206,6 +213,26 @@ Completion target:
 
 - all later native API work calls the same native runtime substrate instead of
   inventing a second execution path
+
+Implementation checklist:
+
+- [x] Extract an internal native runtime module:
+  - `src/providers/codex/native_runtime.ts`
+  - owns active-account lookup, readiness probing, isolated session bootstrap,
+    and isolated turn execution defaults
+- [x] Route current internal helper/command-skill isolated turns through that
+  module:
+  - assistant record command skill flows
+  - automation command skill flows
+  - thread command skill flows
+  - instructions command skill flows
+  - review command skill + review localizer
+  - agent command skill + agent verifier
+- [ ] Fold account-switch/reconnect behavior behind the same runtime-facing
+  surface so localhost API consumers do not need to understand bridge-only
+  login wiring
+- [ ] Add explicit runtime readiness/health call sites that later localhost API
+  handlers can reuse directly
 
 ### 2. Localhost Responses API shell
 
