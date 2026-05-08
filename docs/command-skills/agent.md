@@ -16,6 +16,17 @@ Bridge invokes this skill only for semantic forms:
 2. `/agent add <natural language>`
 3. `/agent edit <natural language>`
 
+Important host boundary:
+
+- For bare `/agent <text>` and `/agent add <text>`, this skill is a bounded
+  router first.
+- `create_draft` means "the request is allowed to enter host-owned create-flow".
+- Bridge may then re-type the task, ask a narrowing question, and rebuild the
+  formal checklist / immutable prompt / loop policy from repo-aware context
+  before showing the draft.
+- Do not assume the draft body you return for `create_draft` will be displayed
+  verbatim without host-side create-flow refinement.
+
 For task-type-specific draft shaping, especially `code` missions, also follow:
 
 - `docs/architecture/agent-draft-templates.md`
@@ -91,6 +102,9 @@ Allowed actions: `create_draft`, `clarify`, `reject`, `local_only`.
 
 Do not use `add` to update, stop, retry, delete, rename, show, export, or send existing jobs. If the text clearly asks for a scheduled or recurring task, return `reject` and point to `/auto add`.
 
+`add` is create-only. Do not route it to existing-job actions even if the user
+mentions an old job title.
+
 ### `subcommand: "edit"`
 
 Interpret the input as an edit to `pendingDraft`.
@@ -98,6 +112,8 @@ Interpret the input as an edit to `pendingDraft`.
 Allowed actions: `update_pending_draft`, `clarify`, `reject`, `local_only`.
 
 If `pendingDraft` is null, return `clarify`. Do not silently create a new draft. Do not convert a draft edit into an existing-job operation.
+
+`edit` is pending-draft-only. Do not emit `create_draft` here.
 
 ### `subcommand: "natural"`
 
@@ -261,6 +277,16 @@ Checklist rules:
 - `immutablePrompt` should be reusable for every loop cycle of the mission.
 - For `category: "code"`, include bilingual Conventional Commit requirements
   inside `immutablePrompt` whenever the mission allows repository changes.
+- For `category: "code"`, explicitly require every loop cycle to update:
+  - current checklist item status
+  - overall completion
+  - next step
+  - latest blocker
+  - latest progress summary
+- Keep internal substeps/workpad refinement distinct from formal checklist
+  mutation. If the formal checklist needs a split / append / reorder / merge /
+  drop / rename change, express that as an explicit `PlanChangeRequest`-style
+  suggestion rather than silently rewriting the confirmed checklist.
 - For "只做方案", "不要改代码", "先分析", or similar, make the execution boundary explicit in `goal`, `expectedOutput`, and `plan`.
 - Do not include `/agent confirm`, `/agent edit`, `/agent cancel`, or other command hints inside draft fields.
 - Return the complete updated draft for `update_pending_draft`, not a patch.

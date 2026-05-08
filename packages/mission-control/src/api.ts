@@ -13,7 +13,7 @@ import {
 } from './control_actions.js';
 import { transitionMission } from './state_machine.js';
 import {
-  getActiveChecklistItem,
+  getActiveFormalChecklistItem,
   getLatestMissionCycleResult,
   summarizeChecklistSnapshotProgress,
 } from './cycle_result.js';
@@ -1243,10 +1243,10 @@ function buildMissionChecklistStatusView(
   checklistSnapshot: ChecklistSnapshot | null,
 ): MissionSummaryView['checklistStatus'] {
   const progress = summarizeChecklistSnapshotProgress(checklistSnapshot);
-  const actionableItems = checklistSnapshot?.items.filter((item) => item.status !== 'skipped') ?? [];
-  const currentItem = getActiveChecklistItem(checklistSnapshot, {
-    preferredKinds: ['acceptance'],
-  });
+  const progressItems = checklistSnapshot?.items.some((item) => item.kind === 'plan')
+    ? checklistSnapshot.items.filter((item) => item.kind === 'plan' && item.status !== 'skipped')
+    : checklistSnapshot?.items.filter((item) => item.status !== 'skipped') ?? [];
+  const currentItem = getActiveFormalChecklistItem(checklistSnapshot);
   return {
     generationId: mission.activeGenerationId,
     generationIndex: mission.activeGenerationIndex,
@@ -1255,7 +1255,7 @@ function buildMissionChecklistStatusView(
     sourceRevision: checklistSnapshot?.sourceRevision ?? null,
     totalItems: progress.totalItemCount,
     completedItems: progress.completedItemCount,
-    blockedItems: actionableItems.filter((item) => item.status === 'blocked').length,
+    blockedItems: progressItems.filter((item) => item.status === 'blocked').length,
     overallCompletion: progress.overallCompletion,
     currentItem: currentItem ? { ...currentItem } : null,
   };

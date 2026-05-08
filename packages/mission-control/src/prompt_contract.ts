@@ -23,6 +23,7 @@ export interface MissionAttemptPromptContract {
   checklistVersion: number | null;
   activeChecklistItem: MissionPromptChecklistItem | null;
   objective: string;
+  immutablePrompt: string;
   expectedOutput: string;
   acceptanceCriteria: string[];
   currentPlan: string[];
@@ -67,6 +68,7 @@ export function createMissionAttemptPromptContract(
     checklistVersion: input.checklistSnapshot?.version ?? null,
     activeChecklistItem,
     objective: input.mission.immutableGoal,
+    immutablePrompt: input.mission.immutablePrompt,
     expectedOutput: input.mission.expectedOutput,
     acceptanceCriteria: [...input.mission.acceptanceCriteria],
     currentPlan: [...input.mission.plan],
@@ -97,6 +99,9 @@ export function renderMissionAttemptPromptContract(contract: MissionAttemptPromp
   lines.push('');
   lines.push('Objective');
   lines.push(contract.objective);
+  lines.push('');
+  lines.push('Immutable mission prompt');
+  lines.push(contract.immutablePrompt);
   lines.push('');
   lines.push('Expected output');
   lines.push(contract.expectedOutput);
@@ -180,8 +185,7 @@ function selectPromptChecklistItem(
   if (!snapshot) {
     return null;
   }
-  const acceptanceItem = snapshot.items.find((item) => item.kind === 'acceptance' && item.status !== 'completed');
-  const nextItem = acceptanceItem ?? snapshot.items.find((item) => item.status !== 'completed' && item.status !== 'skipped');
+  const nextItem = findPromptChecklistItem(snapshot);
   if (!nextItem) {
     return null;
   }
@@ -192,4 +196,18 @@ function selectPromptChecklistItem(
     detail: nextItem.detail,
     status: nextItem.status,
   };
+}
+
+function findPromptChecklistItem(snapshot: ChecklistSnapshot): ChecklistItem | null {
+  const activePlanItem = snapshot.items.find((item) => item.kind === 'plan' && item.status !== 'completed' && item.status !== 'skipped');
+  if (activePlanItem) {
+    return activePlanItem;
+  }
+  const activeAcceptanceItem = snapshot.items.find(
+    (item) => item.kind === 'acceptance' && item.status !== 'completed' && item.status !== 'skipped',
+  );
+  if (activeAcceptanceItem) {
+    return activeAcceptanceItem;
+  }
+  return snapshot.items.find((item) => item.status !== 'completed' && item.status !== 'skipped') ?? null;
 }

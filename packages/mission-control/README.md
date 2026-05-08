@@ -36,7 +36,7 @@ It must not own bridge behavior:
 
 Current phase:
 
-- `phase-9u-no-progress-loop-budget`: package-owned mission
+- `phase-9v-checklist-refinement-gates`: package-owned mission
   domain/workflow/workspace/provider/verifier/runtime foundations, first-class
   `WorkItem` / `ChecklistSnapshot` / `PlanChangeRequest` /
   `MissionGeneration` lineage, direct in-process `commands / queries / streams`
@@ -80,7 +80,19 @@ Current phase:
   falling back to shell-owned progress UX. Package-owned loop budget
   exhaustion now also covers consecutive `maxNoProgressCycles` checks through
   persisted cycle history, so restart-safe repair loops can halt
-  authoritatively before another autonomous cycle starts.
+  authoritatively before another autonomous cycle starts. Formal
+  `plan[]` checklist items now also become the first-class progress surface
+  when present: runtime prompt focus, checklist/read-model current item
+  selection, cycle `overallCompletion`, and host-facing loop snapshots now
+  advance against the confirmed checklist/TODO instead of implicitly leading
+  with acceptance-only items. Bridge-side verifier results can now also persist
+  authoritative per-cycle progress summaries, next steps, and blockers through
+  package-owned cycle/workpad state. Verifier results can now also pause the
+  runtime behind explicit `PlanChangeRequest` gates when the confirmed formal
+  checklist needs a split / append / reorder / merge / drop / rename change,
+  while workpad substeps stay progress-only and the per-attempt prompt now
+  includes the confirmed `immutablePrompt` instead of dropping it before
+  execution.
 
 This package should preserve the Symphony-style separation between:
 

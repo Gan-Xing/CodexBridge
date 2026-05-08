@@ -307,8 +307,14 @@ continuation: allow
   ]);
   assert.equal(report.cycles.length, 2);
   assert.equal(report.remainingMissionIds.length, 0);
-  assert.equal(verifierCalls, 2);
-  assert.deepEqual(providerStarts, ['mission-supervision-recovered']);
+  assert.equal(verifierCalls, 6);
+  assert.deepEqual(providerStarts, [
+    'mission-supervision-recovered',
+    'mission-supervision-recovered',
+    'mission-supervision-recovered',
+    'mission-supervision-verifying',
+    'mission-supervision-verifying',
+  ]);
 
   const recoveredAfter = repo.getMissionById(recoveredMission.id);
   const verifyingAfter = repo.getMissionById(verifyingMission.id);
@@ -447,7 +453,7 @@ continuation: allow
   assert.equal(secondReport.stopReason, 'idle');
   assert.equal(secondReport.cycles.length, 1);
   assert.equal(repo.getMissionById(missionB.id)?.status, 'completed');
-  assert.equal(verifierCalls, 2);
+  assert.equal(verifierCalls, 6);
 });
 
 test('mission supervisor materializes persisted stop requests before dispatching more work', async () => {

@@ -138,6 +138,11 @@ test('repository-backed mission progress updates change workpad state without mu
 
   repo.saveMission(mission);
   repo.saveAttempt(attempt);
+  const checklistSnapshot = createMissionChecklistSnapshot(mission, {
+    at: 1_701_600_100_015,
+    generationId: mission.activeGenerationId,
+  });
+  repo.saveChecklistSnapshot(checklistSnapshot);
 
   persistMissionProgressUpdate({
     repository: repo,
@@ -149,6 +154,18 @@ test('repository-backed mission progress updates change workpad state without mu
       checklistItemId: null,
       kind: 'summary',
       message: 'Collected the first failing stack trace.',
+    },
+  });
+  persistMissionProgressUpdate({
+    repository: repo,
+    now: () => 1_701_600_100_025,
+    generateId: () => 'event-progress-substep',
+    update: {
+      missionId: mission.id,
+      attemptId: attempt.id,
+      checklistItemId: checklistSnapshot.items[0]?.id ?? null,
+      kind: 'substep',
+      message: 'Drafted two internal substeps for the next workpad update.',
     },
   });
   persistMissionProgressUpdate({
@@ -172,15 +189,25 @@ test('repository-backed mission progress updates change workpad state without mu
   assert.equal(storedMission?.workpad.summary, 'Collected the first failing stack trace.');
   assert.equal(storedMission?.workpad.latestBlocker, 'Need the user to confirm the target branch.');
   assert.deepEqual(
-    storedMission?.workpad.notes.slice(-2),
+    storedMission?.workpad.notes.slice(-3),
     [
       'Summary: Collected the first failing stack trace.',
+      'Drafted two internal substeps for the next workpad update.',
       'Blocker: Need the user to confirm the target branch.',
     ],
   );
+  assert.deepEqual(storedMission?.plan, mission.plan);
+  assert.deepEqual(
+    repo.getChecklistSnapshotById(checklistSnapshot.id)?.items.map((item) => item.status),
+    checklistSnapshot.items.map((item) => item.status),
+  );
 
   const events = repo.listEvents(mission.id);
-  assert.equal(events.length, 2);
-  assert.deepEqual(events.map((event) => event.kind), ['attempt.progress', 'attempt.progress']);
-  assert.equal(events[1]?.metadata.kind, 'blocker');
+  assert.equal(events.length, 3);
+  assert.deepEqual(
+    events.map((event) => event.kind),
+    ['attempt.progress', 'attempt.progress', 'attempt.progress'],
+  );
+  assert.equal(events[1]?.metadata.kind, 'substep');
+  assert.equal(events[2]?.metadata.kind, 'blocker');
 });

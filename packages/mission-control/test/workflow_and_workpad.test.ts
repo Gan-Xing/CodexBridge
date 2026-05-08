@@ -232,13 +232,15 @@ Prefer small, verifiable changes and report blockers explicitly.
 
   assert.equal(contract.workflowSourceLabel, workflowPath);
   assert.equal(contract.checklistVersion, checklistSnapshot.version);
-  assert.equal(contract.activeChecklistItem?.title, 'Preview no longer freezes');
+  assert.equal(contract.activeChecklistItem?.title, 'Inspect the failing flow');
+  assert.equal(contract.immutablePrompt, mission.immutablePrompt);
   assert.deepEqual(contract.finalReportSections, ['summary', 'verification', 'artifacts']);
   assert.ok(contract.stopConditions.includes('Ask for approval before modifying secrets.'));
   assert.match(rendered, /Workflow source:/);
+  assert.match(rendered, /Immutable mission prompt/);
   assert.match(rendered, /Acceptance criteria/);
   assert.match(rendered, /Checklist focus/);
-  assert.match(rendered, /Current checklist item: \[acceptance\] Preview no longer freezes/);
+  assert.match(rendered, /Current checklist item: \[plan\] Inspect the failing flow/);
   assert.match(rendered, /Current workpad context/);
   assert.match(rendered, /Final report contract/);
   assert.match(rendered, /Workflow instructions/);

@@ -140,12 +140,10 @@ export function summarizeChecklistSnapshotProgress(
       totalItemCount: 0,
     };
   }
-  const actionableItems = snapshot.items.filter((item) => item.status !== 'skipped');
+  const actionableItems = getChecklistProgressItems(snapshot);
   const totalItemCount = actionableItems.length;
   const completedItemCount = actionableItems.filter((item) => item.status === 'completed').length;
-  const activeItem = getActiveChecklistItem(snapshot, {
-    preferredKinds: ['acceptance'],
-  });
+  const activeItem = getActiveFormalChecklistItem(snapshot);
   return {
     overallCompletion: totalItemCount > 0
       ? Math.round((completedItemCount / totalItemCount) * 100)
@@ -251,6 +249,38 @@ export function getActiveChecklistItem(
     }
   }
   return snapshot.items.find((item) => isIncompleteChecklistItem(item)) ?? null;
+}
+
+export function getActiveFormalChecklistItem(
+  snapshot: ChecklistSnapshot | null,
+): ChecklistItem | null {
+  if (!snapshot) {
+    return null;
+  }
+  const activePlanItem = snapshot.items.find(
+    (item) => item.kind === 'plan' && isIncompleteChecklistItem(item),
+  ) ?? null;
+  if (activePlanItem) {
+    return activePlanItem;
+  }
+  return getActiveChecklistItem(snapshot, {
+    preferredKinds: ['acceptance', 'deliverable'],
+  });
+}
+
+export function getChecklistProgressItems(
+  snapshot: ChecklistSnapshot | null,
+): ChecklistItem[] {
+  if (!snapshot) {
+    return [];
+  }
+  const planItems = snapshot.items.filter((item) => item.kind === 'plan' && item.status !== 'skipped');
+  if (planItems.length > 0) {
+    return planItems.map((item) => ({ ...item }));
+  }
+  return snapshot.items
+    .filter((item) => item.status !== 'skipped')
+    .map((item) => ({ ...item }));
 }
 
 export function completeChecklistSnapshot(
@@ -403,9 +433,7 @@ function resolveActiveChecklistItem(
   if (explicit) {
     return explicit;
   }
-  return getActiveChecklistItem(snapshot, {
-    preferredKinds: ['acceptance'],
-  });
+  return getActiveFormalChecklistItem(snapshot);
 }
 
 function resolveIncompleteChecklistStatus(

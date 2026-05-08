@@ -1008,14 +1008,14 @@ test('direct mission control api exposes package-owned query views with boundary
     listResult.data[0]?.loopSnapshot.currentProgress,
     'Verification found missing release dry-run evidence.',
   );
-  assert.equal(listResult.data[0]?.loopSnapshot.currentItemTitle, 'Patch exists');
+  assert.equal(listResult.data[0]?.loopSnapshot.currentItemTitle, 'Inspect the regression');
   assert.equal(
     listResult.data[0]?.loopSnapshot.nextStep,
     'Retry the mission with the missing verification evidence.',
   );
   assert.equal(listResult.data[0]?.workflow.status, 'loaded');
   assert.equal(listResult.data[0]?.checklistStatus.generationIndex, 1);
-  assert.equal(listResult.data[0]?.checklistStatus.currentItem?.title, 'Patch exists');
+  assert.equal(listResult.data[0]?.checklistStatus.currentItem?.title, 'Inspect the regression');
   assert.equal(listResult.data[0]?.workpadStatus.summary, 'Release blocker investigation is in progress.');
 
   const detailResult = await api.queries.getMissionDetail({
@@ -1039,15 +1039,15 @@ test('direct mission control api exposes package-owned query views with boundary
   assert.equal(detailResult.data?.checkpoints[0]?.stage, 'provider.candidate_ready');
   assert.equal(detailResult.data?.latestCycleResult?.stage, 'verifier.repair');
   assert.equal(detailResult.data?.loopSnapshot.loopStatus, 'retry');
-  assert.equal(detailResult.data?.loopSnapshot.currentItemTitle, 'Patch exists');
+  assert.equal(detailResult.data?.loopSnapshot.currentItemTitle, 'Inspect the regression');
   assert.equal(detailResult.data?.loopSnapshot.overallCompletion, 0);
   assert.equal(detailResult.data?.loopSnapshot.latestVerifierSummary, 'Verification has not finished yet.');
   assert.equal(detailResult.data?.workflow.status, 'loaded');
   assert.equal(detailResult.data?.workflow.error, null);
-  assert.equal(detailResult.data?.checklistStatus.totalItems, 6);
+  assert.equal(detailResult.data?.checklistStatus.totalItems, 3);
   assert.equal(detailResult.data?.checklistStatus.completedItems, 0);
   assert.equal(detailResult.data?.checklistStatus.overallCompletion, 0);
-  assert.equal(detailResult.data?.checklistStatus.currentItem?.title, 'Patch exists');
+  assert.equal(detailResult.data?.checklistStatus.currentItem?.title, 'Inspect the regression');
   assert.equal(detailResult.data?.workpadStatus.summary, 'Release blocker investigation is in progress.');
   assert.equal(detailResult.data?.workpadStatus.latestBlocker, 'Waiting for the verification pass.');
   assert.match(detailResult.data?.workpadStatus.attemptHistory[0] ?? '', /#1 verifying/);
@@ -1107,13 +1107,13 @@ test('direct mission control api exposes package-owned query views with boundary
   assert.equal(executionResult.data?.loopSnapshot.status, 'verifying');
   assert.equal(executionResult.data?.loopSnapshot.currentCycle, 1);
   assert.equal(executionResult.data?.loopSnapshot.currentStage, 'verifier.repair');
-  assert.equal(executionResult.data?.loopSnapshot.currentItemTitle, 'Patch exists');
+  assert.equal(executionResult.data?.loopSnapshot.currentItemTitle, 'Inspect the regression');
   assert.equal(
     executionResult.data?.loopSnapshot.nextStep,
     'Retry the mission with the missing verification evidence.',
   );
   assert.equal(executionResult.data?.workflow.status, 'loaded');
-  assert.equal(executionResult.data?.checklistStatus.currentItem?.title, 'Patch exists');
+  assert.equal(executionResult.data?.checklistStatus.currentItem?.title, 'Inspect the regression');
   assert.equal(executionResult.data?.workpadStatus.latestVerifierSummary, 'Verification has not finished yet.');
 
   const loopSnapshotResult = await api.queries.getMissionLoopSnapshot({
@@ -1130,7 +1130,7 @@ test('direct mission control api exposes package-owned query views with boundary
   assert.equal(loopSnapshotResult.data?.loopStatus, 'retry');
   assert.equal(loopSnapshotResult.data?.currentCycle, 1);
   assert.equal(loopSnapshotResult.data?.currentStage, 'verifier.repair');
-  assert.equal(loopSnapshotResult.data?.currentItemTitle, 'Patch exists');
+  assert.equal(loopSnapshotResult.data?.currentItemTitle, 'Inspect the regression');
   assert.equal(loopSnapshotResult.data?.latestBlocker, 'Waiting for the verification pass.');
   assert.equal(loopSnapshotResult.data?.latestVerifierSummary, 'Verification has not finished yet.');
 
@@ -1149,7 +1149,7 @@ test('direct mission control api exposes package-owned query views with boundary
   }
   assert.equal(loopSnapshotFrames.length, 1);
   assert.equal(loopSnapshotFrames[0]?.currentStage, 'verifier.repair');
-  assert.equal(loopSnapshotFrames[0]?.currentItemTitle, 'Patch exists');
+  assert.equal(loopSnapshotFrames[0]?.currentItemTitle, 'Inspect the regression');
 });
 
 test('direct mission control api surfaces invalid workflow state through package-owned read models', async () => {

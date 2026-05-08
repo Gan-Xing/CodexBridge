@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -552,6 +553,35 @@ function makeRuntime({
     weiboHotSearch,
   });
   return { runtime, openai, compatible, minimax: compatible };
+}
+
+function createMissionControlDraftRepo() {
+  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-create-flow-repo-'));
+  fs.mkdirSync(path.join(repoRoot, 'docs/architecture'), { recursive: true });
+  fs.mkdirSync(path.join(repoRoot, 'docs/todo'), { recursive: true });
+  fs.mkdirSync(path.join(repoRoot, 'skills/agent-draft-router'), { recursive: true });
+  fs.mkdirSync(path.join(repoRoot, 'packages/mission-control/src'), { recursive: true });
+  fs.mkdirSync(path.join(repoRoot, 'src/core'), { recursive: true });
+  fs.writeFileSync(path.join(repoRoot, 'package.json'), JSON.stringify({
+    name: 'codexbridge-draft-test',
+    private: true,
+    scripts: {
+      'mission-control:typecheck': 'echo typecheck',
+      'mission-control:test': 'echo test',
+      'mission-control:build': 'echo build',
+      'mission-control:check-boundary': 'echo boundary',
+    },
+  }, null, 2));
+  fs.writeFileSync(path.join(repoRoot, 'pnpm-lock.yaml'), 'lockfileVersion: 9.0');
+  fs.writeFileSync(path.join(repoRoot, 'docs/architecture/agent-draft-templates.md'), '# draft templates\n');
+  fs.writeFileSync(path.join(repoRoot, 'docs/architecture/mission-control.md'), '# mission control\n');
+  fs.writeFileSync(path.join(repoRoot, 'docs/architecture/mission-control-codexbridge-integration.md'), '# integration\n');
+  fs.writeFileSync(path.join(repoRoot, 'docs/todo/mission-control.md'), '# todo\n');
+  fs.writeFileSync(path.join(repoRoot, 'skills/agent-draft-router/SKILL.md'), '# skill\n');
+  fs.writeFileSync(path.join(repoRoot, 'src/core/bridge_coordinator.ts'), '// bridge coordinator\n');
+  execFileSync('git', ['init'], { cwd: repoRoot, stdio: 'ignore' });
+  execFileSync('git', ['checkout', '-b', 'track/mission-control'], { cwd: repoRoot, stdio: 'ignore' });
+  return repoRoot;
 }
 
 async function maybeReturnArtifactIntentParserResult({
@@ -7290,6 +7320,159 @@ test('/agent natural language list query uses the command skill instead of creat
     assert.match(listedText, /项目总结/);
     assert.doesNotMatch(listedText, /Agent 草案/);
   } finally {
+    if (originalOpenAiKey === undefined) {
+      delete process.env.OPENAI_API_KEY;
+    } else {
+      process.env.OPENAI_API_KEY = originalOpenAiKey;
+    }
+  }
+});
+
+test('/agent explicit list stays deterministic and does not invoke the command skill', async () => {
+  const originalOpenAiKey = process.env.OPENAI_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+  try {
+    const { runtime, openai } = makeRuntime({ defaultCwd: '/repo' });
+    let commandSkillTurns = 0;
+    const originalStartTurn = openai.startTurn.bind(openai);
+    openai.startTurn = async (params: any) => {
+      const parserInput = normalizeCommandSkillInput(params?.inputText);
+      if (parserInput.includes('docs/command-skills/agent.md')) {
+        commandSkillTurns += 1;
+      }
+      return originalStartTurn(params);
+    };
+
+    const listed = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-list-local-1',
+      text: '/agent list',
+    });
+
+    const listedText = listed.messages.map((message) => message.text).join('\n');
+    assert.match(listedText, /Agent 任务 \| 0 项/);
+    assert.equal(commandSkillTurns, 0);
+  } finally {
+    if (originalOpenAiKey === undefined) {
+      delete process.env.OPENAI_API_KEY;
+    } else {
+      process.env.OPENAI_API_KEY = originalOpenAiKey;
+    }
+  }
+});
+
+test('/agent add create-flow replaces generic lifecycle drafts with a repo-aware code scaffold', async () => {
+  const originalOpenAiKey = process.env.OPENAI_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+  const repoRoot = createMissionControlDraftRepo();
+  try {
+    const { runtime, openai } = makeRuntime({ defaultCwd: repoRoot });
+    const originalStartTurn = openai.startTurn.bind(openai);
+    openai.startTurn = async (params: any) => {
+      const parserInput = normalizeCommandSkillInput(params?.inputText);
+      if (parserInput.includes('docs/command-skills/agent.md') && parserInput.includes('"subcommand": "add"')) {
+        return {
+          outputText: JSON.stringify({
+            action: 'create_draft',
+            draft: {
+              title: 'Mission Control 大改',
+              goal: '收紧 /agent create-flow 并更新 mission-control checklist',
+              expectedOutput: '完成实现并汇总结果',
+              plan: ['analyze', 'design', 'code', 'test'],
+              category: 'code',
+              riskLevel: 'medium',
+              mode: 'codex',
+            },
+            confidence: 0.96,
+            requiresConfirmation: true,
+          }),
+        };
+      }
+      return originalStartTurn(params);
+    };
+
+    const drafted = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-create-flow-1',
+      text: '/agent add 收紧 /agent create-flow 并更新 mission-control checklist',
+    });
+
+    const draftText = drafted.messages.map((message) => message.text ?? '').join('\n');
+    assert.match(draftText, /Agent 草案/);
+    assert.match(draftText, /范围摘要：/);
+    assert.match(draftText, /当前工作分支：/);
+    assert.match(draftText, /track\/mission-control/);
+    assert.match(draftText, /开始前请先阅读：/);
+    assert.match(draftText, /docs\/architecture\/agent-draft-templates\.md/);
+    assert.match(draftText, /主要允许修改：/);
+    assert.match(draftText, /packages\/mission-control\/\*\*/);
+    assert.match(draftText, /验证要求：/);
+    assert.match(draftText, /pnpm mission-control:typecheck/);
+    assert.doesNotMatch(draftText, /\n1\. analyze\n2\. design\n3\. code\n4\. test/u);
+
+    const pending = runtime.services.bridgeCoordinator.getPendingAgentDraft({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-create-flow-1',
+    });
+    assert.ok(pending?.immutablePrompt);
+    assert.match(pending?.immutablePrompt ?? '', /PlanChangeRequest|change gate/);
+    assert.match(pending?.immutablePrompt ?? '', /latest blocker|latest progress summary/);
+  } finally {
+    fs.rmSync(repoRoot, { recursive: true, force: true });
+    if (originalOpenAiKey === undefined) {
+      delete process.env.OPENAI_API_KEY;
+    } else {
+      process.env.OPENAI_API_KEY = originalOpenAiKey;
+    }
+  }
+});
+
+test('/agent broad mission-control goals clarify before creating a draft', async () => {
+  const originalOpenAiKey = process.env.OPENAI_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+  const repoRoot = createMissionControlDraftRepo();
+  try {
+    const { runtime, openai } = makeRuntime({ defaultCwd: repoRoot });
+    const originalStartTurn = openai.startTurn.bind(openai);
+    openai.startTurn = async (params: any) => {
+      const parserInput = normalizeCommandSkillInput(params?.inputText);
+      if (parserInput.includes('docs/command-skills/agent.md') && parserInput.includes('"subcommand": "natural"')) {
+        return {
+          outputText: JSON.stringify({
+            action: 'create_draft',
+            draft: {
+              title: '继续推进 Mission Control',
+              goal: '继续推进 @codexbridge/mission-control 的工作',
+              expectedOutput: '完成剩余工作',
+              plan: ['analyze', 'design', 'code', 'test'],
+              category: 'code',
+              riskLevel: 'medium',
+              mode: 'codex',
+            },
+            confidence: 0.92,
+            requiresConfirmation: true,
+          }),
+        };
+      }
+      return originalStartTurn(params);
+    };
+
+    const clarified = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-broad-scope-1',
+      text: '/agent 继续推进 @codexbridge/mission-control 的工作',
+    });
+
+    const clarifiedText = clarified.messages.map((message) => message.text ?? '').join('\n');
+    assert.match(clarifiedText, /目标还太宽|too broad/);
+    assert.match(clarifiedText, /\/agent 路由与 create-flow 收口/);
+    assert.doesNotMatch(clarifiedText, /Agent 草案/);
+    assert.equal(runtime.services.bridgeCoordinator.getPendingAgentDraft({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-broad-scope-1',
+    }), null);
+  } finally {
+    fs.rmSync(repoRoot, { recursive: true, force: true });
     if (originalOpenAiKey === undefined) {
       delete process.env.OPENAI_API_KEY;
     } else {

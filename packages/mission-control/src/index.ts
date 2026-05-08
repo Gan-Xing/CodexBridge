@@ -1,6 +1,6 @@
 export const MISSION_CONTROL_PACKAGE_NAME = '@codexbridge/mission-control' as const;
 
-export const MISSION_CONTROL_PACKAGE_PHASE = 'phase-9u-no-progress-loop-budget' as const;
+export const MISSION_CONTROL_PACKAGE_PHASE = 'phase-9v-checklist-refinement-gates' as const;
 
 export const MISSION_CONTROL_OWNS = [
   'mission-domain-model',

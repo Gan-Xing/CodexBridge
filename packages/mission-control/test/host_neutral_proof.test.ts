@@ -278,7 +278,7 @@ test('package-owned mission contracts can drive a later non-CodexBridge host wit
   assert.equal(detail?.artifactRefs[0]?.path, artifactPath);
   assert.equal(detail?.latestVerifierSummary, 'CLI host proof accepted through the package-owned verifier contract.');
   assert.equal(detail?.loopSnapshot.status, 'completed');
-  assert.equal(detail?.loopSnapshot.currentCycle, 1);
+  assert.equal(detail?.loopSnapshot.currentCycle, 3);
   assert.equal(detail?.loopSnapshot.currentStage, 'verifier.complete');
   assert.equal(detail?.loopSnapshot.overallCompletion, 100);
 
@@ -349,17 +349,36 @@ test('package-owned mission contracts can drive a later non-CodexBridge host wit
   assert.equal(streamedSnapshots.length, 1);
   assert.equal(streamedSnapshots[0]?.currentStage, 'verifier.complete');
 
-  assert.deepEqual(progressUpdates.map((update) => update.status), ['running', 'verifying']);
-  assert.deepEqual(threadBindings, [{
-    missionId: 'mission-cli-proof-1',
-    hostSessionId: 'cli-session-proof-1',
-    providerThreadId: 'thread-cli-proof-1',
-  }]);
-  assert.equal(artifactPublications.length, 1);
-  assert.equal(artifactPublications[0]?.artifacts[0]?.path, artifactPath);
-  assert.equal(notifications.length, 1);
-  assert.equal(notifications[0]?.status, 'completed');
-  assert.equal(notifications[0]?.kind, 'cycle_update');
-  assert.equal(notifications[0]?.loopSnapshot?.currentStage, 'verifier.complete');
-  assert.equal(notifications[0]?.cycleResult?.status, 'done');
+  assert.deepEqual(progressUpdates.map((update) => update.status), [
+    'running',
+    'verifying',
+    'running',
+    'verifying',
+    'running',
+    'verifying',
+  ]);
+  assert.deepEqual(threadBindings, [
+    {
+      missionId: 'mission-cli-proof-1',
+      hostSessionId: 'cli-session-proof-1',
+      providerThreadId: 'thread-cli-proof-1',
+    },
+    {
+      missionId: 'mission-cli-proof-1',
+      hostSessionId: 'cli-session-proof-1',
+      providerThreadId: 'thread-cli-proof-1',
+    },
+    {
+      missionId: 'mission-cli-proof-1',
+      hostSessionId: 'cli-session-proof-1',
+      providerThreadId: 'thread-cli-proof-1',
+    },
+  ]);
+  assert.equal(artifactPublications.length, 3);
+  assert.equal(artifactPublications.every((publication) => publication.artifacts[0]?.path === artifactPath), true);
+  assert.equal(notifications.length, 3);
+  assert.equal(notifications.at(-1)?.status, 'completed');
+  assert.equal(notifications.at(-1)?.kind, 'cycle_update');
+  assert.equal(notifications.at(-1)?.loopSnapshot?.currentStage, 'verifier.complete');
+  assert.equal(notifications.at(-1)?.cycleResult?.status, 'done');
 });

@@ -21,6 +21,7 @@ import {
   type PlanChangeRequest,
   type MissionProvider,
   type MissionProviderArtifact,
+  type MissionPlanChangeSuggestion,
   type MissionProgressSink,
   type MissionProviderResult,
   type MissionRepository,
@@ -52,6 +53,16 @@ type AgentVerificationResultLike = {
   summary: string;
   issues: string[];
   nextAction: 'complete' | 'retry' | 'fail';
+  progressSummary?: string | null;
+  nextStep?: string | null;
+  latestBlocker?: string | null;
+  planChangeSuggestion?: MissionPlanChangeSuggestion | null;
+};
+
+type AgentVerificationContextLike = {
+  checklistSnapshot: ChecklistSnapshot | null;
+  activeChecklistItem: ChecklistItem | null;
+  isFinalChecklistItem: boolean;
 };
 
 type BridgeMissionTurnResult = {
@@ -102,6 +113,7 @@ export interface RunAgentJobWithMissionControlOptions {
     job: AgentJob,
     result: BridgeMissionTurnResult['result'],
     session: BridgeSession | null,
+    context: AgentVerificationContextLike,
   ) => Promise<AgentVerificationResultLike>;
   progressText: MissionControlAgentJobRunProgressText;
   now?: () => number;
@@ -725,6 +737,11 @@ class BridgeMissionVerifier implements MissionVerifier {
       currentJob,
       execution?.result ?? missionProviderResultToBridgeResult(input.providerResult),
       execution?.session ?? null,
+      {
+        checklistSnapshot: input.checklistSnapshot,
+        activeChecklistItem: input.activeChecklistItem,
+        isFinalChecklistItem: isFinalChecklistItem(input.checklistSnapshot, input.activeChecklistItem),
+      },
     );
     if (!verification.pass && verification.nextAction === 'retry') {
       await this.options.progressSink.appendProgress({
@@ -755,6 +772,10 @@ class BridgeMissionVerifier implements MissionVerifier {
           : 'failed',
       summary: verification.summary,
       missingAcceptanceCriteria: verification.issues,
+      progressSummary: verification.progressSummary,
+      nextStep: verification.nextStep,
+      latestBlocker: verification.latestBlocker,
+      planChangeSuggestion: verification.planChangeSuggestion ?? null,
     });
   }
 }
@@ -784,6 +805,22 @@ function prepareMissionSnapshot(input: {
     return input.repository.resetMission(buildFreshMission(input.job, input.session, input.now));
   }
   return existing;
+}
+
+function isFinalChecklistItem(
+  checklistSnapshot: ChecklistSnapshot | null,
+  activeChecklistItem: ChecklistItem | null,
+): boolean {
+  if (!checklistSnapshot || !activeChecklistItem) {
+    return false;
+  }
+  const incompletePlanItems = checklistSnapshot.items.filter(
+    (item) => item.kind === 'plan' && item.status !== 'completed' && item.status !== 'skipped',
+  );
+  if (incompletePlanItems.length === 0) {
+    return activeChecklistItem.kind !== 'plan';
+  }
+  return incompletePlanItems.length === 1 && incompletePlanItems[0]?.id === activeChecklistItem.id;
 }
 
 function buildFreshMission(job: AgentJob, session: BridgeSession | null, now: () => number): Mission {
