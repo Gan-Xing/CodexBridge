@@ -46,7 +46,9 @@ import {
   createMissionRepairPrompt,
   createMissionVerifierResult,
   evaluateMissionVerifierBudget,
+  resolveMissionPlanChangeSuggestion,
   resolveMissionVerifierBudget,
+  type ResolvedMissionPlanChangeSuggestion,
   type MissionVerifier,
   type MissionVerifierResult,
 } from './verifier.js';
@@ -993,6 +995,10 @@ export class MissionRuntime {
         budgetExceededReasons: budgetIssues,
       })
       : verifierResult;
+    const resolvedPlanChangeSuggestion = resolveMissionPlanChangeSuggestion(
+      input.mission,
+      effectiveResult.planChangeSuggestion,
+    );
 
     let updatedChecklistSnapshot = currentChecklistSnapshot
       ? applyMissionVerifierResultToChecklistSnapshot(
@@ -1060,6 +1066,90 @@ export class MissionRuntime {
       };
     }
     updatedAttempt = this.repository.saveAttempt(updatedAttempt);
+
+    if (resolvedPlanChangeSuggestion) {
+      const planChangeMeta = this.buildRuntimeCommandMeta(
+        input.mission.id,
+        `verifier-plan-change:${updatedAttempt.id}`,
+      );
+      this.readApi.commands.proposePlanChange({
+        meta: planChangeMeta,
+        input: {
+          missionId: input.mission.id,
+          rationale: resolvedPlanChangeSuggestion.rationale,
+          proposedExpectedOutput: resolvedPlanChangeSuggestion.proposedExpectedOutput,
+          proposedAcceptanceCriteria: resolvedPlanChangeSuggestion.proposedAcceptanceCriteria,
+          proposedPlan: resolvedPlanChangeSuggestion.proposedPlan,
+          actor: {
+            actorId: 'mission-runtime',
+            actorType: 'system',
+          },
+        },
+      });
+      const pendingMission = this.requireMission(input.mission.id);
+      const pendingPlanChangeRequest = this.repository
+        .listPlanChangeRequests(input.mission.id)
+        .filter((changeRequest) => changeRequest.status === 'proposed')
+        .sort((left, right) => left.createdAt - right.createdAt)
+        .at(-1) ?? null;
+      const cycleProgressSummary = effectiveResult.progressSummary
+        ?? resolvedPlanChangeSuggestion.rationale;
+      const cycleResult = this.buildMissionCycleResult({
+        mission: pendingMission,
+        attempt: updatedAttempt,
+        checklistSnapshot: updatedChecklistSnapshot,
+        status: 'waiting_user',
+        stage: 'verifier.plan_change',
+        progress: cycleProgressSummary,
+        nextStep: effectiveResult.nextStep
+          ?? 'Review and resolve the proposed formal checklist refinement before continuing the mission.',
+        verifierSummary: effectiveResult.summary,
+        blocker: 'Resolve the proposed checklist scope change before continuing the mission.',
+        needUserAction: effectiveResult.latestBlocker
+          ?? 'Review and approve or reject the proposed formal checklist refinement.',
+        planChangeSuggestion: buildRuntimePlanChangeSuggestionRecord(
+          resolvedPlanChangeSuggestion,
+          pendingPlanChangeRequest?.id ?? null,
+        ),
+        evidence: {
+          verdict: effectiveResult.verdict,
+          planChangeRequestId: pendingPlanChangeRequest?.id ?? null,
+          missingAcceptanceCriteria: [...effectiveResult.missingAcceptanceCriteria],
+          budgetExceededReasons: [...effectiveResult.budgetExceededReasons],
+        },
+      });
+      this.appendMissionEvent(
+        pendingMission,
+        'mission.progress',
+        cycleProgressSummary,
+        updatedAttempt,
+        {
+          verdict: effectiveResult.verdict,
+          planChangeRequestId: pendingPlanChangeRequest?.id ?? null,
+          missingAcceptanceCriteria: [...effectiveResult.missingAcceptanceCriteria],
+          budgetExceededReasons: [...effectiveResult.budgetExceededReasons],
+          planChangeSuggestion: buildRuntimePlanChangeSuggestionRecord(
+            resolvedPlanChangeSuggestion,
+            pendingPlanChangeRequest?.id ?? null,
+          ),
+          cycleResult,
+        },
+      );
+      this.saveCheckpointRecord(pendingMission, updatedAttempt, 'verifier.plan_change', cycleProgressSummary, {
+        verdict: effectiveResult.verdict,
+        planChangeRequestId: pendingPlanChangeRequest?.id ?? null,
+        proposedExpectedOutput: resolvedPlanChangeSuggestion.proposedExpectedOutput,
+        proposedAcceptanceCriteria: [...resolvedPlanChangeSuggestion.proposedAcceptanceCriteria],
+        proposedPlan: [...resolvedPlanChangeSuggestion.proposedPlan],
+      });
+      await this.emitHostNotification(pendingMission, updatedAttempt, cycleResult);
+      return {
+        mission: pendingMission,
+        attempt: updatedAttempt,
+        verifierResult: effectiveResult,
+        continueMission: false,
+      };
+    }
 
     const continueMission = activeChecklistItemCompleted
       && !canFinalizeMission
@@ -1632,6 +1722,17 @@ export class MissionRuntime {
     });
   }
 
+  private buildRuntimeCommandMeta(
+    missionId: string,
+    action: string,
+  ) {
+    return {
+      requestId: this.generateId(),
+      correlationId: `runtime:${missionId}:${action}`,
+      idempotencyKey: `${missionId}:${action}`,
+    };
+  }
+
   private saveEnvironmentStamp(
     mission: Mission,
     attempt: MissionAttempt,
@@ -2058,6 +2159,19 @@ function getMissingAcceptanceCriteriaCount(result: MissionCycleResult): number |
     return null;
   }
   return evidence.missingAcceptanceCriteria.filter((value) => typeof value === 'string').length;
+}
+
+function buildRuntimePlanChangeSuggestionRecord(
+  suggestion: ResolvedMissionPlanChangeSuggestion,
+  planChangeRequestId: string | null,
+): Record<string, unknown> {
+  return {
+    rationale: suggestion.rationale,
+    proposedExpectedOutput: suggestion.proposedExpectedOutput,
+    proposedAcceptanceCriteria: [...suggestion.proposedAcceptanceCriteria],
+    proposedPlan: [...suggestion.proposedPlan],
+    planChangeRequestId,
+  };
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

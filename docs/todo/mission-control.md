@@ -988,6 +988,21 @@ hardening on top of that intake baseline:
   so this hardening improves first-host checklist stewardship without breaking
   older package/runtime behavior
 
+Phase 9v.c now lands the remaining autonomous checklist-refinement gates on top
+of that plan-first runtime baseline:
+
+- verifier results can now carry explicit formal checklist refinement
+  suggestions instead of silently mutating the confirmed checklist or collapsing
+  every mismatch into generic repair/fail wording
+- Mission Control runtime now turns those formal refinement suggestions into
+  package-owned `PlanChangeRequest` pauses under `scope_change_pending`, while
+  preserving authoritative cycle results, checkpoints, and host notifications
+- attempt prompt rendering now carries the confirmed `immutablePrompt` into the
+  actual execution contract, so checklist-stewardship rules survive beyond the
+  first-host draft screen
+- repository-backed workpad substeps remain progress-only and do not mutate the
+  authoritative formal checklist or checklist snapshot state
+
 - [x] Add `WorkItemSourceAdapter` as the source abstraction
 - [x] Support manual host-created source-backed work items through the
   package-owned create command
@@ -1102,10 +1117,10 @@ hardening on top of that intake baseline:
   - next step
   - latest blocker
   - latest progress summary
-- [ ] Let the AI autonomously detect when the confirmed checklist needs to be
+- [x] Let the AI autonomously detect when the confirmed checklist needs to be
   refined (split / append / reorder / merge / drop / rename) based on actual
   execution progress
-- [ ] Keep internal substeps/workpad refinement distinct from formal checklist
+- [x] Keep internal substeps/workpad refinement distinct from formal checklist
   mutation so the agent can self-organize without silently rewriting
   user-confirmed scope
 - [x] Promote these checklist-stewardship rules into the first-host prompt
@@ -1146,7 +1161,7 @@ Completion criteria:
 - [x] Each autonomous cycle persists authoritative checklist/progress updates
   that the first host can render directly without inferring TODO state from raw
   text
-- [ ] Checklist refinement suggestions are autonomous but formal checklist
+- [x] Checklist refinement suggestions are autonomous but formal checklist
   mutations still flow through explicit package-owned change/approval semantics
 
 Phase 9 closeout note:
@@ -1154,11 +1169,12 @@ Phase 9 closeout note:
 - `Phase 7` / `Phase 8` / `Phase 9a-u` form the validated runtime baseline for
   checklist-first hardening, host-neutral package contracts, and first-host
   product UX
-- `Phase 9v` is now the next reopened execution scope because the first-host
-  draft/prompt quality and autonomous checklist stewardship still need explicit
-  product hardening before service exposure
-- `Phase 10` service exposure remains blocked until those `Phase 9v` items are
-  complete; later providers/sources remain explicitly deferred
+- `Phase 9v` is now closed: the first-host `/agent` intake, task-aware prompt
+  scaffolds, authoritative cycle progress, and formal checklist-refinement
+  gates now line up with the reviewed spec
+- `Phase 10` service exposure is now the next execution scope on top of that
+  closed `Phase 9v` baseline; later providers/sources remain explicitly
+  deferred
 
 ## Phase 10: Service Exposure and Additional Hosts
 

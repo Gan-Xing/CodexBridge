@@ -11,23 +11,28 @@ The tracked document is the reviewable source of truth.
 The git-ignored mirror exists so local loop tooling can execute the same prompt
 without forcing `.codexbridge/` runtime assets into version control.
 
-This prompt is intentionally scoped to the reopened pre-`Phase 10` baseline:
+This document currently preserves the last pre-`Phase 10` loop prompt as
+reviewable history while `Phase 10` service exposure becomes the next active
+execution scope.
 
-- phases `0-9u` remain validated
-- `Phase 9v` is now the next unfinished execution phase
-- `Phase 10` service exposure stays deferred until `Phase 9v` closes
+Current status:
+
+- phases `0-9v` now remain validated
+- `Phase 10` service exposure is now the next unfinished execution phase
 - later providers/sources remain deferred
 - `/auto` is out of scope
-- `CodexBridge` integration cleanup around `/agent` remains an explicit part of
-  the reopened baseline, not a hidden side effect
+- `CodexBridge` integration cleanup around `/agent` remains a validated part
+  of the closed `Phase 9v` baseline, not a hidden side effect
 
 Current re-entry rules:
 
-- use the embedded `Phase 9v` reopen scope for normal Mission Control loop work
-- do not jump to `Phase 10` service exposure until `Phase 9v` closes
+- use the `Phase 9v` prompt below as archived reference, not as the active
+  execution scope
+- the next live loop prompt should be rewritten for `Phase 10` service
+  exposure instead of reopening closed `Phase 9v` work
 - later providers/sources still require an explicit scope reopen
 
-## Current Reopened `Phase 9v` Prompt
+## Archived `Phase 9v` Prompt
 
 ```md
 # Mission Control Loop Prompt

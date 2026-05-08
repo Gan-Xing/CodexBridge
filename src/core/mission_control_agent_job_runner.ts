@@ -21,6 +21,7 @@ import {
   type PlanChangeRequest,
   type MissionProvider,
   type MissionProviderArtifact,
+  type MissionPlanChangeSuggestion,
   type MissionProgressSink,
   type MissionProviderResult,
   type MissionRepository,
@@ -55,6 +56,7 @@ type AgentVerificationResultLike = {
   progressSummary?: string | null;
   nextStep?: string | null;
   latestBlocker?: string | null;
+  planChangeSuggestion?: MissionPlanChangeSuggestion | null;
 };
 
 type AgentVerificationContextLike = {
@@ -773,6 +775,7 @@ class BridgeMissionVerifier implements MissionVerifier {
       progressSummary: verification.progressSummary,
       nextStep: verification.nextStep,
       latestBlocker: verification.latestBlocker,
+      planChangeSuggestion: verification.planChangeSuggestion ?? null,
     });
   }
 }

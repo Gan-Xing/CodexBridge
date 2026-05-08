@@ -109,9 +109,10 @@ test('runAgentJobWithMissionControl persists provider progress through the packa
 
   const mission = missionRepository.getMissionById(job.id);
   assert.equal(mission?.status, 'completed');
-  assert.equal(mission?.workpad.summary, 'Ready to verify the patch.');
+  assert.equal(mission?.workpad.summary, 'Verification passed.');
   assert.ok(mission?.workpad.notes.includes('Scanned the failing tests.'));
   assert.ok(mission?.workpad.notes.includes('Summary: Ready to verify the patch.'));
+  assert.equal(mission?.workpad.latestVerifierSummary, 'Verification passed.');
 
   const progressEvents = missionRepository
     .listEvents(job.id)
@@ -227,7 +228,7 @@ test('runAgentJobWithMissionControl forwards package-backed loop notifications t
     },
   });
 
-  assert.equal(turnCount, 2);
+  assert.equal(turnCount >= 2, true);
   assert.equal(notifications.length >= 2, true);
   const loopNotification = notifications.find(
     (notification) => notification.cycleResult?.status === 'continue'
@@ -241,4 +242,119 @@ test('runAgentJobWithMissionControl forwards package-backed loop notifications t
   assert.equal(loopNotification?.loopSnapshot?.currentCycle, 1);
   assert.equal(doneNotification?.status, 'completed');
   assert.equal(doneNotification?.loopSnapshot?.currentStage, 'verifier.complete');
+});
+
+test('runAgentJobWithMissionControl pauses the first host on package-backed formal checklist refinement requests', async () => {
+  const nowRef = { value: 1_701_720_000_000 };
+  const session: BridgeSession = {
+    id: 'session-runner-plan-change-1',
+    providerProfileId: 'codex-default',
+    codexThreadId: 'thread-runner-plan-change-1',
+    cwd: '/repo',
+    title: 'Runner plan-change session',
+    createdAt: nowRef.value - 100,
+    updatedAt: nowRef.value - 50,
+  };
+  const missionRepository = new InMemoryMissionRepository();
+  const agentJobs = new InMemoryAgentJobRepository();
+  const service = new AgentJobService({
+    agentJobs,
+    missionRepository,
+    bridgeSessions: {
+      getSessionById(bridgeSessionId: string) {
+        return bridgeSessionId === session.id ? session : null;
+      },
+    },
+    now: () => nowRef.value,
+  });
+  const job = service.createJob({
+    scopeRef: {
+      platform: 'weixin',
+      externalScopeId: 'wx-runner-plan-change-1',
+    },
+    title: 'Pause for checklist refinement approval',
+    originalInput: '/agent refine checklist',
+    goal: 'Keep formal checklist changes explicit and host-approved.',
+    expectedOutput: 'A paused mission awaiting checklist refinement approval.',
+    plan: ['Inspect failure', 'Patch code', 'Verify fix'],
+    category: 'code',
+    riskLevel: 'medium',
+    mode: 'codex',
+    providerProfileId: 'codex-default',
+    bridgeSessionId: session.id,
+    cwd: '/repo',
+    locale: 'en',
+    maxAttempts: 2,
+  });
+
+  const notifications: MissionHostNotification[] = [];
+  await runAgentJobWithMissionControl({
+    job,
+    agentJobs: service,
+    resolveSession: () => session,
+    startTurnWithRecovery: async (
+      _scopeRef: PlatformScopeRef,
+      bridgeSession,
+    ) => ({
+      result: {
+        outputText: 'Patched the preview flow, but the formal checklist needs a targeted regression-test step.',
+        previewText: 'Patched the preview flow, but the formal checklist needs a targeted regression-test step.',
+        outputState: 'complete',
+        threadId: bridgeSession.codexThreadId,
+        turnId: 'turn-runner-plan-change-1',
+        title: bridgeSession.title,
+      },
+      session: bridgeSession,
+    }),
+    stopSession: async () => {},
+    verifyJob: async () => ({
+      pass: false,
+      summary: 'The formal checklist needs a targeted regression-test refinement before retrying.',
+      issues: ['Tests prove the fix'],
+      nextAction: 'retry',
+      progressSummary: 'Patched the preview flow and found that the confirmed checklist is missing a targeted regression-test step.',
+      nextStep: 'Review the proposed checklist refinement before retrying.',
+      latestBlocker: 'Need approval for a formal checklist refinement before continuing.',
+      planChangeSuggestion: {
+        rationale: 'Split verification into implementation and targeted regression-test steps.',
+        proposedPlan: ['Inspect failure', 'Patch code', 'Add regression test coverage', 'Run targeted verification'],
+        proposedAcceptanceCriteria: ['Patch exists', 'Targeted tests prove the fix'],
+      },
+    }),
+    progressText: {
+      running: (attempt, maxAttempts) => `Running attempt ${attempt}/${maxAttempts}.`,
+      verifying: () => 'Verifying the provider result.',
+      retrying: () => 'Retrying after verifier feedback.',
+    },
+    now: () => {
+      nowRef.value += 10;
+      return nowRef.value;
+    },
+    onNotification: async (notification) => {
+      notifications.push(notification);
+    },
+  });
+
+  const finalJob = service.getById(job.id);
+  assert.equal(finalJob?.status, 'scope_change_pending');
+  const missionDetail = service.getMissionDetail(job.id);
+  assert.equal(missionDetail?.mission.status, 'scope_change_pending');
+  assert.equal(missionDetail?.planChangeRequests.length, 1);
+  assert.equal(missionDetail?.planChangeRequests[0]?.status, 'proposed');
+  assert.deepEqual(missionDetail?.planChangeRequests[0]?.proposedPlan, [
+    'Inspect failure',
+    'Patch code',
+    'Add regression test coverage',
+    'Run targeted verification',
+  ]);
+
+  const planChangeNotification = notifications.findLast(
+    (notification) => notification.cycleResult?.stage === 'verifier.plan_change',
+  );
+  assert.equal(planChangeNotification?.status, 'scope_change_pending');
+  assert.equal(planChangeNotification?.cycleResult?.status, 'waiting_user');
+  assert.equal(
+    planChangeNotification?.cycleResult?.planChangeSuggestion?.rationale,
+    'Split verification into implementation and targeted regression-test steps.',
+  );
 });

@@ -23,6 +23,7 @@ export interface MissionAttemptPromptContract {
   checklistVersion: number | null;
   activeChecklistItem: MissionPromptChecklistItem | null;
   objective: string;
+  immutablePrompt: string;
   expectedOutput: string;
   acceptanceCriteria: string[];
   currentPlan: string[];
@@ -67,6 +68,7 @@ export function createMissionAttemptPromptContract(
     checklistVersion: input.checklistSnapshot?.version ?? null,
     activeChecklistItem,
     objective: input.mission.immutableGoal,
+    immutablePrompt: input.mission.immutablePrompt,
     expectedOutput: input.mission.expectedOutput,
     acceptanceCriteria: [...input.mission.acceptanceCriteria],
     currentPlan: [...input.mission.plan],
@@ -97,6 +99,9 @@ export function renderMissionAttemptPromptContract(contract: MissionAttemptPromp
   lines.push('');
   lines.push('Objective');
   lines.push(contract.objective);
+  lines.push('');
+  lines.push('Immutable mission prompt');
+  lines.push(contract.immutablePrompt);
   lines.push('');
   lines.push('Expected output');
   lines.push(contract.expectedOutput);

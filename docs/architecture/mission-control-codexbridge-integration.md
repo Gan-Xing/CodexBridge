@@ -318,6 +318,21 @@ Current convergence status:
     plan verbatim
   - first-host code drafts now surface repo-aware prompt/checklist scaffolding
     plus explicit checklist-stewardship rules before the first autonomous cycle
+- Phase 9v.b now makes plan-first cycle progress authoritative across that same
+  first-host baseline:
+  - runtime prompt focus, checklist progression, and loop snapshots now lead
+    with confirmed `plan[]` items when they exist instead of hiding behind
+    acceptance-only progress
+  - verifier cycle results now persist authoritative progress summaries, next
+    steps, and blockers that hosts can render directly
+- Phase 9v.c now closes the remaining checklist-refinement gate on top of that
+  cycle-progress baseline:
+  - verifier results can now emit explicit formal checklist refinement
+    suggestions that route through package-owned `PlanChangeRequest`
+    `scope_change_pending` pauses instead of silently rewriting confirmed scope
+  - workpad substeps stay progress-only, and the per-attempt execution prompt
+    now carries the confirmed `immutablePrompt` so checklist-stewardship rules
+    survive beyond the first-host draft screen
 - broader issue/board sources, service exposure, and later providers remain
   explicitly deferred; they should not reopen bridge-owned runtime truth or
   weaken the current package/host adapter split when work resumes
@@ -487,18 +502,16 @@ Important clarification:
 
 ## Practical Next Step
 
-The useful next step is a narrow `Phase 9v` reopen before service exposure:
+`Phase 9v` is now closed. The useful next step is `Phase 10` service exposure
+on top of the existing package-owned `commands / queries / streams` contract:
 
-1. harden the first-host `/agent` draft experience so code missions produce
-   repo-aware prompt/checklist drafts instead of generic lifecycle plans
-2. keep explicit `/agent` subcommands deterministic while moving natural-
-   language intake to a bounded model-assisted router plus a dedicated
-   create-flow pipeline
-3. make autonomous checklist stewardship explicit so each cycle updates TODO
-   status/progress and can propose safe checklist refinements through formal
-   package-owned change flows
-4. only after that reopen closes, move to `Phase 10` service exposure on top
-   of the existing package-owned `commands / queries / streams` contract
+1. wrap the same in-process Mission Control boundary in a later service layer
+2. prefer one canonical request/response schema across function calls and
+   service exposure
+3. map mission event/snapshot subscriptions to the streaming transport without
+   forking package runtime behavior
+4. keep later Telegram/web/CLI/API hosts consuming the same mission core
+   rather than rebuilding host-local mission truth
 5. keep later work-item sources such as GitHub/Linear and later providers
    deferred until they are explicitly back in scope
 

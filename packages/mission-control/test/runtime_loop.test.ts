@@ -261,6 +261,132 @@ continuation: allow
   assert.equal(finalChecklistSnapshot?.items.every((item) => item.status === 'completed'), true);
 });
 
+test('mission runtime pauses in scope_change_pending when the verifier proposes a formal checklist refinement', async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'mission-control-runtime-plan-change-cwd-'));
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mission-control-runtime-plan-change-state-'));
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mission-control-runtime-plan-change-root-'));
+  initGitRepo(cwd);
+  writeWorkflow(cwd, `
+version: 1
+maxTurns: 4
+maxAttempts: 3
+continuation: allow
+`);
+  const repo = new JsonFileMissionRepository(stateDir);
+  const nowRef = { value: 1_700_805_000_000 };
+
+  const provider: MissionProvider = {
+    kind: 'fake-provider',
+    async start() {
+      return {
+        providerRunId: 'run-plan-change-1',
+        providerThreadId: 'thread-runtime-plan-change',
+      };
+    },
+    async continue() {
+      throw new Error('continuation should not run in the plan-change test');
+    },
+    async wait() {
+      nowRef.value += 100;
+      return {
+        outcome: 'completed',
+        text: 'Patched the preview flow, but the confirmed checklist lacks a targeted regression-test step.',
+        artifacts: [],
+        previewText: 'Patched the preview flow, but the confirmed checklist lacks a targeted regression-test step.',
+        errorMessage: null,
+        requiresHuman: false,
+        handoffState: null,
+        continuationEligible: true,
+        stopReason: null,
+        rawState: 'complete',
+      };
+    },
+    async interrupt() {},
+  };
+
+  const verifier: MissionVerifier = {
+    async verify() {
+      nowRef.value += 50;
+      return createMissionVerifierResult({
+        verdict: 'repair',
+        summary: 'The mission needs a formal regression-test checklist refinement before another repair loop.',
+        missingAcceptanceCriteria: ['Tests prove the fix'],
+        progressSummary: 'Patched the preview flow and identified that the confirmed checklist is missing a targeted regression-test step.',
+        nextStep: 'Review the proposed checklist refinement before retrying.',
+        latestBlocker: 'Need approval for a formal checklist refinement before continuing.',
+        planChangeSuggestion: {
+          rationale: 'Split verification into implementation and targeted regression-test steps.',
+          proposedPlan: ['Inspect failure', 'Patch code', 'Add regression test coverage', 'Run targeted verification'],
+          proposedAcceptanceCriteria: ['Preview no longer freezes', 'Targeted tests prove the fix'],
+        },
+      });
+    },
+  };
+
+  const mission = createQueuedMission({
+    id: 'mission-runtime-plan-change',
+    cwd,
+    acceptanceCriteria: ['Preview no longer freezes', 'Tests prove the fix'],
+    maxAttempts: 3,
+    maxTurns: 4,
+    now: nowRef.value,
+  });
+  repo.saveMission(mission);
+
+  const runtime = createRuntimeHarness({
+    repository: repo,
+    provider,
+    verifier,
+    rootDir,
+    nowRef,
+    ids: [
+      'attempt-runtime-plan-change-1',
+      'request-runtime-plan-change-1',
+      'event-runtime-plan-change-1',
+      'event-runtime-plan-change-2',
+    ],
+  });
+  const result = await runtime.runMission(mission.id, {
+    ownerId: 'worker-runtime-plan-change',
+  });
+  const requests = repo.listPlanChangeRequests(mission.id);
+
+  assert.equal(result.mission.status, 'scope_change_pending');
+  assert.equal(
+    result.verifierResult?.planChangeSuggestion?.rationale,
+    'Split verification into implementation and targeted regression-test steps.',
+  );
+  assert.equal(result.latestCycleResult?.status, 'waiting_user');
+  assert.equal(result.latestCycleResult?.stage, 'verifier.plan_change');
+  assert.equal(
+    result.latestCycleResult?.nextStep,
+    'Review the proposed checklist refinement before retrying.',
+  );
+  assert.equal(
+    result.latestCycleResult?.blocker,
+    'Resolve the proposed checklist scope change before continuing the mission.',
+  );
+  assert.equal(
+    result.latestCycleResult?.planChangeSuggestion?.planChangeRequestId,
+    requests[0]?.id,
+  );
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0]?.status, 'proposed');
+  assert.deepEqual(requests[0]?.proposedPlan, [
+    'Inspect failure',
+    'Patch code',
+    'Add regression test coverage',
+    'Run targeted verification',
+  ]);
+
+  const eventKinds = repo.listEvents(mission.id).map((event) => event.kind);
+  assert.ok(eventKinds.includes('mission.scope_change_pending'));
+  assert.ok(eventKinds.includes('mission.progress'));
+
+  const checkpoints = repo.listCheckpoints(mission.id);
+  assert.ok(checkpoints.some((checkpoint) => checkpoint.stage === 'verifier.plan_change'));
+});
+
 test('mission runtime emits package-backed host notifications after authoritative loop cycle updates', async () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'mission-control-runtime-notify-cwd-'));
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mission-control-runtime-notify-state-'));

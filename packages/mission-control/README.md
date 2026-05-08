@@ -36,7 +36,7 @@ It must not own bridge behavior:
 
 Current phase:
 
-- `phase-9v-plan-first-cycle-progress`: package-owned mission
+- `phase-9v-checklist-refinement-gates`: package-owned mission
   domain/workflow/workspace/provider/verifier/runtime foundations, first-class
   `WorkItem` / `ChecklistSnapshot` / `PlanChangeRequest` /
   `MissionGeneration` lineage, direct in-process `commands / queries / streams`
@@ -87,7 +87,12 @@ Current phase:
   advance against the confirmed checklist/TODO instead of implicitly leading
   with acceptance-only items. Bridge-side verifier results can now also persist
   authoritative per-cycle progress summaries, next steps, and blockers through
-  package-owned cycle/workpad state.
+  package-owned cycle/workpad state. Verifier results can now also pause the
+  runtime behind explicit `PlanChangeRequest` gates when the confirmed formal
+  checklist needs a split / append / reorder / merge / drop / rename change,
+  while workpad substeps stay progress-only and the per-attempt prompt now
+  includes the confirmed `immutablePrompt` instead of dropping it before
+  execution.
 
 This package should preserve the Symphony-style separation between:
 

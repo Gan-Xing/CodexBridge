@@ -28,6 +28,7 @@ import type {
   ChecklistItem,
   ChecklistSnapshot,
   MissionHostNotification,
+  MissionPlanChangeSuggestion,
 } from '../../packages/mission-control/src/index.js';
 import {
   createI18n,
@@ -611,6 +612,7 @@ type AgentVerificationResult = {
   progressSummary: string | null;
   nextStep: string | null;
   latestBlocker: string | null;
+  planChangeSuggestion: MissionPlanChangeSuggestion | null;
 };
 
 type AgentVerificationContext = {
@@ -11291,6 +11293,7 @@ export class BridgeCoordinator {
         progressSummary: hardFailure,
         nextStep: null,
         latestBlocker: hardFailure,
+        planChangeSuggestion: null,
       };
     }
     const codexVerification = await this.verifyAgentResultWithCodex(job, result, session, context).catch(() => null);
@@ -11314,6 +11317,7 @@ export class BridgeCoordinator {
       progressSummary: this.t('coordinator.agent.verifyFallbackPass'),
       nextStep: null,
       latestBlocker: null,
+      planChangeSuggestion: null,
     };
   }
 
@@ -12791,8 +12795,10 @@ function buildOpenAIAgentVerifierInstructions(locale: string | null): string {
     'Judge whether the current formal checklist item is complete, and only treat the whole mission as complete when the final checklist item also satisfies the goal and acceptance criteria.',
     'Return strict JSON only, without markdown.',
     'Schema:',
-    '{"pass":true,"summary":"short verdict","issues":[],"nextAction":"complete|retry|fail","progressSummary":"authoritative cycle summary","nextStep":"smallest next step or null","latestBlocker":"blocking reason or null"}',
+    '{"pass":true,"summary":"short verdict","issues":[],"nextAction":"complete|retry|fail","progressSummary":"authoritative cycle summary","nextStep":"smallest next step or null","latestBlocker":"blocking reason or null","planChangeSuggestion":null}',
+    'When a formal checklist change is needed, set planChangeSuggestion={"rationale":"why the confirmed formal checklist must change","proposedPlan":["..."],"proposedAcceptanceCriteria":["..."],"proposedExpectedOutput":"optional updated deliverable"}',
     'Use nextAction=retry when one more automated fix attempt is likely useful. Use fail when the task needs user input or cannot be judged.',
+    'Use planChangeSuggestion only when the formal checklist / expected output / acceptance criteria need a change-gated split, append, reorder, merge, drop, or rename. Internal substeps belong in workpad notes, not planChangeSuggestion.',
   ].join('\n');
 }
 
@@ -12880,7 +12886,8 @@ function buildAgentVerifierPrompt(
     `你是 CodexBridge 后台 Agent 的 verifier。请用${language}判断任务是否通过。`,
     '只返回严格 JSON，不要 Markdown。',
     'Schema:',
-    '{"pass":true,"summary":"简短结论","issues":[],"nextAction":"complete|retry|fail","progressSummary":"本轮权威进展摘要","nextStep":"下一步或 null","latestBlocker":"阻塞原因或 null"}',
+    '{"pass":true,"summary":"简短结论","issues":[],"nextAction":"complete|retry|fail","progressSummary":"本轮权威进展摘要","nextStep":"下一步或 null","latestBlocker":"阻塞原因或 null","planChangeSuggestion":null}',
+    '如果需要正式 checklist 变更，planChangeSuggestion 使用：{"rationale":"为什么正式 checklist 必须调整","proposedPlan":["..."],"proposedAcceptanceCriteria":["..."],"proposedExpectedOutput":"可选的新交付物"}',
     '',
     `目标：${job.goal}`,
     `最终交付物：${job.expectedOutput}`,
@@ -12895,6 +12902,7 @@ function buildAgentVerifierPrompt(
     '1. 优先判断当前正式 checklist item 是否完成，而不是直接按整条任务是否已完全结束来判断。',
     '2. 只有当这是最后一个正式 checklist item 时，才要求整体目标、最终交付物和验收标准也满足。',
     '3. progressSummary 必须概括本轮真实进展；nextStep 必须是最小下一步；latestBlocker 无阻塞时返回 null。',
+    '4. 如果只是内部执行 substeps 需要细化，不要写 planChangeSuggestion；只有正式 checklist / expectedOutput / acceptanceCriteria 需要变更时，才返回 planChangeSuggestion。',
     '',
     '输出内容：',
     truncateText(String(result?.outputText ?? result?.previewText ?? ''), 6000),
@@ -13166,6 +13174,9 @@ function parseAgentVerificationResult(value: unknown): AgentVerificationResult |
   const progressSummary = normalizeNullableText(parsed.progressSummary ?? parsed.progress_summary ?? parsed.latestProgressSummary);
   const nextStep = normalizeNullableText(parsed.nextStep ?? parsed.next_step);
   const latestBlocker = normalizeNullableText(parsed.latestBlocker ?? parsed.latest_blocker ?? parsed.blocker);
+  const planChangeSuggestion = parseAgentPlanChangeSuggestion(
+    parsed.planChangeSuggestion ?? parsed.plan_change_suggestion ?? parsed.formalChecklistChange,
+  );
   if (isAgentVerificationSchemaPlaceholder(summary)) {
     return null;
   }
@@ -13180,7 +13191,52 @@ function parseAgentVerificationResult(value: unknown): AgentVerificationResult |
     progressSummary: progressSummary ?? normalizedSummary,
     nextStep,
     latestBlocker,
+    planChangeSuggestion,
   };
+}
+
+function parseAgentPlanChangeSuggestion(value: unknown): MissionPlanChangeSuggestion | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  const parsed = value as Record<string, unknown>;
+  const rationale = normalizeNullableText(parsed.rationale ?? parsed.reason ?? parsed.summary);
+  const hasExpectedOutput = Object.prototype.hasOwnProperty.call(parsed, 'proposedExpectedOutput')
+    || Object.prototype.hasOwnProperty.call(parsed, 'proposed_expected_output');
+  const hasAcceptanceCriteria = Object.prototype.hasOwnProperty.call(parsed, 'proposedAcceptanceCriteria')
+    || Object.prototype.hasOwnProperty.call(parsed, 'proposed_acceptance_criteria');
+  const hasPlan = Object.prototype.hasOwnProperty.call(parsed, 'proposedPlan')
+    || Object.prototype.hasOwnProperty.call(parsed, 'proposed_plan');
+  if (!rationale || (!hasExpectedOutput && !hasAcceptanceCriteria && !hasPlan)) {
+    return null;
+  }
+  const suggestion: MissionPlanChangeSuggestion = {
+    rationale,
+  };
+  if (hasExpectedOutput) {
+    suggestion.proposedExpectedOutput = normalizeNullableText(
+      parsed.proposedExpectedOutput ?? parsed.proposed_expected_output,
+    );
+  }
+  if (hasAcceptanceCriteria) {
+    const acceptanceCriteria = parsed.proposedAcceptanceCriteria ?? parsed.proposed_acceptance_criteria;
+    suggestion.proposedAcceptanceCriteria = Array.isArray(acceptanceCriteria)
+      ? acceptanceCriteria
+        .map((entry: unknown) => compactWhitespace(entry))
+        .filter(Boolean)
+        .slice(0, 12)
+      : [];
+  }
+  if (hasPlan) {
+    const proposedPlan = parsed.proposedPlan ?? parsed.proposed_plan;
+    suggestion.proposedPlan = Array.isArray(proposedPlan)
+      ? proposedPlan
+        .map((entry: unknown) => compactWhitespace(entry))
+        .filter(Boolean)
+        .slice(0, 12)
+      : [];
+  }
+  return suggestion;
 }
 
 function buildAssistantRecordRoutePrompt(

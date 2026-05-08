@@ -7,6 +7,7 @@ import {
   createMissionRepairPrompt,
   createMissionVerifierResult,
   mapMissionVerifierVerdictToMissionStatus,
+  resolveMissionPlanChangeSuggestion,
   resolveMissionVerifierBudget,
   transitionMission,
   evaluateMissionVerifierBudget,
@@ -148,6 +149,40 @@ test('verifier helpers persist summaries and missing acceptance criteria onto at
   assert.match(repairPrompt, /Verifier repair contract/);
   assert.match(repairPrompt, /Preview no longer freezes/);
   assert.match(repairPrompt, /Tests prove the fix/);
+});
+
+test('verifier helpers normalize formal checklist refinement suggestions without treating workpad substeps as checklist changes', () => {
+  const { mission } = createVerifyingMissionAndAttempt();
+  const result = createMissionVerifierResult({
+    verdict: 'repair',
+    summary: 'The fix needs a targeted regression-test checklist item before retrying.',
+    missingAcceptanceCriteria: ['Tests prove the fix'],
+    planChangeSuggestion: {
+      rationale: 'Split verification into implementation and targeted regression-test steps.',
+      proposedPlan: ['Inspect failure', 'Patch code', 'Add regression test coverage', 'Run targeted verification'],
+      proposedAcceptanceCriteria: ['Preview no longer freezes', 'Targeted tests prove the fix'],
+    },
+  });
+
+  assert.equal(
+    result.planChangeSuggestion?.rationale,
+    'Split verification into implementation and targeted regression-test steps.',
+  );
+  assert.equal(
+    resolveMissionPlanChangeSuggestion(mission, {
+      rationale: 'Keep the workpad notes more detailed.',
+    }),
+    null,
+  );
+  assert.deepEqual(
+    resolveMissionPlanChangeSuggestion(mission, result.planChangeSuggestion),
+    {
+      rationale: 'Split verification into implementation and targeted regression-test steps.',
+      proposedExpectedOutput: mission.expectedOutput,
+      proposedAcceptanceCriteria: ['Preview no longer freezes', 'Targeted tests prove the fix'],
+      proposedPlan: ['Inspect failure', 'Patch code', 'Add regression test coverage', 'Run targeted verification'],
+    },
+  );
 });
 
 test('verifier budget helpers resolve workflow limits and report exhausted budgets', () => {

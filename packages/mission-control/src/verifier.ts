@@ -46,6 +46,7 @@ export interface MissionVerifierResult {
   progressSummary: string | null;
   nextStep: string | null;
   latestBlocker: string | null;
+  planChangeSuggestion: MissionPlanChangeSuggestion | null;
 }
 
 export interface CreateMissionVerifierResultInput {
@@ -56,6 +57,21 @@ export interface CreateMissionVerifierResultInput {
   progressSummary?: string | null;
   nextStep?: string | null;
   latestBlocker?: string | null;
+  planChangeSuggestion?: MissionPlanChangeSuggestion | null;
+}
+
+export interface MissionPlanChangeSuggestion {
+  rationale: string;
+  proposedExpectedOutput?: string | null;
+  proposedAcceptanceCriteria?: string[] | null;
+  proposedPlan?: string[] | null;
+}
+
+export interface ResolvedMissionPlanChangeSuggestion {
+  rationale: string;
+  proposedExpectedOutput: string | null;
+  proposedAcceptanceCriteria: string[];
+  proposedPlan: string[];
 }
 
 export interface MissionVerifier {
@@ -119,6 +135,77 @@ export function createMissionVerifierResult(
     progressSummary: normalizeText(input.progressSummary) ?? summary,
     nextStep: normalizeText(input.nextStep),
     latestBlocker: normalizeText(input.latestBlocker),
+    planChangeSuggestion: normalizeMissionPlanChangeSuggestion(input.planChangeSuggestion),
+  };
+}
+
+export function normalizeMissionPlanChangeSuggestion(
+  value: MissionPlanChangeSuggestion | null | undefined,
+): MissionPlanChangeSuggestion | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  const rationale = normalizeText(value.rationale);
+  if (!rationale) {
+    return null;
+  }
+  const hasExpectedOutput = hasOwn(value, 'proposedExpectedOutput');
+  const hasAcceptanceCriteria = hasOwn(value, 'proposedAcceptanceCriteria');
+  const hasPlan = hasOwn(value, 'proposedPlan');
+  if (!hasExpectedOutput && !hasAcceptanceCriteria && !hasPlan) {
+    return null;
+  }
+  const suggestion: MissionPlanChangeSuggestion = {
+    rationale,
+  };
+  if (hasExpectedOutput) {
+    suggestion.proposedExpectedOutput = normalizeText(value.proposedExpectedOutput) ?? null;
+  }
+  if (hasAcceptanceCriteria) {
+    suggestion.proposedAcceptanceCriteria = value.proposedAcceptanceCriteria === null
+      ? null
+      : normalizeStringList(value.proposedAcceptanceCriteria);
+  }
+  if (hasPlan) {
+    suggestion.proposedPlan = value.proposedPlan === null
+      ? null
+      : normalizeStringList(value.proposedPlan);
+  }
+  return suggestion;
+}
+
+export function resolveMissionPlanChangeSuggestion(
+  mission: Pick<Mission, 'expectedOutput' | 'acceptanceCriteria' | 'plan'>,
+  suggestion: MissionPlanChangeSuggestion | null | undefined,
+): ResolvedMissionPlanChangeSuggestion | null {
+  const normalized = normalizeMissionPlanChangeSuggestion(suggestion);
+  if (!normalized) {
+    return null;
+  }
+  const proposedExpectedOutput = hasOwn(normalized, 'proposedExpectedOutput')
+    ? normalizeText(normalized.proposedExpectedOutput) ?? mission.expectedOutput
+    : mission.expectedOutput;
+  const proposedAcceptanceCriteria = hasOwn(normalized, 'proposedAcceptanceCriteria')
+    ? normalized.proposedAcceptanceCriteria === null
+      ? [...mission.acceptanceCriteria]
+      : normalizeStringList(normalized.proposedAcceptanceCriteria)
+    : [...mission.acceptanceCriteria];
+  const proposedPlan = hasOwn(normalized, 'proposedPlan')
+    ? normalized.proposedPlan === null
+      ? [...mission.plan]
+      : normalizeStringList(normalized.proposedPlan)
+    : [...mission.plan];
+  const changed = proposedExpectedOutput !== mission.expectedOutput
+    || !isSameStringList(proposedAcceptanceCriteria, mission.acceptanceCriteria)
+    || !isSameStringList(proposedPlan, mission.plan);
+  if (!changed) {
+    return null;
+  }
+  return {
+    rationale: normalized.rationale,
+    proposedExpectedOutput,
+    proposedAcceptanceCriteria,
+    proposedPlan,
   };
 }
 
@@ -347,6 +434,17 @@ function normalizeStringList(values: readonly string[] | null | undefined): stri
     normalized.push(text);
   }
   return normalized;
+}
+
+function hasOwn<T extends object>(value: T, key: PropertyKey): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function isSameStringList(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+  return left.every((value, index) => value === right[index]);
 }
 
 function renderBullets(values: readonly string[]): string[] {
