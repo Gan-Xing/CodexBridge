@@ -9,12 +9,14 @@ import {
   MissionLeaseCoordinator,
   MissionRuntime,
   MissionWorkspaceService,
+  createNoopMissionHostAdapter,
   createMission,
   createMissionStopRequest,
   createMissionVerifierResult,
   transitionMission,
 } from '../src/index.js';
 import type {
+  MissionHostAdapter,
   MissionAttempt,
   MissionProvider,
   MissionProviderResult,
@@ -75,12 +77,14 @@ function createRuntimeHarness(input: {
   rootDir: string;
   nowRef: { value: number };
   ids?: string[];
+  hostAdapter?: MissionHostAdapter | null;
 }) {
   const ids = [...(input.ids ?? [])];
   return new MissionRuntime({
     repository: input.repository,
     provider: input.provider,
     verifier: input.verifier,
+    hostAdapter: input.hostAdapter ?? null,
     workspaceService: new MissionWorkspaceService({
       rootDir: input.rootDir,
       host: 'runtime-test-host',
@@ -254,6 +258,155 @@ continuation: allow
   assert.ok(eventKinds.includes('mission.completed'));
   const finalChecklistSnapshot = repo.getChecklistSnapshotById(result.mission.currentChecklistSnapshotId);
   assert.equal(finalChecklistSnapshot?.items.every((item) => item.status === 'completed'), true);
+});
+
+test('mission runtime emits package-backed host notifications after authoritative loop cycle updates', async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'mission-control-runtime-notify-cwd-'));
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mission-control-runtime-notify-state-'));
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mission-control-runtime-notify-root-'));
+  initGitRepo(cwd);
+  writeWorkflow(cwd, `
+version: 1
+maxTurns: 5
+maxAttempts: 4
+continuation: allow
+`);
+  const repo = new JsonFileMissionRepository(stateDir);
+  const nowRef = { value: 1_700_810_000_000 };
+  const notifications: Array<Record<string, unknown>> = [];
+
+  const waitResults = new Map<string, MissionProviderResult>([
+    ['run-notify-1', {
+      outcome: 'completed',
+      text: 'Patched the preview path.',
+      artifacts: [],
+      previewText: 'Patched the preview path.',
+      errorMessage: null,
+      requiresHuman: false,
+      handoffState: null,
+      continuationEligible: true,
+      stopReason: null,
+      rawState: 'complete',
+    }],
+    ['run-notify-2', {
+      outcome: 'completed',
+      text: 'Patched the preview path, but tests still need to run.',
+      artifacts: [],
+      previewText: 'Patched the preview path, but tests still need to run.',
+      errorMessage: null,
+      requiresHuman: false,
+      handoffState: null,
+      continuationEligible: true,
+      stopReason: null,
+      rawState: 'complete',
+    }],
+    ['run-notify-3', {
+      outcome: 'completed',
+      text: 'Patched the preview path and reran the failing tests.',
+      artifacts: [],
+      previewText: 'Patched the preview path and reran the failing tests.',
+      errorMessage: null,
+      requiresHuman: false,
+      handoffState: null,
+      continuationEligible: true,
+      stopReason: null,
+      rawState: 'complete',
+    }],
+  ]);
+  let providerCallCount = 0;
+  const provider: MissionProvider = {
+    kind: 'fake-provider',
+    async start() {
+      providerCallCount += 1;
+      return {
+        providerRunId: `run-notify-${providerCallCount}`,
+        providerThreadId: 'thread-runtime-notify',
+      };
+    },
+    async continue() {
+      throw new Error('continuation should not run in the notification test');
+    },
+    async wait(runId) {
+      nowRef.value += 100;
+      const result = waitResults.get(runId);
+      assert.ok(result, `missing wait result for ${runId}`);
+      return result;
+    },
+    async interrupt() {},
+  };
+
+  let verifierCalls = 0;
+  const verifier: MissionVerifier = {
+    async verify() {
+      verifierCalls += 1;
+      nowRef.value += 50;
+      if (verifierCalls === 1) {
+        return createMissionVerifierResult({
+          verdict: 'complete',
+          summary: 'Checklist item complete: Patch exists',
+        });
+      }
+      if (verifierCalls === 2) {
+        return createMissionVerifierResult({
+          verdict: 'repair',
+          summary: 'Verification requested another pass before the mission can finish.',
+          missingAcceptanceCriteria: ['Tests prove the fix'],
+        });
+      }
+      return createMissionVerifierResult({
+        verdict: 'complete',
+        summary: 'Acceptance criteria satisfied with test evidence.',
+      });
+    },
+  };
+
+  const mission = createQueuedMission({
+    id: 'mission-runtime-notify',
+    cwd,
+    acceptanceCriteria: ['Patch exists', 'Tests prove the fix'],
+    maxAttempts: 4,
+    maxTurns: 5,
+    now: nowRef.value,
+  });
+  repo.saveMission(mission);
+
+  const runtime = createRuntimeHarness({
+    repository: repo,
+    provider,
+    verifier,
+    rootDir,
+    nowRef,
+    hostAdapter: createNoopMissionHostAdapter({
+      async notify(notification) {
+        notifications.push(structuredClone(notification) as unknown as Record<string, unknown>);
+      },
+    }),
+    ids: [
+      'attempt-runtime-notify-1',
+      'attempt-runtime-notify-2',
+      'attempt-runtime-notify-3',
+    ],
+  });
+
+  const result = await runtime.runMission(mission.id, {
+    ownerId: 'worker-runtime-notify',
+  });
+
+  assert.equal(result.mission.status, 'completed');
+  assert.deepEqual(
+    notifications.map((notification) => notification.cycleResult?.status),
+    ['continue', 'retry', 'done'],
+  );
+  assert.equal(notifications[0]?.status, 'queued');
+  assert.equal(notifications[0]?.loopSnapshot?.currentStage, 'verifier.complete');
+  assert.equal(notifications[0]?.loopSnapshot?.overallCompletion, 33);
+  assert.equal(notifications[0]?.loopSnapshot?.currentItemTitle, 'Tests prove the fix');
+  assert.equal(notifications[1]?.status, 'repairing');
+  assert.equal(notifications[1]?.loopSnapshot?.currentStage, 'verifier.repair');
+  assert.equal(notifications[1]?.loopSnapshot?.currentItemTitle, 'Tests prove the fix');
+  assert.equal(notifications[2]?.status, 'completed');
+  assert.equal(notifications[2]?.loopSnapshot?.currentStage, 'verifier.complete');
+  assert.equal(notifications[2]?.loopSnapshot?.overallCompletion, 100);
 });
 
 test('mission runtime advances to the next checklist item when verifier feedback only blocks later acceptance criteria', async () => {

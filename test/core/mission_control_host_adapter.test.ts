@@ -67,6 +67,7 @@ test('CodexBridgeMissionHostAdapter forwards context, binding, progress, and app
   }> = [];
   const progress: Array<Record<string, unknown>> = [];
   const approvals: Array<Record<string, unknown>> = [];
+  const notifications: Array<Record<string, unknown>> = [];
 
   const adapter = new CodexBridgeMissionHostAdapter({
     jobId: job.id,
@@ -80,6 +81,9 @@ test('CodexBridgeMissionHostAdapter forwards context, binding, progress, and app
     },
     onApprovalRequest: async (request) => {
       approvals.push(request as unknown as Record<string, unknown>);
+    },
+    onNotification: async (notification) => {
+      notifications.push(notification as unknown as Record<string, unknown>);
     },
   });
 
@@ -134,4 +138,39 @@ test('CodexBridgeMissionHostAdapter forwards context, binding, progress, and app
   assert.equal(approvals[0]?.threadId, session.codexThreadId);
   assert.equal(approvals[0]?.command, 'npm test');
   assert.deepEqual(approvals[0]?.fileWritePermissions, ['/repo']);
+
+  await adapter.notify({
+    missionId: job.id,
+    attemptId: 'attempt-host-adapter-1',
+    status: 'repairing',
+    kind: 'cycle_update',
+    notificationKey: 'job-host-adapter-1:cycle:1',
+    summary: 'Verification requested a repair.',
+    loopSnapshot: {
+      missionId: job.id,
+      status: 'repairing',
+      loopStatus: 'retry',
+      currentCycle: 1,
+      currentStage: 'verifier.repair',
+      currentProgress: 'Verification requested a repair.',
+      currentItemId: 'item-1',
+      currentItemTitle: 'Patch exists',
+      currentItemStatus: 'blocked',
+      checklistVersion: 1,
+      overallCompletion: 0,
+      nextStep: 'Render a repair prompt and retry the mission within budget.',
+      latestBlocker: 'Tests still need to run.',
+      latestVerifierSummary: 'Verification requested a repair.',
+      finalResultSummary: null,
+      pendingApproval: null,
+      stopRequest: null,
+      resumable: true,
+      supervisable: true,
+      lastEventAt: 1_701_300_000_123,
+      updatedAt: 1_701_300_000_123,
+    },
+    cycleResult: null,
+  });
+  assert.equal(notifications[0]?.kind, 'cycle_update');
+  assert.equal(notifications[0]?.loopSnapshot?.currentStage, 'verifier.repair');
 });

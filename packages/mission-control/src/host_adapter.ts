@@ -1,3 +1,5 @@
+import type { MissionCycleResult } from './cycle_result.js';
+import type { MissionLoopSnapshotView } from './api_contract.js';
 import type { MissionProviderArtifact } from './provider.js';
 import type {
   MissionPendingApprovalOption,
@@ -54,7 +56,11 @@ export interface MissionHostNotification {
   missionId: string;
   attemptId: string | null;
   status: MissionStatus;
+  kind?: 'cycle_update' | 'status_update';
+  notificationKey?: string | null;
   summary: string;
+  loopSnapshot?: MissionLoopSnapshotView | null;
+  cycleResult?: MissionCycleResult | null;
   details?: Record<string, unknown> | null;
 }
 

@@ -210,12 +210,6 @@ test('package-owned mission contracts can drive a later non-CodexBridge host wit
         attemptId: input.attempt.id,
         artifacts: input.providerResult.artifacts,
       });
-      await hostAdapter.notify({
-        missionId: input.mission.id,
-        attemptId: input.attempt.id,
-        status: 'completed',
-        summary: 'CLI host observed a verified completion.',
-      });
       return createMissionVerifierResult({
         verdict: 'complete',
         summary: 'CLI host proof accepted through the package-owned verifier contract.',
@@ -227,6 +221,7 @@ test('package-owned mission contracts can drive a later non-CodexBridge host wit
     repository,
     provider,
     verifier,
+    hostAdapter,
     workspaceService: new MissionWorkspaceService({
       rootDir,
       host: 'cli-proof-host',
@@ -364,4 +359,7 @@ test('package-owned mission contracts can drive a later non-CodexBridge host wit
   assert.equal(artifactPublications[0]?.artifacts[0]?.path, artifactPath);
   assert.equal(notifications.length, 1);
   assert.equal(notifications[0]?.status, 'completed');
+  assert.equal(notifications[0]?.kind, 'cycle_update');
+  assert.equal(notifications[0]?.loopSnapshot?.currentStage, 'verifier.complete');
+  assert.equal(notifications[0]?.cycleResult?.status, 'done');
 });

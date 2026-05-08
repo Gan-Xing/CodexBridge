@@ -1,3 +1,4 @@
+import { DirectMissionControlApi } from './api.js';
 import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -57,12 +58,14 @@ import {
   createMissionAttemptPromptContract,
   renderMissionAttemptPromptContract,
 } from './prompt_contract.js';
+import type { MissionHostAdapter } from './host_adapter.js';
 import type { MissionWorkflowResolverReason } from './types.js';
 
 export interface MissionRuntimeOptions {
   repository: MissionRepository;
   provider: MissionProvider;
   verifier: MissionVerifier;
+  hostAdapter?: MissionHostAdapter | null;
   workflowLoader?: MissionWorkflowLoader;
   workflowResolver?: MissionWorkflowResolver;
   workspaceService?: MissionWorkspaceService;
@@ -96,6 +99,8 @@ export class MissionRuntime {
 
   private readonly verifier: MissionVerifier;
 
+  private readonly hostAdapter: MissionHostAdapter | null;
+
   private readonly workflowLoader: MissionWorkflowLoader;
 
   private readonly workflowResolver: MissionWorkflowResolver;
@@ -108,10 +113,13 @@ export class MissionRuntime {
 
   private readonly generateId: () => string;
 
+  private readonly readApi: DirectMissionControlApi;
+
   constructor({
     repository,
     provider,
     verifier,
+    hostAdapter = null,
     workflowLoader = new MissionWorkflowLoader(),
     workflowResolver = new MissionWorkflowResolver(),
     workspaceService = new MissionWorkspaceService(),
@@ -122,12 +130,20 @@ export class MissionRuntime {
     this.repository = repository;
     this.provider = provider;
     this.verifier = verifier;
+    this.hostAdapter = hostAdapter;
     this.workflowLoader = workflowLoader;
     this.workflowResolver = workflowResolver;
     this.workspaceService = workspaceService;
     this.leaseCoordinator = leaseCoordinator;
     this.now = now;
     this.generateId = generateId;
+    this.readApi = new DirectMissionControlApi({
+      repository,
+      now,
+      generateId,
+      workflowLoader,
+      workflowResolver,
+    });
   }
 
   async runMission(
@@ -200,6 +216,7 @@ export class MissionRuntime {
           resolverReason: workflowSelection.resolverReason,
           issues: [...workflowResult.error.issues],
         });
+        await this.emitHostNotification(mission, null, cycleResult);
         return this.finalizeRun(mission, options.ownerId, initialEventCount, {
           attempt: null,
           workflow: null,
@@ -254,7 +271,7 @@ export class MissionRuntime {
           });
         }
         mission = loopStop.mission;
-        const maxLoopsReached = this.materializeMaxLoopsReached(mission);
+        const maxLoopsReached = await this.materializeMaxLoopsReached(mission);
         if (maxLoopsReached) {
           return this.finalizeRun(maxLoopsReached, options.ownerId, initialEventCount, {
             attempt: lastAttempt,
@@ -363,6 +380,7 @@ export class MissionRuntime {
       this.saveCheckpointRecord(mission, lastAttempt, 'runtime.exception', summary, {
         error: summary,
       });
+      await this.emitHostNotification(mission, lastAttempt, cycleResult);
       return this.finalizeRun(mission, options.ownerId, initialEventCount, {
         attempt: lastAttempt,
         workflow,
@@ -589,6 +607,7 @@ export class MissionRuntime {
         this.saveCheckpointRecord(mission, failedAttempt, 'runtime.turn_budget', failedResult.summary, {
           budgetExceededReasons: [...turnIssues],
         });
+        await this.emitHostNotification(mission, failedAttempt, cycleResult);
         return {
           mission,
           attempt: failedAttempt,
@@ -713,6 +732,7 @@ export class MissionRuntime {
           providerRunId: attempt.providerRunId,
           continuationEligible: providerResult.continuationEligible,
         });
+        await this.emitHostNotification(mission, attempt, cycleResult);
         continue;
       }
 
@@ -771,6 +791,7 @@ export class MissionRuntime {
             outcome: providerResult.outcome,
           },
         );
+        await this.emitHostNotification(mission, endedAttempt, cycleResult);
         return {
           mission,
           attempt: endedAttempt,
@@ -814,6 +835,7 @@ export class MissionRuntime {
           providerRunId: endedAttempt.providerRunId,
           outcome: providerResult.outcome,
         });
+        await this.emitHostNotification(mission, endedAttempt, cycleResult);
         return {
           mission,
           attempt: endedAttempt,
@@ -859,6 +881,7 @@ export class MissionRuntime {
           providerRunId: endedAttempt.providerRunId,
           outcome: providerResult.outcome,
         });
+        await this.emitHostNotification(mission, endedAttempt, cycleResult);
         return {
           mission,
           attempt: endedAttempt,
@@ -1091,6 +1114,7 @@ export class MissionRuntime {
         missingAcceptanceCriteria: [...effectiveResult.missingAcceptanceCriteria],
         budgetExceededReasons: [...effectiveResult.budgetExceededReasons],
       });
+      await this.emitHostNotification(mission, updatedAttempt, cycleResult);
       return {
         mission,
         attempt: updatedAttempt,
@@ -1133,6 +1157,7 @@ export class MissionRuntime {
         verdict: effectiveResult.verdict,
         missingAcceptanceCriteria: [...effectiveResult.missingAcceptanceCriteria],
       });
+      await this.emitHostNotification(mission, updatedAttempt, cycleResult);
     } else {
       const cycleStatus = mapMissionStatusToMissionControlOutcome(mission.status) ?? 'failed';
       const cycleResult = this.buildMissionCycleResult({
@@ -1178,6 +1203,7 @@ export class MissionRuntime {
         missingAcceptanceCriteria: [...effectiveResult.missingAcceptanceCriteria],
         budgetExceededReasons: [...effectiveResult.budgetExceededReasons],
       });
+      await this.emitHostNotification(mission, updatedAttempt, cycleResult);
     }
 
     return {
@@ -1450,7 +1476,7 @@ export class MissionRuntime {
     return this.requireAttempt(mission.activeAttemptId);
   }
 
-  private materializeMaxLoopsReached(mission: Mission): Mission | null {
+  private async materializeMaxLoopsReached(mission: Mission): Promise<Mission | null> {
     const maxCycles = mission.loopPolicy.maxCycles;
     if (
       maxCycles === null
@@ -1511,6 +1537,7 @@ export class MissionRuntime {
       maxCycles,
       attemptCount: mission.attemptCount,
     });
+    await this.emitHostNotification(savedMission, latestAttempt, cycleResult);
     return savedMission;
   }
 
@@ -1770,6 +1797,50 @@ export class MissionRuntime {
     });
     if (!existingGeneration || JSON.stringify(existingGeneration) !== JSON.stringify(nextGeneration)) {
       this.repository.saveGeneration(nextGeneration);
+    }
+  }
+
+  private async emitHostNotification(
+    mission: Mission,
+    attempt: MissionAttempt | null,
+    cycleResult: MissionCycleResult | null,
+  ): Promise<void> {
+    if (!this.hostAdapter) {
+      return;
+    }
+    try {
+      const loopSnapshot = this.readApi.queries.getMissionLoopSnapshot({
+        meta: {
+          requestId: `mission-host-notify:${mission.id}:${cycleResult?.audit.eventSeq ?? 'current'}`,
+          correlationId: null,
+          idempotencyKey: null,
+        },
+        input: {
+          missionId: mission.id,
+        },
+      }).data;
+      if (!loopSnapshot) {
+        return;
+      }
+      await this.hostAdapter.notify({
+        missionId: mission.id,
+        attemptId: attempt?.id ?? null,
+        status: mission.status,
+        kind: 'cycle_update',
+        notificationKey: cycleResult
+          ? `${mission.id}:cycle:${cycleResult.audit.eventSeq}`
+          : `${mission.id}:status:${loopSnapshot.updatedAt}`,
+        summary: cycleResult?.progress ?? mission.statusReason ?? 'Mission loop updated.',
+        loopSnapshot,
+        cycleResult,
+        details: {
+          workflowPath: mission.workflowPath,
+          workflowHash: mission.workflowHash,
+          resolverReason: mission.workflowResolverReason,
+        },
+      });
+    } catch {
+      // Host notification delivery is best-effort and must not mutate runtime truth.
     }
   }
 }

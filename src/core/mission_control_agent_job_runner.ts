@@ -16,6 +16,7 @@ import {
   type MissionEnvironmentStamp,
   type MissionEvent,
   type MissionGeneration,
+  type MissionHostNotification,
   type MissionExecutionInput,
   type PlanChangeRequest,
   type MissionProvider,
@@ -44,6 +45,7 @@ import type { OutputArtifact, ProviderApprovalRequest, ProviderTurnProgress } fr
 
 type ProgressHandler = ((progress: ProviderTurnProgress) => Promise<void> | void) | null;
 type ApprovalHandler = ((request: ProviderApprovalRequest) => Promise<void> | void) | null;
+type NotificationHandler = ((notification: MissionHostNotification) => Promise<void> | void) | null;
 
 type AgentVerificationResultLike = {
   pass: boolean;
@@ -105,6 +107,7 @@ export interface RunAgentJobWithMissionControlOptions {
   now?: () => number;
   onProgress?: ProgressHandler;
   onApprovalRequest?: ApprovalHandler;
+  onNotification?: NotificationHandler;
 }
 
 export interface MissionControlAgentJobRunOutput {
@@ -184,6 +187,7 @@ export async function runAgentJobWithMissionControl(
     bindThread,
     onProgress: options.onProgress ?? null,
     onApprovalRequest: options.onApprovalRequest ?? null,
+    onNotification: options.onNotification ?? null,
   });
   let progressEventCounter = 0;
   const progressSink = new RepositoryMissionProgressSink({
@@ -219,6 +223,7 @@ export async function runAgentJobWithMissionControl(
     repository,
     provider,
     verifier,
+    hostAdapter,
     now,
   });
   const runResult = await runtime.runMission(mission.id, {
@@ -742,19 +747,6 @@ class BridgeMissionVerifier implements MissionVerifier {
         outputKind: 'commentary',
       });
     }
-    await this.options.hostAdapter.notify({
-      missionId: input.mission.id,
-      attemptId: input.attempt.id,
-      status: verification.pass || verification.nextAction === 'complete'
-        ? 'completed'
-        : verification.nextAction === 'retry'
-          ? 'repairing'
-          : 'failed',
-      summary: verification.summary,
-      details: verification.issues.length > 0
-        ? { issues: [...verification.issues] }
-        : null,
-    });
     return createMissionVerifierResult({
       verdict: verification.pass || verification.nextAction === 'complete'
         ? 'complete'

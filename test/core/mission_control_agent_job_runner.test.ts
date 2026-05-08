@@ -121,3 +121,123 @@ test('runAgentJobWithMissionControl persists provider progress through the packa
   assert.equal(progressEvents[2]?.summary, 'Ready to verify the patch.');
   assert.equal(progressEvents.some((event) => event.summary === 'Verifying the provider result.'), true);
 });
+
+test('runAgentJobWithMissionControl forwards package-backed loop notifications through the host adapter boundary', async () => {
+  const nowRef = { value: 1_701_710_000_000 };
+  const session: BridgeSession = {
+    id: 'session-runner-notify-1',
+    providerProfileId: 'codex-default',
+    codexThreadId: 'thread-runner-notify-1',
+    cwd: '/repo',
+    title: 'Runner notification session',
+    createdAt: nowRef.value - 100,
+    updatedAt: nowRef.value - 50,
+  };
+  const missionRepository = new InMemoryMissionRepository();
+  const agentJobs = new InMemoryAgentJobRepository();
+  const service = new AgentJobService({
+    agentJobs,
+    missionRepository,
+    bridgeSessions: {
+      getSessionById(bridgeSessionId: string) {
+        return bridgeSessionId === session.id ? session : null;
+      },
+    },
+    now: () => nowRef.value,
+  });
+  const job = service.createJob({
+    scopeRef: {
+      platform: 'weixin',
+      externalScopeId: 'wx-runner-notify-1',
+    },
+    title: 'Forward mission notifications',
+    originalInput: '/agent notify',
+    goal: 'Forward authoritative loop notifications back to the host.',
+    expectedOutput: 'A verified repair summary.',
+    plan: ['Run provider', 'Retry once', 'Verify result'],
+    category: 'code',
+    riskLevel: 'medium',
+    mode: 'codex',
+    providerProfileId: 'codex-default',
+    bridgeSessionId: session.id,
+    cwd: '/repo',
+    locale: 'en',
+    maxAttempts: 3,
+  });
+
+  const notifications: Array<Record<string, unknown>> = [];
+  let verifierCallCount = 0;
+  let turnCount = 0;
+
+  await runAgentJobWithMissionControl({
+    job,
+    agentJobs: service,
+    resolveSession: () => session,
+    startTurnWithRecovery: async (
+      _scopeRef: PlatformScopeRef,
+      bridgeSession,
+    ) => {
+      turnCount += 1;
+      return {
+        result: {
+          outputText: turnCount === 1
+            ? 'Patched the preview flow.'
+            : 'Patched the preview flow and reran the tests.',
+          previewText: turnCount === 1
+            ? 'Patched the preview flow.'
+            : 'Patched the preview flow and reran the tests.',
+          outputState: 'complete',
+          threadId: bridgeSession.codexThreadId,
+          turnId: `turn-runner-notify-${turnCount}`,
+          title: bridgeSession.title,
+        },
+        session: bridgeSession,
+      };
+    },
+    stopSession: async () => {},
+    verifyJob: async () => {
+      verifierCallCount += 1;
+      if (verifierCallCount === 1) {
+        return {
+          pass: false,
+          summary: 'Verification requested a repair before the mission can continue.',
+          issues: ['Tests prove the fix'],
+          nextAction: 'retry',
+        };
+      }
+      return {
+        pass: true,
+        summary: 'Verification passed after the retry.',
+        issues: [],
+        nextAction: 'complete',
+      };
+    },
+    progressText: {
+      running: (attempt, maxAttempts) => `Running attempt ${attempt}/${maxAttempts}.`,
+      verifying: () => 'Verifying the provider result.',
+      retrying: () => 'Retrying after verifier feedback.',
+    },
+    now: () => {
+      nowRef.value += 10;
+      return nowRef.value;
+    },
+    onNotification: async (notification) => {
+      notifications.push(notification as unknown as Record<string, unknown>);
+    },
+  });
+
+  assert.equal(turnCount, 2);
+  assert.equal(notifications.length >= 2, true);
+  const loopNotification = notifications.find(
+    (notification) => notification.cycleResult?.status === 'continue'
+      || notification.cycleResult?.status === 'retry',
+  );
+  const doneNotification = notifications.findLast(
+    (notification) => notification.cycleResult?.status === 'done',
+  );
+  assert.equal(notifications[0]?.kind, 'cycle_update');
+  assert.equal(loopNotification?.loopSnapshot?.currentStage?.startsWith('verifier.'), true);
+  assert.equal(loopNotification?.loopSnapshot?.currentCycle, 1);
+  assert.equal(doneNotification?.status, 'completed');
+  assert.equal(doneNotification?.loopSnapshot?.currentStage, 'verifier.complete');
+});

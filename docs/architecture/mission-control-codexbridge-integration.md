@@ -285,11 +285,18 @@ Current convergence status:
   - bridge compatibility projections now retain those environment/checkpoint
     artifacts inside `missionRuntimeState`, but they remain package-owned
     runtime truth rather than a new bridge authority
-- the remaining Phase 9 gaps are now:
-  - policy-driven proactive notification:
-    package-backed loop snapshots can already be queried on demand, but the
-    `/agent` host path still does not wire mission-cycle/status notifications
-    through its host adapter/send path as a first-class user-facing behavior
+- Phase 9t now adds the first host-side proactive loop notification policy on
+  top of that package/runtime boundary:
+  - Mission Control runtime now emits structured host notifications after
+    authoritative cycle-result updates, carrying the same package-backed
+    `loopSnapshot` and `cycleResult` data that query surfaces expose on demand
+  - CodexBridge `/agent` background execution now forwards those package-owned
+    notifications through its host adapter/send path instead of synthesizing
+    loop updates from bridge-local shell state
+  - the first-host policy currently pushes meaningful mid-loop retry/continue
+    updates proactively while leaving paused/terminal states on the existing
+    final-reply path, so users get package-backed loop progress without
+    duplicate completion/pause messages
 - broader issue/board sources, service exposure, and later providers remain
   explicitly deferred; they should not reopen bridge-owned runtime truth or
   weaken the current package/host adapter split when work resumes

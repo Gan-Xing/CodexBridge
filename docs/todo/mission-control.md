@@ -678,7 +678,7 @@ approval summaries plus approve/reject/input hints, and `/agent confirm` can
 resolve paused approval/input cases without flattening them into a generic
 resume-only flow.
 
-Phase 9q is the current validated baseline, but several behaviors above are
+Phase 9t is the current validated baseline, but several behaviors above are
 still transitional:
 
 - `AgentJob` still carries bridge-side compatibility state that should keep
@@ -906,11 +906,19 @@ environment-stamp and checkpoint records for recovery/audit:
   environment/checkpoint artifacts directly, and bridge compatibility
   projections persist them through `missionRuntimeState`
 
-Phase 9t is still open: the remaining Phase 9 gap is first-host proactive
-notifications. The first host can already query package-backed loop snapshots
-on demand, but it does not yet provide a policy-driven proactive notification
-path that pushes those same cycle/stage/completion snapshots back to the user
-after meaningful mission loop events.
+Phase 9t landed: the first host now proactively delivers package-backed loop
+notifications on top of those same mission snapshots:
+
+- Mission Control runtime now emits structured host notifications after
+  authoritative cycle-result updates, carrying package-backed `loopSnapshot`
+  plus `cycleResult` payloads through the existing host adapter boundary
+- CodexBridge `/agent` background execution now forwards those package-owned
+  notifications through the first host send path instead of reconstructing
+  progress updates from bridge-local shell/runtime state
+- the first-host policy currently pushes meaningful mid-loop retry/continue
+  updates proactively while leaving paused/terminal states on the existing
+  final reply path, so users gain loop progress visibility without duplicate
+  completion/pause messages
 
 - [x] Add `WorkItemSourceAdapter` as the source abstraction
 - [x] Support manual host-created source-backed work items through the
@@ -959,7 +967,7 @@ after meaningful mission loop events.
   - overall completion
   - next step
   - latest blocker / verifier summary
-- [ ] Add first-host proactive mission notifications that can, per host policy,
+- [x] Add first-host proactive mission notifications that can, per host policy,
   push package-backed loop snapshot updates after meaningful cycle/state
   changes while keeping manual `/agent show` queries as the fallback
 - [x] Add first-host resume/continue flows for `waiting_user`,
@@ -1013,7 +1021,7 @@ Completion criteria:
   checklist confirmation before the first autonomous cycle starts
 - [x] A first host can inspect package-owned cycle/stage/completion snapshots
   and resolve richer paused states without reading shell logs
-- [ ] A first host can proactively deliver package-backed cycle/status updates
+- [x] A first host can proactively deliver package-backed cycle/status updates
   per notification policy, with manual mission queries remaining available
 - [x] A user can run a checklist-backed looping mission from the first host
   surface without external `loop.sh` as the primary UX
@@ -1076,7 +1084,7 @@ Mission Control is ready for broader extraction when:
 - [x] the first host can render package-owned loop snapshots and resolve
   `PlanChangeRequest` / `waiting_user` / `needs_human` / `handoff` without shell-log
   inspection
-- [ ] the first host can proactively notify users with package-backed loop
+- [x] the first host can proactively notify users with package-backed loop
   snapshots after meaningful mission progress while keeping manual query as a
   fallback
 - [x] the first host can drive a checklist-backed looping mission as product

@@ -23,6 +23,7 @@ import {
   finalizeTurnArtifacts,
 } from './turn_artifacts.js';
 import { writeSequencedDebugLog } from './sequenced_stderr.js';
+import type { MissionHostNotification } from '../../packages/mission-control/src/index.js';
 import {
   createI18n,
   formatRelativeTimeLocalized,
@@ -189,6 +190,7 @@ type StartTurnOptions = {
     providerProfileId: string;
   }) => Promise<void> | void;
   onApprovalRequest?: (request: ProviderApprovalRequest) => Promise<void> | void;
+  onNotification?: (notification: MissionHostNotification) => Promise<void> | void;
 };
 
 type ProgressHandler = ((progress: ProviderTurnProgress) => Promise<void> | void) | null;
@@ -961,6 +963,71 @@ export class BridgeCoordinator {
       return '';
     }
     return renderApprovalPromptLines(pendingApprovals, this.currentI18n).join('\n');
+  }
+
+  renderAgentMissionNotification(job: AgentJob, notification: MissionHostNotification): string | null {
+    const cycleResult = notification?.cycleResult ?? null;
+    const loopSnapshot = notification?.loopSnapshot ?? null;
+    if (!shouldRenderAgentMissionNotification(cycleResult, loopSnapshot)) {
+      return null;
+    }
+    const scopedJobs = this.agentJobs?.listForScope({
+      platform: job.platform,
+      externalScopeId: job.externalScopeId,
+    }) ?? [];
+    const index = scopedJobs.findIndex((candidate) => candidate.id === job.id);
+    const showToken = index >= 0 ? String(index + 1) : job.id;
+    const lines = [
+      this.t('coordinator.agent.notificationLoopUpdate'),
+      this.t('coordinator.agent.title', { value: job.title }),
+      this.t('coordinator.agent.status', {
+        value: formatAgentStatusLabel(
+          loopSnapshot.status,
+          isActiveMissionJobStatus(loopSnapshot.status),
+          this.currentI18n,
+        ),
+      }),
+    ];
+    if (loopSnapshot.currentCycle > 0) {
+      lines.push(this.t('coordinator.agent.loopCycle', {
+        value: String(loopSnapshot.currentCycle),
+      }));
+    }
+    if (loopSnapshot.currentStage) {
+      lines.push(this.t('coordinator.agent.loopStage', {
+        value: loopSnapshot.currentStage,
+      }));
+    }
+    if (loopSnapshot.currentProgress) {
+      lines.push(this.t('coordinator.agent.loopProgress', {
+        value: loopSnapshot.currentProgress,
+      }));
+    }
+    if (typeof loopSnapshot.overallCompletion === 'number') {
+      lines.push(this.t('coordinator.agent.loopCompletion', {
+        value: `${loopSnapshot.overallCompletion}%`,
+      }));
+    }
+    if (loopSnapshot.currentItemTitle) {
+      lines.push(this.t('coordinator.agent.currentChecklistItem', {
+        value: loopSnapshot.currentItemTitle,
+      }));
+    }
+    if (loopSnapshot.nextStep) {
+      lines.push(this.t('coordinator.agent.loopNextStep', {
+        value: loopSnapshot.nextStep,
+      }));
+    }
+    if (
+      loopSnapshot.latestVerifierSummary
+      && loopSnapshot.latestVerifierSummary !== loopSnapshot.currentProgress
+    ) {
+      lines.push(this.t('coordinator.agent.verification', {
+        value: loopSnapshot.latestVerifierSummary,
+      }));
+    }
+    lines.push(this.t('coordinator.agent.showHint', { index: showToken }));
+    return lines.join('\n');
   }
 
   async handleConversationTurn(event, options = {}) {
@@ -10978,6 +11045,7 @@ export class BridgeCoordinator {
         now: this.now,
         onProgress: options.onProgress ?? null,
         onApprovalRequest: options.onApprovalRequest ?? null,
+        onNotification: options.onNotification ?? null,
       });
     } catch (error) {
       const message = formatUserError(error);
@@ -13906,6 +13974,19 @@ function formatAgentStatusLabel(status: string, running: boolean, i18n: Translat
   const key = `coordinator.agent.status.${status}`;
   const localized = i18n.t(key);
   return localized === key ? status : localized;
+}
+
+function shouldRenderAgentMissionNotification(
+  cycleResult: MissionHostNotification['cycleResult'],
+  loopSnapshot: MissionHostNotification['loopSnapshot'],
+): loopSnapshot is NonNullable<MissionHostNotification['loopSnapshot']> {
+  if (!cycleResult || !loopSnapshot) {
+    return false;
+  }
+  if (cycleResult.status === 'retry') {
+    return true;
+  }
+  return cycleResult.status === 'continue' && cycleResult.stage.startsWith('verifier.');
 }
 
 function parseAutomationAddSpec(text: string) {

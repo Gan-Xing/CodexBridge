@@ -1,6 +1,6 @@
 export const MISSION_CONTROL_PACKAGE_NAME = '@codexbridge/mission-control' as const;
 
-export const MISSION_CONTROL_PACKAGE_PHASE = 'phase-9s-environment-checkpoints' as const;
+export const MISSION_CONTROL_PACKAGE_PHASE = 'phase-9t-host-proactive-notifications' as const;
 
 export const MISSION_CONTROL_OWNS = [
   'mission-domain-model',

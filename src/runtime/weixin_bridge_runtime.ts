@@ -2,6 +2,7 @@ import { parseSlashCommand } from '../core/command_parser.js';
 import { writeSequencedDebugLog } from '../core/sequenced_stderr.js';
 import { WeixinPoller } from '../platforms/weixin/poller.js';
 import { createI18n, type Translator } from '../i18n/index.js';
+import type { MissionHostNotification } from '../../packages/mission-control/src/index.js';
 import type {
   InboundTextEvent,
   PlatformMediaDeliveryResult,
@@ -66,6 +67,7 @@ interface BridgeCoordinatorLike {
     options: {
       onProgress?: ((progress: ProviderTurnProgress) => Promise<void>) | null;
       onApprovalRequest?: ((request: ProviderApprovalRequest) => Promise<void>) | null;
+      onNotification?: ((notification: MissionHostNotification) => Promise<void>) | null;
     },
   ): Promise<RuntimeResponse>;
   runAutomationJob?(
@@ -75,6 +77,10 @@ interface BridgeCoordinatorLike {
       onApprovalRequest?: ((request: ProviderApprovalRequest) => Promise<void>) | null;
     },
   ): Promise<RuntimeResponse>;
+  renderAgentMissionNotification?(
+    job: any,
+    notification: MissionHostNotification,
+  ): Promise<string | null> | string | null;
   cleanupInternalProviderThreads?(params?: { dryRun?: boolean; limit?: number }): Promise<unknown>;
 }
 
@@ -1422,6 +1428,9 @@ export class WeixinBridgeRuntime {
         onApprovalRequest: async () => {
           await this.notifyApprovalPrompt(event);
         },
+        onNotification: async (notification) => {
+          await this.handleAgentMissionNotification(event, job, notification);
+        },
       }) ?? {
         type: 'message',
         messages: [],
@@ -1445,6 +1454,20 @@ export class WeixinBridgeRuntime {
       await typingStart;
       await stopTypingKeepalive();
     }
+  }
+
+  async handleAgentMissionNotification(
+    event: InboundTextEvent,
+    job: any,
+    notification: MissionHostNotification,
+  ): Promise<void> {
+    const content = typeof this.bridgeCoordinator.renderAgentMissionNotification === 'function'
+      ? await this.bridgeCoordinator.renderAgentMissionNotification(job, notification)
+      : null;
+    if (!content) {
+      return;
+    }
+    await this.ensureScopeNoticeDelivered(event.externalScopeId, content);
   }
 
   async runAutomationJob(job: any): Promise<RuntimeResponse> {

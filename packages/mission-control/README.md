@@ -36,7 +36,7 @@ It must not own bridge behavior:
 
 Current phase:
 
-- `phase-9k-host-neutral-proof`: package-owned mission
+- `phase-9t-host-proactive-notifications`: package-owned mission
   domain/workflow/workspace/provider/verifier/runtime foundations, first-class
   `WorkItem` / `ChecklistSnapshot` / `PlanChangeRequest` /
   `MissionGeneration` lineage, direct in-process `commands / queries / streams`
@@ -74,7 +74,10 @@ Current phase:
   CodexBridge migration. A package-only host-neutral proof now also exercises
   create/run/query/stream flows with a CLI-shaped host adapter using those
   generic bindings, so later hosts can consume the same mission core without
-  requiring CodexBridge-specific runtime glue.
+  requiring CodexBridge-specific runtime glue. The runtime now also emits
+  package-backed host notifications after authoritative cycle updates, and the
+  first host can proactively push those retry/continue loop snapshots without
+  falling back to shell-owned progress UX.
 
 This package should preserve the Symphony-style separation between:
 
