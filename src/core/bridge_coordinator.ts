@@ -1565,26 +1565,13 @@ export class BridgeCoordinator {
         errors: [],
       };
     }
-    const providerPlugin = this.providerRegistry.getProvider('openai-native');
-    if (!providerPlugin || typeof providerPlugin.reconnectProfile !== 'function') {
-      return {
-        refreshedCount: 0,
-        errors: [],
-      };
-    }
-    let refreshedCount = 0;
-    const errors: string[] = [];
-    for (const profile of profiles) {
-      try {
-        await providerPlugin.reconnectProfile({ providerProfile: profile });
-        refreshedCount += 1;
-      } catch (error) {
-        errors.push(formatUserError(error));
-      }
-    }
+    const summary = await this.codexNativeRuntime.reconnectProfiles({
+      providerProfiles: profiles,
+      resolveProviderPlugin: (providerKind) => this.providerRegistry.getProvider(providerKind),
+    });
     return {
-      refreshedCount,
-      errors,
+      refreshedCount: summary.refreshedCount,
+      errors: summary.errors,
     };
   }
 
@@ -1597,23 +1584,13 @@ export class BridgeCoordinator {
         errors: [],
       };
     }
-    let refreshedCount = 0;
-    const errors: string[] = [];
-    for (const profile of profiles) {
-      const providerPlugin = this.providerRegistry.getProvider(profile.providerKind);
-      if (!providerPlugin || typeof providerPlugin.reconnectProfile !== 'function') {
-        continue;
-      }
-      try {
-        await providerPlugin.reconnectProfile({ providerProfile: profile });
-        refreshedCount += 1;
-      } catch (error) {
-        errors.push(formatUserError(error));
-      }
-    }
+    const summary = await this.codexNativeRuntime.reconnectProfiles({
+      providerProfiles: profiles,
+      resolveProviderPlugin: (providerKind) => this.providerRegistry.getProvider(providerKind),
+    });
     return {
-      refreshedCount,
-      errors,
+      refreshedCount: summary.refreshedCount,
+      errors: summary.errors,
     };
   }
 
@@ -5032,12 +5009,15 @@ export class BridgeCoordinator {
     const providerProfileId = session?.providerProfileId ?? this.resolveDefaultProviderProfileId();
     const providerProfile = this.requireProviderProfile(providerProfileId);
     const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
-    if (typeof providerPlugin.reconnectProfile !== 'function') {
-      return messageResponse([this.t('coordinator.reconnect.unsupported')], session ? buildSessionMeta(session) : undefined);
-    }
     try {
-      const result = await providerPlugin.reconnectProfile({ providerProfile });
-      const identity = formatAccountIdentity(result?.accountIdentity ?? null);
+      const result = await this.codexNativeRuntime.reconnectProfile({
+        providerProfile,
+        providerPlugin,
+      });
+      if (!result) {
+        return messageResponse([this.t('coordinator.reconnect.unsupported')], session ? buildSessionMeta(session) : undefined);
+      }
+      const identity = formatAccountIdentity(result.accountIdentity ?? null);
       const lines = [
         this.t('coordinator.reconnect.refreshed'),
         ...(identity ? [this.t('coordinator.reconnect.account', { value: identity })] : []),
@@ -5090,27 +5070,39 @@ export class BridgeCoordinator {
           threadId: session.codexThreadId,
         });
       } catch (error) {
-        if (typeof providerPlugin.reconnectProfile === 'function') {
-          try {
-            await providerPlugin.reconnectProfile({ providerProfile });
-            await providerPlugin.resumeThread({
-              providerProfile,
-              threadId: session.codexThreadId,
-            });
-          } catch (resumeError) {
+        try {
+          const reconnectResult = await this.codexNativeRuntime.reconnectProfile({
+            providerProfile,
+            providerPlugin,
+          });
+          if (reconnectResult) {
+            try {
+              await providerPlugin.resumeThread({
+                providerProfile,
+                threadId: session.codexThreadId,
+              });
+            } catch (resumeError) {
+              return messageResponse([
+                this.t('coordinator.retry.resumeFailed', { error: formatUserError(resumeError) }),
+              ], buildSessionMeta(session));
+            }
+          } else {
             return messageResponse([
-              this.t('coordinator.retry.resumeFailed', { error: formatUserError(resumeError) }),
+              this.t('coordinator.retry.resumeFailed', { error: formatUserError(error) }),
             ], buildSessionMeta(session));
           }
-        } else {
+        } catch (resumeError) {
           return messageResponse([
-            this.t('coordinator.retry.resumeFailed', { error: formatUserError(error) }),
+            this.t('coordinator.retry.resumeFailed', { error: formatUserError(resumeError) }),
           ], buildSessionMeta(session));
         }
       }
-    } else if (typeof providerPlugin.reconnectProfile === 'function') {
+    } else {
       try {
-        await providerPlugin.reconnectProfile({ providerProfile });
+        await this.codexNativeRuntime.reconnectProfile({
+          providerProfile,
+          providerPlugin,
+        });
       } catch (error) {
         return messageResponse([
           this.t('coordinator.retry.reconnectFailed', { error: formatUserError(error) }),

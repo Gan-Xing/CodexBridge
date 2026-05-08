@@ -64,8 +64,9 @@ Reason:
 Current internal shape:
 
 - `src/providers/codex/native_runtime.ts` owns active-account lookup, readiness
-  probing, isolated ephemeral-thread/session creation, and default read-only
-  side-task turn settings
+  probing, reconnect/refresh orchestration, isolated
+  ephemeral-thread/session creation, and default read-only side-task turn
+  settings
 - current internal helper paths in `src/core/bridge_coordinator.ts` should call
   this substrate instead of re-implementing `startThread({ ephemeral: true })`
   + `startTurn()` ad hoc

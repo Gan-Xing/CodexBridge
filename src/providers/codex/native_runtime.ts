@@ -38,6 +38,26 @@ export interface CodexNativeRuntimeTurnResult {
   request: CodexNativeRuntimeTurnPreparation;
 }
 
+export interface CodexNativeRuntimeReconnectResult {
+  connected: boolean;
+  accountIdentity: CodexAuthIdentity | null;
+  readiness: CodexNativeRuntimeReadiness;
+}
+
+export interface CodexNativeRuntimeReconnectSummaryEntry {
+  providerProfileId: string;
+  providerKind: string;
+  connected: boolean;
+  accountIdentity: CodexAuthIdentity | null;
+  readiness: CodexNativeRuntimeReadiness;
+}
+
+export interface CodexNativeRuntimeReconnectSummary {
+  refreshedCount: number;
+  errors: string[];
+  results: CodexNativeRuntimeReconnectSummaryEntry[];
+}
+
 export class CodexNativeRuntime {
   private readonly now: () => number;
 
@@ -126,6 +146,78 @@ export class CodexNativeRuntime {
         errorMessage: formatNativeRuntimeError(error),
       };
     }
+  }
+
+  async reconnectProfile({
+    providerProfile,
+    providerPlugin,
+    authPathOrOptions = {},
+  }: {
+    providerProfile: ProviderProfile;
+    providerPlugin: ProviderPluginContract | null | undefined;
+    authPathOrOptions?: string | { authPath?: string; env?: NodeJS.ProcessEnv };
+  }): Promise<CodexNativeRuntimeReconnectResult | null> {
+    if (!providerPlugin || typeof providerPlugin.reconnectProfile !== 'function') {
+      return null;
+    }
+    const reconnectResult = await providerPlugin.reconnectProfile({ providerProfile });
+    const readiness = await this.checkReadiness({
+      providerProfile,
+      providerPlugin,
+      authPathOrOptions,
+    });
+    return {
+      connected: reconnectResult.connected !== false,
+      accountIdentity: reconnectResult.accountIdentity as CodexAuthIdentity | null | undefined
+        ?? readiness.accountIdentity
+        ?? this.getActiveAccountIdentity(authPathOrOptions),
+      readiness,
+    };
+  }
+
+  async reconnectProfiles({
+    providerProfiles,
+    resolveProviderPlugin,
+    authPathOrOptions = {},
+  }: {
+    providerProfiles: ProviderProfile[];
+    resolveProviderPlugin: (providerKind: string) => ProviderPluginContract | null | undefined;
+    authPathOrOptions?: string | { authPath?: string; env?: NodeJS.ProcessEnv };
+  }): Promise<CodexNativeRuntimeReconnectSummary> {
+    const errors: string[] = [];
+    const results: CodexNativeRuntimeReconnectSummaryEntry[] = [];
+    let refreshedCount = 0;
+    for (const providerProfile of providerProfiles) {
+      const providerPlugin = resolveProviderPlugin(providerProfile.providerKind);
+      if (!providerPlugin || typeof providerPlugin.reconnectProfile !== 'function') {
+        continue;
+      }
+      try {
+        const result = await this.reconnectProfile({
+          providerProfile,
+          providerPlugin,
+          authPathOrOptions,
+        });
+        if (!result) {
+          continue;
+        }
+        refreshedCount += 1;
+        results.push({
+          providerProfileId: providerProfile.id,
+          providerKind: providerProfile.providerKind,
+          connected: result.connected,
+          accountIdentity: result.accountIdentity,
+          readiness: result.readiness,
+        });
+      } catch (error) {
+        errors.push(formatNativeRuntimeError(error));
+      }
+    }
+    return {
+      refreshedCount,
+      errors,
+      results,
+    };
   }
 
   async runIsolatedTurn({

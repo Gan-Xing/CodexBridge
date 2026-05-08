@@ -228,11 +228,19 @@ Implementation checklist:
   - instructions command skill flows
   - review command skill + review localizer
   - agent command skill + agent verifier
-- [ ] Fold account-switch/reconnect behavior behind the same runtime-facing
+- [x] Fold account-switch/reconnect behavior behind the same runtime-facing
   surface so localhost API consumers do not need to understand bridge-only
   login wiring
-- [ ] Add explicit runtime readiness/health call sites that later localhost API
+  - `src/providers/codex/native_runtime.ts` now owns
+    `reconnectProfile()` / `reconnectProfiles()` and returns readiness snapshots
+    after reconnect
+  - `src/core/bridge_coordinator.ts` auth-switch refresh, `/reconnect`, current
+    retry reconnect, and instruction reload refresh now call the runtime
+    surface instead of invoking provider reconnect hooks directly
+- [x] Add explicit runtime readiness/health call sites that later localhost API
   handlers can reuse directly
+  - runtime reconnect helpers now run `checkReadiness()` after refresh so later
+    localhost handlers can reuse the same post-reconnect health probe contract
 
 ### 2. Localhost Responses API shell
 

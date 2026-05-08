@@ -159,3 +159,140 @@ test('CodexNativeRuntime checkReadiness surfaces readiness probe failures', asyn
   assert.equal(readiness.accountIdentity, null);
   assert.equal(readiness.errorMessage, 'probe failed');
 });
+
+test('CodexNativeRuntime reconnectProfile refreshes the provider and returns a readiness snapshot', async () => {
+  const runtime = new CodexNativeRuntime({
+    now: () => 444,
+    readAccountIdentity: () => ({
+      email: 'fallback@example.com',
+      name: 'Fallback Identity',
+      authMode: 'chatgpt',
+      accountId: 'acc_fallback',
+      plan: 'plus',
+      authPath: '/tmp/auth.json',
+    }),
+  });
+  let reconnectCalls = 0;
+  const providerPlugin = {
+    async startThread() {
+      return null;
+    },
+    async startTurn() {
+      return null;
+    },
+    async reconnectProfile() {
+      reconnectCalls += 1;
+      return {
+        connected: true,
+        accountIdentity: {
+          email: 'runtime@example.com',
+          name: null,
+          authMode: 'chatgpt',
+          accountId: 'acc_runtime',
+        },
+      };
+    },
+    async listModels() {
+      return [{
+        id: 'gpt-5.5',
+        model: 'gpt-5.5',
+        displayName: 'GPT-5.5',
+        description: '',
+        isDefault: true,
+        supportedReasoningEfforts: ['medium'],
+        defaultReasoningEffort: 'medium',
+      }];
+    },
+  } as any;
+
+  const refreshed = await runtime.reconnectProfile({
+    providerProfile: makeProfile(),
+    providerPlugin,
+  });
+
+  assert.equal(reconnectCalls, 1);
+  assert.equal(refreshed?.connected, true);
+  assert.equal(refreshed?.accountIdentity?.email, 'runtime@example.com');
+  assert.equal(refreshed?.readiness.ready, true);
+  assert.equal(refreshed?.readiness.modelCount, 1);
+});
+
+test('CodexNativeRuntime reconnectProfiles aggregates errors and skips unsupported providers', async () => {
+  const runtime = new CodexNativeRuntime({
+    now: () => 555,
+    readAccountIdentity: () => ({
+      email: 'native@example.com',
+      name: 'Native Runtime',
+      authMode: 'chatgpt',
+      accountId: 'acc_native',
+      plan: 'plus',
+      authPath: '/tmp/auth.json',
+    }),
+  });
+  const supportedPlugin = {
+    async startThread() {
+      return null;
+    },
+    async startTurn() {
+      return null;
+    },
+    async reconnectProfile() {
+      return { connected: true };
+    },
+    async listModels() {
+      return [];
+    },
+  } as any;
+  const failingPlugin = {
+    async startThread() {
+      return null;
+    },
+    async startTurn() {
+      return null;
+    },
+    async reconnectProfile() {
+      throw new Error('reconnect failed');
+    },
+    async listModels() {
+      return [];
+    },
+  } as any;
+
+  const summary = await runtime.reconnectProfiles({
+    providerProfiles: [
+      makeProfile({ id: 'native-1', providerKind: 'openai-native' }),
+      makeProfile({ id: 'native-2', providerKind: 'openai-compatible' }),
+      makeProfile({ id: 'native-3', providerKind: 'openai-native' }),
+    ],
+    resolveProviderPlugin: (providerKind) => {
+      if (providerKind === 'openai-native') {
+        return supportedPlugin;
+      }
+      if (providerKind === 'openai-compatible') {
+        return {
+          startThread: supportedPlugin.startThread,
+          startTurn: supportedPlugin.startTurn,
+          listModels: supportedPlugin.listModels,
+        } as any;
+      }
+      return failingPlugin;
+    },
+  });
+
+  assert.equal(summary.refreshedCount, 2);
+  assert.equal(summary.errors.length, 0);
+  assert.equal(summary.results.length, 2);
+  assert.equal(summary.results[0]?.providerProfileId, 'native-1');
+  assert.equal(summary.results[1]?.providerProfileId, 'native-3');
+
+  const failingSummary = await runtime.reconnectProfiles({
+    providerProfiles: [
+      makeProfile({ id: 'native-4', providerKind: 'custom-native' }),
+    ],
+    resolveProviderPlugin: () => failingPlugin,
+  });
+
+  assert.equal(failingSummary.refreshedCount, 0);
+  assert.deepEqual(failingSummary.errors, ['reconnect failed']);
+  assert.equal(failingSummary.results.length, 0);
+});
