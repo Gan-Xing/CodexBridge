@@ -35,6 +35,10 @@ import {
   CodexInstructionsManager,
   type CodexInstructionsSnapshot,
 } from '../providers/codex/instructions_state.js';
+import {
+  CodexNativeApiSideTaskRouter,
+  type CodexNativeApiSideTaskClass,
+} from '../providers/codex/native_api_side_task_router.js';
 import { CodexNativeRuntime } from '../providers/codex/native_runtime.js';
 import type { WeiboHotSearchServiceLike } from '../services/weibo_hot_search.js';
 import type {
@@ -103,6 +107,8 @@ const REVIEW_PROGRESS_HEARTBEAT_MS = 20_000;
 const REVIEW_PROGRESS_HEARTBEAT_MAX_RUNS = 1;
 const THREAD_COMMAND_SKILL_RESULT_LIMIT = 8;
 const THREAD_COMMAND_SKILL_LIST_LIMIT = 100_000;
+const DEFAULT_CODEX_NATIVE_API_HOST = '127.0.0.1';
+const DEFAULT_CODEX_NATIVE_API_PORT = 43182;
 
 export const AGENT_COMMAND_SKILL_ACTIONS = new Set([
   'create_draft',
@@ -805,6 +811,7 @@ type CodexAccountSwitchResult = {
 };
 
 interface CodexAuthManagerLike {
+  authPath?: string | null;
   getPendingLogin?(): Promise<CodexPendingLoginSummary | null>;
   startDeviceLogin?(params?: { requestedByScope?: string | null }): Promise<CodexPendingLoginSummary>;
   refreshPendingLogin?(): Promise<CodexPendingLoginRefreshResult | null>;
@@ -850,6 +857,7 @@ export class BridgeCoordinator {
   codexAuthManager: CodexAuthManagerLike | null;
   codexInstructionsManager: CodexInstructionsManagerLike;
   codexNativeRuntime: CodexNativeRuntime;
+  codexNativeSideTaskRouter: CodexNativeApiSideTaskRouter;
   now: any;
   threadBrowserStates: Map<any, any>;
   skillBrowserStates: Map<any, SkillBrowserState>;
@@ -882,6 +890,7 @@ export class BridgeCoordinator {
     codexAuthManager = null,
     codexInstructionsManager = null,
     codexNativeRuntime = null,
+    codexNativeSideTaskRouter = null,
     weiboHotSearch = null,
     now = () => Date.now(),
     locale = null,
@@ -901,6 +910,13 @@ export class BridgeCoordinator {
     this.codexAuthManager = codexAuthManager;
     this.codexInstructionsManager = codexInstructionsManager ?? new CodexInstructionsManager();
     this.codexNativeRuntime = codexNativeRuntime ?? new CodexNativeRuntime({ now });
+    this.codexNativeSideTaskRouter = codexNativeSideTaskRouter ?? new CodexNativeApiSideTaskRouter({
+      runtime: this.codexNativeRuntime,
+      baseUrl: resolveInternalCodexNativeApiBaseUrl(process.env),
+      authToken: normalizeInternalCodexNativeApiAuthToken(process.env),
+      enabledTaskClasses: parseInternalCodexNativeApiTaskClasses(process.env),
+      requestTimeoutMs: parsePositiveIntegerEnv(process.env.CODEXBRIDGE_INTERNAL_NATIVE_API_TIMEOUT_MS),
+    });
     this.now = now;
     this.threadBrowserStates = new Map();
     this.skillBrowserStates = new Map();
@@ -2167,6 +2183,7 @@ export class BridgeCoordinator {
     return this.invokeCommandSkillTurn({
       event,
       runtimeContext,
+      taskClass: 'intent_classification',
       title: 'Assistant Record Command Skill',
       metadata: {
         source: 'assistant-record-command-skill',
@@ -2410,6 +2427,7 @@ export class BridgeCoordinator {
     return this.invokeCommandSkillTurn({
       event,
       runtimeContext,
+      taskClass: 'intent_classification',
       title: 'Assistant Record Command Skill',
       metadata: {
         source: 'assistant-record-command-skill',
@@ -2544,6 +2562,7 @@ export class BridgeCoordinator {
     const candidate = await this.invokeCommandSkillTurn({
       event,
       runtimeContext,
+      taskClass: 'normalization',
       title: 'Assistant Record Command Skill',
       metadata: {
         source: 'assistant-record-command-skill',
@@ -3806,6 +3825,7 @@ export class BridgeCoordinator {
     return this.invokeCommandSkillTurn<ThreadCommandSkillResult>({
       event,
       runtimeContext,
+      taskClass: 'intent_classification',
       title: 'Thread Command Skill',
       metadata: {
         source: 'thread-command-skill',
@@ -4500,6 +4520,7 @@ export class BridgeCoordinator {
     return this.invokeCommandSkillTurn<InstructionsCommandSkillResult>({
       event,
       runtimeContext,
+      taskClass: 'normalization',
       title: 'Instructions Command Skill',
       metadata: {
         source: 'instructions-command-skill',
@@ -5426,6 +5447,7 @@ export class BridgeCoordinator {
   private async invokeCommandSkillTurn<T>({
     event,
     runtimeContext,
+    taskClass = 'normalization',
     mode = 'command-skill-parser',
     title,
     metadata,
@@ -5434,45 +5456,43 @@ export class BridgeCoordinator {
   }: {
     event: InboundTextEvent;
     runtimeContext: CodexIsolatedExecutionContext;
+    taskClass?: CodexNativeApiSideTaskClass;
     mode?: DeveloperPromptMode;
     title: string;
     metadata: Record<string, string>;
     buildPrompt: (sessionCwd: string | null) => string;
     parseResult: (outputText: unknown) => T | null;
   }): Promise<T | null> {
-    const execution = await this.codexNativeRuntime.runIsolatedTurn({
+    const prompt = buildPrompt(runtimeContext.cwd);
+    const execution = await this.codexNativeSideTaskRouter.execute({
+      taskClass,
       providerProfile: runtimeContext.providerProfile,
       providerPlugin: runtimeContext.providerPlugin,
       cwd: runtimeContext.cwd,
       title,
-      metadata: {
+      sessionMetadata: {
         sourcePlatform: event.platform,
         ...metadata,
       },
       model: runtimeContext.inheritedSettings?.model ?? null,
       reasoningEffort: runtimeContext.inheritedSettings?.reasoningEffort ?? null,
       serviceTier: runtimeContext.inheritedSettings?.serviceTier ?? null,
-      prepareTurn: (session) => {
-        const prompt = buildPrompt(session.cwd ?? null);
-        return {
-          inputText: prompt,
-          locale: runtimeContext.locale,
-          event: withDeveloperPromptContext({
-            ...event,
-            text: prompt,
-            cwd: session.cwd ?? null,
-            locale: runtimeContext.locale,
-            attachments: [],
-          }, {
-            mode,
-            title,
-            source: metadata.source ?? null,
-            command: metadata.command ?? null,
-            subcommand: metadata.subcommand ?? null,
-            operation: metadata.operation ?? null,
-          }),
-        };
-      },
+      locale: runtimeContext.locale,
+      inputText: prompt,
+      event: withDeveloperPromptContext({
+        ...event,
+        text: prompt,
+        cwd: runtimeContext.cwd,
+        locale: runtimeContext.locale,
+        attachments: [],
+      }, {
+        mode,
+        title,
+        source: metadata.source ?? null,
+        command: metadata.command ?? null,
+        subcommand: metadata.subcommand ?? null,
+        operation: metadata.operation ?? null,
+      }),
     });
     return parseResult(execution.result.outputText);
   }
@@ -5517,6 +5537,7 @@ export class BridgeCoordinator {
     return this.invokeCommandSkillTurn<ReviewCommandSkillResult>({
       event,
       runtimeContext,
+      taskClass: 'normalization',
       title: 'Review Command Skill',
       metadata: {
         source: 'review-command-skill',
@@ -5622,12 +5643,14 @@ export class BridgeCoordinator {
     sourceText: string,
     locale: SupportedLocale,
   ): Promise<string | null> {
-    const translated = await this.codexNativeRuntime.runIsolatedTurn({
+    const prompt = buildReviewResultLocalizationPrompt(target, sourceText, locale);
+    const translated = await this.codexNativeSideTaskRouter.execute({
+      taskClass: 'side_reasoning',
       providerProfile,
       providerPlugin,
       cwd,
       title: 'Review Result Localizer',
-      metadata: {
+      sessionMetadata: {
         sourcePlatform: event.platform,
         source: 'review-result-localizer',
         command: 'review',
@@ -5635,25 +5658,20 @@ export class BridgeCoordinator {
       model: sessionSettings?.model ?? null,
       reasoningEffort: sessionSettings?.reasoningEffort ?? null,
       serviceTier: sessionSettings?.serviceTier ?? null,
-      prepareTurn: (localizerSession) => {
-        const prompt = buildReviewResultLocalizationPrompt(target, sourceText, locale);
-        return {
-          inputText: prompt,
-          locale,
-          event: withDeveloperPromptContext({
-            ...event,
-            text: prompt,
-            cwd: localizerSession.cwd ?? null,
-            locale,
-            attachments: [],
-          }, {
-            mode: 'review-result-localizer',
-            title: 'Review Result Localizer',
-            source: 'review-result-localizer',
-            command: 'review',
-          }),
-        };
-      },
+      locale,
+      inputText: prompt,
+      event: withDeveloperPromptContext({
+        ...event,
+        text: prompt,
+        cwd,
+        locale,
+        attachments: [],
+      }, {
+        mode: 'review-result-localizer',
+        title: 'Review Result Localizer',
+        source: 'review-result-localizer',
+        command: 'review',
+      }),
     });
     const outputText = compactWhitespace(translated.result?.outputText ?? translated.result?.previewText ?? '');
     return outputText || null;
@@ -6708,6 +6726,7 @@ export class BridgeCoordinator {
         locale,
         cwd,
       },
+      taskClass: 'normalization',
       title: 'Agent Command Skill',
       metadata: {
         source: 'agent-command-skill',
@@ -9799,6 +9818,7 @@ export class BridgeCoordinator {
     return this.invokeCommandSkillTurn({
       event,
       runtimeContext,
+      taskClass: 'normalization',
       title: 'Automation Command Skill',
       metadata: {
         source: 'automation-command-skill',
@@ -10954,37 +10974,34 @@ export class BridgeCoordinator {
     if (!providerPlugin || typeof providerPlugin.startThread !== 'function' || typeof providerPlugin.startTurn !== 'function') {
       return null;
     }
-    const verifierResult = await this.codexNativeRuntime.runIsolatedTurn({
+    const prompt = buildAgentVerifierPrompt(job, result, this.currentI18n.locale);
+    const verifierResult = await this.codexNativeSideTaskRouter.execute({
+      taskClass: 'small_verification',
       providerProfile,
       providerPlugin,
       cwd: job.cwd,
       title: 'Agent Verifier',
-      metadata: {
+      sessionMetadata: {
         sourcePlatform: job.platform,
         source: 'agent-verifier',
         agentJobId: job.id,
       },
-      prepareTurn: () => {
-        const prompt = buildAgentVerifierPrompt(job, result, this.currentI18n.locale);
-        return {
-          inputText: prompt,
-          locale: job.locale ?? this.currentI18n.locale,
-          event: withDeveloperPromptContext({
-            platform: job.platform,
-            externalScopeId: job.externalScopeId,
-            text: prompt,
-            cwd: session?.cwd ?? job.cwd,
-            locale: job.locale ?? this.currentI18n.locale,
-            attachments: [],
-          }, {
-            mode: 'agent-result-verifier',
-            title: 'Agent Verifier',
-            source: 'agent-verifier',
-            command: 'agent',
-            operation: 'verify_result',
-          }),
-        };
-      },
+      locale: job.locale ?? this.currentI18n.locale,
+      inputText: prompt,
+      event: withDeveloperPromptContext({
+        platform: job.platform,
+        externalScopeId: job.externalScopeId,
+        text: prompt,
+        cwd: session?.cwd ?? job.cwd,
+        locale: job.locale ?? this.currentI18n.locale,
+        attachments: [],
+      }, {
+        mode: 'agent-result-verifier',
+        title: 'Agent Verifier',
+        source: 'agent-verifier',
+        command: 'agent',
+        operation: 'verify_result',
+      }),
     });
     return parseAgentVerificationResult(verifierResult.result.outputText);
   }
@@ -19719,6 +19736,64 @@ function formatErrorMessage(error: unknown): string {
   }
   const fallback = String(error ?? '').trim();
   return fallback || 'Unknown error';
+}
+
+function resolveInternalCodexNativeApiBaseUrl(env: NodeJS.ProcessEnv): string | null {
+  const explicitBaseUrl = normalizeEnvString(env.CODEXBRIDGE_INTERNAL_NATIVE_API_BASE_URL);
+  if (explicitBaseUrl) {
+    return explicitBaseUrl;
+  }
+  if (!parseBooleanEnv(env.CODEXBRIDGE_INTERNAL_NATIVE_API_ENABLED)) {
+    return null;
+  }
+  const host = normalizeEnvString(env.CODEX_NATIVE_API_HOST) ?? DEFAULT_CODEX_NATIVE_API_HOST;
+  const port = parsePositiveIntegerEnv(env.CODEX_NATIVE_API_PORT) ?? DEFAULT_CODEX_NATIVE_API_PORT;
+  return `http://${host}:${port}`;
+}
+
+function normalizeInternalCodexNativeApiAuthToken(env: NodeJS.ProcessEnv): string | null {
+  return normalizeEnvString(env.CODEXBRIDGE_INTERNAL_NATIVE_API_AUTH_TOKEN)
+    ?? normalizeEnvString(env.CODEX_NATIVE_API_AUTH_TOKEN);
+}
+
+function parseInternalCodexNativeApiTaskClasses(
+  env: NodeJS.ProcessEnv,
+): CodexNativeApiSideTaskClass[] | null {
+  const raw = normalizeEnvString(env.CODEXBRIDGE_INTERNAL_NATIVE_API_TASK_CLASSES);
+  if (!raw) {
+    return null;
+  }
+  const normalized = raw
+    .split(',')
+    .map((value) => value.trim())
+    .filter((value): value is CodexNativeApiSideTaskClass => (
+      value === 'intent_classification'
+      || value === 'normalization'
+      || value === 'small_verification'
+      || value === 'side_reasoning'
+    ));
+  return normalized.length > 0 ? normalized : null;
+}
+
+function parsePositiveIntegerEnv(value: unknown): number | null {
+  const parsed = Number.parseInt(String(value ?? '').trim(), 10);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    return null;
+  }
+  return parsed;
+}
+
+function parseBooleanEnv(value: unknown): boolean {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  return normalized === '1'
+    || normalized === 'true'
+    || normalized === 'yes'
+    || normalized === 'on';
+}
+
+function normalizeEnvString(value: unknown): string | null {
+  const normalized = String(value ?? '').trim();
+  return normalized || null;
 }
 
 function debugCoordinator(event: string, payload: unknown) {

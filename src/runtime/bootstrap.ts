@@ -21,6 +21,7 @@ import { InMemoryProviderProfileRepository } from '../store/in_memory/in_memory_
 import { InMemorySessionSettingsRepository } from '../store/in_memory/in_memory_session_settings_repository.js';
 import { InMemoryThreadMetadataRepository } from '../store/in_memory/in_memory_thread_metadata_repository.js';
 import { PluginRegistry } from './plugin_registry.js';
+import type { CodexNativeApiSideTaskRouter } from '../providers/codex/native_api_side_task_router.js';
 import type { ProviderProfile } from '../types/provider.js';
 
 interface RuntimeRepositories {
@@ -48,6 +49,7 @@ interface CreateCodexBridgeRuntimeOptions {
   restartBridge?: ((params: { event: any }) => Promise<void>) | null;
   codexAuthManager?: any;
   codexInstructionsManager?: any;
+  codexNativeSideTaskRouter?: CodexNativeApiSideTaskRouter | null;
   weiboHotSearch?: any;
 }
 
@@ -63,6 +65,7 @@ export function createCodexBridgeRuntime({
   restartBridge = null,
   codexAuthManager = null,
   codexInstructionsManager = null,
+  codexNativeSideTaskRouter = null,
   weiboHotSearch = null,
 }: CreateCodexBridgeRuntimeOptions = {}) {
   const registry = new PluginRegistry({
@@ -148,6 +151,7 @@ export function createCodexBridgeRuntime({
     restartBridge,
     codexAuthManager,
     codexInstructionsManager,
+    codexNativeSideTaskRouter,
     weiboHotSearch: weiboHotSearch ?? new WeiboHotSearchService(),
     locale,
   });

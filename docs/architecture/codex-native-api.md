@@ -75,6 +75,11 @@ Current internal shape:
   sticky provider/account affinity checks for `previous_response_id`
   continuations, and the explicit Phase 3 contract that default continuation
   state is process-local and does not survive a native-api service restart
+- `src/providers/codex/native_api_side_task_router.ts` owns the first internal
+  helper-facing routing policy for side-task classes; it prefers localhost
+  `Responses` calls when bridge-local native-api routing is explicitly enabled,
+  preserves helper-turn metadata across the API hop, and falls back to direct
+  native isolated execution when the localhost facade is unavailable
 - `src/providers/codex/native_api_server.ts` is the first in-process localhost
   shell over that substrate; it resolves provider/runtime context per request
   so reconnect/account-switch changes do not require a server restart
@@ -470,6 +475,8 @@ Owns:
   - a continuation
   - a fallback request
 - explicit mapping from internal helper task type to native API eligibility
+- one shared bridge-local opt-in point for localhost routing instead of ad hoc
+  fetch logic at each helper call site
 
 ### 3. Native isolated execution layer
 

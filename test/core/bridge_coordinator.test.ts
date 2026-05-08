@@ -11,6 +11,9 @@ import {
   REVIEW_COMMAND_SKILL_ACTIONS,
   THREAD_COMMAND_SKILL_ACTIONS,
 } from '../../src/core/bridge_coordinator.js';
+import { CodexNativeApiServer } from '../../src/providers/codex/native_api_server.js';
+import { CodexNativeApiSideTaskRouter } from '../../src/providers/codex/native_api_side_task_router.js';
+import { CodexNativeRuntime } from '../../src/providers/codex/native_runtime.js';
 import {
   createMissionChecklistSnapshot,
   createMissionCycleResult,
@@ -527,6 +530,7 @@ function makeRuntime({
   platformPlugins = [],
   codexAuthManager = null,
   codexInstructionsManager = null,
+  codexNativeSideTaskRouter = null,
   weiboHotSearch = null,
 } = {}) {
   const openai = new FakeProviderPlugin('openai-native', { replyPrefix: 'openai' });
@@ -544,6 +548,7 @@ function makeRuntime({
     restartBridge,
     codexAuthManager,
     codexInstructionsManager,
+    codexNativeSideTaskRouter,
     weiboHotSearch,
   });
   return { runtime, openai, compatible, minimax: compatible };
@@ -5768,6 +5773,89 @@ test('/search natural language uses the thread command skill for semantic candid
   assert.doesNotMatch(text, /构建日志排查/);
   assert.ok(openai.startThreadCalls.some((call: any) =>
     call.title === 'Thread Command Skill' && call.ephemeral === true));
+});
+
+test('/search natural language can route the thread command skill through Codex Native API without losing parser metadata', async () => {
+  const { runtime, openai } = makeRuntime();
+  const nativeRuntime = new CodexNativeRuntime({
+    now: () => 111,
+    createSessionId: () => 'session-native-api-search-1',
+    readAccountIdentity: () => ({
+      email: 'native@example.com',
+      name: 'Native Runtime',
+      authMode: 'chatgpt',
+      accountId: 'acc_native',
+      plan: 'plus',
+      authPath: '/tmp/auth.json',
+    }),
+  });
+  const providerProfile = runtime.repositories.providerProfiles.get('openai-default');
+  assert.ok(providerProfile);
+  const server = new CodexNativeApiServer({
+    runtime: nativeRuntime,
+    resolveRuntimeContext: () => ({
+      providerProfile,
+      providerPlugin: openai,
+    }),
+  });
+  await server.start();
+  runtime.services.bridgeCoordinator.codexNativeSideTaskRouter = new CodexNativeApiSideTaskRouter({
+    runtime: nativeRuntime,
+    baseUrl: server.baseUrl,
+  });
+
+  try {
+    const invoiceThread = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-search-native-api-invoice',
+      text: '丹达第四期发票提交跟进',
+    });
+    await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-search-native-api-build',
+      text: '构建日志排查',
+    });
+
+    const originalStartTurn = openai.startTurn.bind(openai);
+    openai.startTurn = async (params: any) => {
+      const parserInput = normalizeCommandSkillInput(params?.inputText);
+      if (parserInput.includes('docs/command-skills/threads.md') && parserInput.includes('"command": "search"')) {
+        assert.equal(params?.event?.platform, 'codex-native-api');
+        assert.deepEqual(params?.event?.metadata?.codexbridge?.developerPromptContext, {
+          mode: 'command-skill-parser',
+          title: 'Thread Command Skill',
+          source: 'thread-command-skill',
+          command: 'search',
+          subcommand: 'search',
+          operation: 'search',
+        });
+        return {
+          outputText: JSON.stringify({
+            schemaVersion: 'codexbridge.thread-command-skill.v1',
+            ok: true,
+            action: 'search_threads',
+            confidence: 0.94,
+            requiresConfirmation: false,
+            summary: '找到最相关的发票线程。',
+            candidateThreadIds: [invoiceThread.session?.codexThreadId],
+          }),
+        };
+      }
+      return originalStartTurn(params);
+    };
+
+    const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-search-native-api-browser',
+      text: '/search 找昨天那个发票线程',
+    });
+
+    const text = result.messages[0]?.text ?? '';
+    assert.match(text, /搜索：找昨天那个发票线程/);
+    assert.match(text, /丹达第四期发票提交跟进/);
+  } finally {
+    await server.stop();
+  }
 });
 
 test('/threads natural language can route to local open and rename actions through the thread command skill', async () => {

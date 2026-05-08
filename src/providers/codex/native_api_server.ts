@@ -362,6 +362,9 @@ export class CodexNativeApiServer {
     const effectiveCwd = continuationEntry ? continuationEntry.bridgeSession.cwd : (requestedCwd || this.defaultCwd);
     const reasoningEffort = normalizeNullableString(requestBody.reasoning?.effort);
     const serviceTier = normalizeNullableString(requestBody.service_tier);
+    const internalEventMetadata = extractInternalCodexbridgeEventMetadata(requestMetadata);
+    const internalThreadMetadata = extractInternalCodexbridgeThreadMetadata(requestMetadata);
+    const internalTaskClass = extractInternalCodexbridgeTaskClass(requestMetadata);
 
     try {
       const execution = continuationEntry
@@ -388,6 +391,7 @@ export class CodexNativeApiServer {
               cwd: session.cwd,
               locale,
               attachments: [],
+              metadata: internalEventMetadata,
             },
           }),
         })
@@ -397,10 +401,12 @@ export class CodexNativeApiServer {
           cwd: effectiveCwd,
           title: deriveRequestTitle(this.requestTitlePrefix, prompt),
           metadata: {
+            ...(internalThreadMetadata ?? {}),
             source: 'codex-native-api',
             route: '/v1/responses',
             responseId,
             user: normalizeNullableString(requestBody.user),
+            sideTaskClass: internalTaskClass,
           },
           model: effectiveModel,
           reasoningEffort,
@@ -420,6 +426,7 @@ export class CodexNativeApiServer {
               cwd: session.cwd,
               locale,
               attachments: [],
+              metadata: internalEventMetadata,
             },
           }),
         });
@@ -888,6 +895,22 @@ function normalizeRecord(value: unknown): JsonRecord | null {
     return null;
   }
   return value as JsonRecord;
+}
+
+function extractInternalCodexbridgeEventMetadata(requestMetadata: JsonRecord | null): JsonRecord | undefined {
+  const codexbridge = normalizeRecord(requestMetadata?.codexbridge);
+  const eventMetadata = normalizeRecord(codexbridge?.eventMetadata);
+  return eventMetadata ? { codexbridge: eventMetadata } : undefined;
+}
+
+function extractInternalCodexbridgeThreadMetadata(requestMetadata: JsonRecord | null): JsonRecord | null {
+  const codexbridge = normalizeRecord(requestMetadata?.codexbridge);
+  return normalizeRecord(codexbridge?.threadMetadata);
+}
+
+function extractInternalCodexbridgeTaskClass(requestMetadata: JsonRecord | null): string | null {
+  const codexbridge = normalizeRecord(requestMetadata?.codexbridge);
+  return normalizeNullableString(codexbridge?.taskClass);
 }
 
 function omitUndefined<T extends JsonRecord>(value: T): T {

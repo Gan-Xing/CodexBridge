@@ -149,6 +149,23 @@ test('CodexNativeApiServer routes /v1/responses through isolated native runtime 
           cwd: '/tmp/project',
           locale: 'en-US',
           ticket: 'NATIVE-1',
+          codexbridge: {
+            taskClass: 'normalization',
+            threadMetadata: {
+              sourcePlatform: 'weixin',
+              source: 'assistant-record-command-skill',
+            },
+            eventMetadata: {
+              developerPromptContext: {
+                mode: 'command-skill-parser',
+                title: 'Assistant Record Command Skill',
+                source: 'assistant-record-command-skill',
+                command: 'todo',
+                subcommand: 'natural',
+                operation: 'classify_new_record',
+              },
+            },
+          },
         },
       }),
     });
@@ -168,6 +185,8 @@ test('CodexNativeApiServer routes /v1/responses through isolated native runtime 
     assert.equal(calls[1]?.payload.ephemeral, true);
     assert.equal(calls[1]?.payload.cwd, '/tmp/project');
     assert.equal(calls[1]?.payload.metadata.source, 'codex-native-api');
+    assert.equal(calls[1]?.payload.metadata.sourcePlatform, 'weixin');
+    assert.equal(calls[1]?.payload.metadata.sideTaskClass, 'normalization');
 
     assert.equal(calls[2]?.kind, 'startTurn');
     assert.equal(calls[2]?.payload.bridgeSession.id, 'session-native-api-1');
@@ -178,6 +197,14 @@ test('CodexNativeApiServer routes /v1/responses through isolated native runtime 
     assert.equal(calls[2]?.payload.sessionSettings.metadata.requestMetadata.ticket, 'NATIVE-1');
     assert.equal(calls[2]?.payload.event.platform, 'codex-native-api');
     assert.equal(calls[2]?.payload.event.cwd, '/tmp/project');
+    assert.deepEqual(calls[2]?.payload.event.metadata?.codexbridge?.developerPromptContext, {
+      mode: 'command-skill-parser',
+      title: 'Assistant Record Command Skill',
+      source: 'assistant-record-command-skill',
+      command: 'todo',
+      subcommand: 'natural',
+      operation: 'classify_new_record',
+    });
     assert.match(calls[2]?.payload.inputText, /System instructions:\nBe terse\./);
     assert.match(calls[2]?.payload.inputText, /Conversation input:\nUSER:\nExplain the test\./);
   } finally {

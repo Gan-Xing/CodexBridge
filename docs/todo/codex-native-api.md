@@ -207,6 +207,10 @@ Upstream:
     restarting the native-api service clears the default in-memory registry and
     callers must treat old `previous_response_id` chains as invalid until a
     later hardening/extraction phase intentionally adds persisted recovery.
+15. Internal helper callers may declare a side-task class, but they must route
+    through one module-local native-api side-task router instead of issuing ad
+    hoc localhost fetches at each call site; that router owns task-class
+    eligibility, localhost auth/binding, and direct-native fallback.
 
 ## Ordered Executable Sequence
 
@@ -380,6 +384,40 @@ Completion target:
 - internal slash-command judgments and similar helper tasks default to native
   execution instead of external-provider APIs
 
+Implementation checklist:
+
+- [x] Introduce one module-local side-task router:
+  - `src/providers/codex/native_api_side_task_router.ts`
+  - owns task-class eligibility, localhost API request shaping, optional local
+    auth header injection, and direct-native fallback
+- [x] Define the first native-api-eligible helper task classes in code:
+  - `intent_classification`
+  - `normalization`
+  - `small_verification`
+  - `side_reasoning`
+- [x] Route the first internal helper lanes through the router instead of
+  calling `CodexNativeRuntime.runIsolatedTurn()` ad hoc:
+  - command-skill parsing via `src/core/bridge_coordinator.ts invokeCommandSkillTurn()`
+  - review result localization
+  - agent result verification
+- [x] Keep localhost routing explicitly opt-in for bridge runtime integration
+  instead of silently probing localhost in every process
+  - `BridgeCoordinator` now resolves optional
+    `CODEXBRIDGE_INTERNAL_NATIVE_API_*` config into the shared side-task router
+  - when bridge-local localhost routing is not configured, helper tasks stay on
+    the existing direct-native isolated path
+- [x] Preserve helper-turn developer metadata when crossing the localhost API
+  shell
+  - `src/providers/codex/native_api_server.ts` now forwards internal
+    `metadata.codexbridge.eventMetadata` into the isolated native turn event
+  - internal `threadMetadata` and `taskClass` are merged into isolated thread
+    bootstrap metadata for debugging/routing visibility
+- [x] Cover native-api route success, task-class gating, and direct-native
+  fallback with focused tests
+  - `test/providers/codex/native_api_side_task_router.test.ts`
+  - `test/providers/codex/native_api_server.test.ts`
+  - `test/core/bridge_coordinator.test.ts`
+
 ### 5. Compatibility and hardening
 
 Reference focus:
@@ -550,17 +588,17 @@ Only after:
 
 ### Phase 2: Internal isolated-task routing
 
-- [ ] Define task classes suitable for native API routing:
+- [x] Define task classes suitable for native API routing:
   - intent classification
   - normalization
   - small verification
   - side reasoning
-- [ ] Define how internal callers opt into native API without changing the main
+- [x] Define how internal callers opt into native API without changing the main
   user-visible thread flow
-- [ ] Ensure native API calls do not pollute the active bridge session history
-- [ ] Define the in-process direct-native fallback path when the localhost API
+- [x] Ensure native API calls do not pollute the active bridge session history
+- [x] Define the in-process direct-native fallback path when the localhost API
   surface is unavailable
-- [ ] Prove that helper-task routing can use native API without polluting the
+- [x] Prove that helper-task routing can use native API without polluting the
   active bridge session history
 
 ### Phase 3: Chat compatibility
