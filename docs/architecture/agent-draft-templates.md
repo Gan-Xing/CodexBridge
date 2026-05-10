@@ -37,7 +37,7 @@ This document does not redefine:
 `/agent` intake should follow a mixed model:
 
 1. Deterministic subcommand routing
-2. Bounded model-assisted natural-language routing
+2. Bounded model-assisted natural-language routing owned by the skill
 3. Dedicated create-flow pipeline for add/create intents
 
 ### Deterministic Subcommands
@@ -78,7 +78,7 @@ free-form answer. Recommended actions include:
 - `reject`
 
 Low-confidence routing should prefer clarification over forced intent
-selection.
+selection. The skill, not the host, owns task typing and scope narrowing.
 
 ### Dedicated Create-Flow Pipeline
 
@@ -90,12 +90,20 @@ Only actions resolved to add/create should continue into create-flow:
 4. immutable-prompt drafting
 5. loop-policy drafting
 
-Create-flow should not be reused for confirm/edit/query/stop flows.
+Create-flow should not be reused for confirm/edit/query/stop flows. The host
+must only relay the skill result and avoid adding extra host-side scope
+heuristics after the skill has returned a draft or a clarification.
 
 ## Shared Draft Shape
 
 All task types should converge on the same high-level shape, even when the
 rendered prompt differs by task type.
+
+Goal text rule:
+
+- `goal` must be a single direct sentence that restates the user's intent.
+- Keep it as concise as possible and use at most one comma.
+- Do not turn `goal` into rationale, scope narration, checklist content, or a plan.
 
 Recommended draft fields:
 
@@ -115,6 +123,10 @@ Important note:
 - bridge draft payloads may still use `plan[]` as the serialized field name
 - product semantics should treat `plan[]` as the user-confirmed formal
   checklist / TODO list
+- `plan[]` must be generated from the user goal plus current repo context, and
+  it must never be empty.
+- If the skill cannot derive at least 3 concrete checklist items from the goal
+  and context, it should return `clarify` instead of `create_draft`.
 
 ## Task Types
 
@@ -161,7 +173,9 @@ It should derive or explicitly include:
 
 ### Clarification Rule
 
-Do not create a formal `code` checklist immediately when the goal is too broad.
+Do not create a formal `code` checklist immediately when the goal is too broad
+or when the current context is insufficient to derive at least 3 concrete
+checklist items.
 
 Examples that should usually trigger clarification first:
 
@@ -174,6 +188,7 @@ Clarify scope first, for example:
 - which phase
 - which package
 - which bounded capability slice
+- which repo context slice
 
 ### User-Visible `code` Draft Layout
 

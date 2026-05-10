@@ -985,3 +985,8 @@ The first extraction also now has package-level exports/tests in place:
 - `packages/codex-native-api/src/index.ts`
 - `packages/codex-native-api/package.json`
 - `packages/codex-native-api/test/package_exports.test.ts`
+
+The first package boundary guard is also in place:
+
+- `scripts/check-codex-native-api-boundary.mjs`
+- `pnpm codex-native-api:check-boundary`

@@ -56,3 +56,12 @@ test('codex gateway package metadata and build layout stay aligned', () => {
   assert.equal(packageJson.bin?.['codex-gateway-server'], './dist/cli.js');
   assert.deepEqual(packageJson.files, ['dist', 'README.md']);
 });
+
+test('codex gateway root entrypoint uses explicit public exports', () => {
+  const indexPath = path.resolve(import.meta.dirname, '../src/index.ts');
+  const source = fs.readFileSync(indexPath, 'utf8');
+
+  assert.equal(source.includes('export * from'), false);
+  assert.match(source, /export \{\s*[\s\S]*getOpenAICompatibleProviderPreset/);
+  assert.match(source, /export type \{\s*[\s\S]*OpenAICompatibleProviderCapabilities/);
+});

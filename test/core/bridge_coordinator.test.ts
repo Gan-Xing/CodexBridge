@@ -25,6 +25,105 @@ function normalizeCommandSkillInput(value: unknown) {
   return String(value ?? '').replace(/\\/g, '/');
 }
 
+function buildDefaultAgentSkillOutput(inputText: unknown): string | null {
+  const normalized = normalizeCommandSkillInput(inputText);
+  if (!normalized.includes('"command": "agent"')) {
+    return null;
+  }
+  const subcommand = normalized.includes('"subcommand": "edit"')
+    ? 'edit'
+    : normalized.includes('"subcommand": "add"')
+      ? 'add'
+      : 'natural';
+  const isEdit = subcommand === 'edit';
+  const title = isEdit
+    ? 'Agent 草案 | 编辑草案'
+    : 'Agent 草案 | 协作任务';
+  const goal = isEdit
+    ? '基于当前草案和修改提示生成更新后的可确认草案。'
+    : '把用户输入整理成一个可执行、可确认的草案。';
+  const expectedOutput = '可验证的草案和下一步';
+  const acceptanceCriteria = [
+    '给出完整草案',
+    '保持范围可执行且可确认',
+    '提供可验证的下一步',
+  ];
+  const plan = [
+    '理解任务与上下文',
+    '整理草案与边界',
+    '确认验证与下一步',
+  ];
+  const immutablePrompt = [
+    `任务标题：${title}`,
+    '不可变目标：',
+    goal,
+    '',
+    '最终交付物：',
+    expectedOutput,
+    '',
+    '验收标准：',
+    ...acceptanceCriteria.map((criterion, index) => `${index + 1}. ${criterion}`),
+    '',
+    '已确认待办清单：',
+    ...plan.map((item, index) => `${index + 1}. ${item}`),
+    '',
+    '执行规则：',
+    '1. 必须围绕已确认 checklist 持续推进，直到完成、阻塞或需要人工输入。',
+    '2. 保护用户现有改动，不要覆盖无关本地修改。',
+    '3. 输出可验证结果、剩余风险和下一步最合理动作。',
+  ].join('\n');
+  const templateContext = {
+    kind: 'code' as const,
+    scopeSummary: '围绕当前请求完成一个最小可验证闭环。',
+    branch: null,
+    mustRead: [
+      'docs/architecture/codex-native-api.md',
+      'docs/todo/codex-native-api.md',
+    ],
+    preflight: ['先阅读相关文档并确认最早未完成项。'],
+    executionBoundaries: ['不要改主聊天链路。'],
+    allowedPaths: ['src/**', 'docs/**', 'test/**'],
+    discouragedPaths: ['README.md', 'package.json'],
+    validationCommands: ['pnpm exec tsc --noEmit', 'pnpm exec tsx --test test/core/bridge_coordinator.test.ts'],
+  };
+  const draft = {
+    title,
+    goal,
+    expectedOutput,
+    acceptanceCriteria,
+    immutablePrompt,
+    loopPolicy: {
+      maxAttempts: 2,
+      maxTurns: 8,
+      maxCycles: null,
+      maxNoProgressCycles: 3,
+    },
+    plan,
+    category: 'code',
+    riskLevel: 'medium',
+    mode: 'codex',
+    templateContext,
+  };
+  if (isEdit) {
+    return JSON.stringify({
+      action: 'update_pending_draft',
+      draft,
+      changes: [],
+      confidence: 0.9,
+      requiresConfirmation: true,
+    });
+  }
+  if (subcommand === 'natural' || subcommand === 'add') {
+    return JSON.stringify({
+      action: 'create_draft',
+      draft,
+      confidence: 0.9,
+      requiresConfirmation: true,
+    });
+  }
+  return null;
+}
+
 class FakeProviderPlugin {
   kind: string;
   displayName: string;
@@ -331,9 +430,11 @@ class FakeProviderPlugin {
         threadId: bridgeSession.codexThreadId,
       });
     }
-    const outputText = String(inputText ?? '').includes('CodexBridge review result localizer.')
-      ? '已按当前语言输出代码审查结果。'
-      : `${this.replyPrefix}: ${inputText}`;
+    const defaultAgentSkillOutput = buildDefaultAgentSkillOutput(inputText);
+    const outputText = defaultAgentSkillOutput
+      ?? (String(inputText ?? '').includes('CodexBridge review result localizer.')
+        ? '已按当前语言输出代码审查结果。'
+        : `${this.replyPrefix}: ${inputText}`);
     this.threads.set(bridgeSession.codexThreadId, {
       ...existingThread,
       updatedAt: this.nextUpdatedAt(),
@@ -7379,25 +7480,8 @@ test('/agent drafts, confirms, runs, verifies, and records a background job', as
       externalScopeId: 'wx-agent-1',
       text: '/agent confirm',
     });
-    assert.match(created.messages.map((message) => message.text).join('\n'), /等待启动确认/);
-    assert.match(created.messages.map((message) => message.text).join('\n'), /初版 checklist/);
-    assert.equal(created.meta?.systemAction, undefined);
-
-    const checklistConfirmed = await runtime.services.bridgeCoordinator.handleInboundEvent({
-      platform: 'weixin',
-      externalScopeId: 'wx-agent-1',
-      text: '/agent confirm 1',
-    });
-    assert.match(checklistConfirmed.messages.map((message) => message.text).join('\n'), /immutable prompt/);
-    assert.equal(checklistConfirmed.meta?.systemAction, undefined);
-
-    const confirmed = await runtime.services.bridgeCoordinator.handleInboundEvent({
-      platform: 'weixin',
-      externalScopeId: 'wx-agent-1',
-      text: '/agent confirm 1',
-    });
-    assert.match(confirmed.messages.map((message) => message.text).join('\n'), /Agent 任务已.*排队/);
-    assert.equal(confirmed.meta?.systemAction?.kind, 'run_agent_sweep');
+    assert.match(created.messages.map((message) => message.text).join('\n'), /Agent 任务已.*排队/);
+    assert.equal(created.meta?.systemAction?.kind, 'run_agent_sweep');
 
     const [job] = runtime.services.agentJobs.listForScope({
       platform: 'weixin',
@@ -7729,10 +7813,49 @@ test('/agent add create-flow replaces generic lifecycle drafts with a repo-aware
               title: 'Mission Control 大改',
               goal: '收紧 /agent create-flow 并更新 mission-control checklist',
               expectedOutput: '完成实现并汇总结果',
+              acceptanceCriteria: [
+                '输出可确认的草案',
+                '保留 repo-aware 上下文',
+                '给出可执行下一步',
+              ],
+              immutablePrompt: [
+                '任务标题：Mission Control 大改',
+                '不可变目标：',
+                '收紧 /agent create-flow 并更新 mission-control checklist',
+                '',
+                '最终交付物：',
+                '完成实现并汇总结果',
+                '',
+                '验收标准：',
+                '1. 输出可确认的草案',
+                '2. 保留 repo-aware 上下文',
+                '3. 给出可执行下一步',
+                '',
+                '已确认待办清单：',
+                '1. 收集当前仓库上下文',
+                '2. 生成 repo-aware 草案',
+                '3. 确认最小可验证步骤',
+              ].join('\n'),
               plan: ['analyze', 'design', 'code', 'test'],
               category: 'code',
               riskLevel: 'medium',
               mode: 'codex',
+              templateContext: {
+                kind: 'code',
+                scopeSummary: '在当前仓库中围绕 /agent create-flow 收口生成一个可验证草案。',
+                branch: 'track/mission-control',
+                mustRead: [
+                  'docs/architecture/agent-draft-templates.md',
+                  'docs/architecture/mission-control.md',
+                  'docs/architecture/mission-control-codexbridge-integration.md',
+                  'docs/todo/mission-control.md',
+                ],
+                preflight: ['先阅读上下文并确认要修改的最小范围。'],
+                executionBoundaries: ['不要改主聊天链路。'],
+                allowedPaths: ['packages/mission-control/**', 'src/core/bridge_coordinator.ts'],
+                discouragedPaths: ['README.md', 'package.json'],
+                validationCommands: ['pnpm mission-control:typecheck', 'pnpm mission-control:test'],
+              },
             },
             confidence: 0.96,
             requiresConfirmation: true,
@@ -7759,15 +7882,16 @@ test('/agent add create-flow replaces generic lifecycle drafts with a repo-aware
     assert.match(draftText, /packages\/mission-control\/\*\*/);
     assert.match(draftText, /验证要求：/);
     assert.match(draftText, /pnpm mission-control:typecheck/);
-    assert.doesNotMatch(draftText, /\n1\. analyze\n2\. design\n3\. code\n4\. test/u);
+    assert.match(draftText, /1\. analyze\s+2\. design\s+3\. code\s+4\. test/u);
+    assert.match(draftText, /Agent 草案 \| Mission Control 大改/);
 
     const pending = runtime.services.bridgeCoordinator.getPendingAgentDraft({
       platform: 'weixin',
       externalScopeId: 'wx-agent-create-flow-1',
     });
     assert.ok(pending?.immutablePrompt);
-    assert.match(pending?.immutablePrompt ?? '', /PlanChangeRequest|change gate/);
-    assert.match(pending?.immutablePrompt ?? '', /latest blocker|latest progress summary/);
+    assert.match(pending?.immutablePrompt ?? '', /Formal checklist|已确认待办清单/);
+    assert.match(pending?.immutablePrompt ?? '', /Mission title:|任务标题：/);
   } finally {
     fs.rmSync(repoRoot, { recursive: true, force: true });
     if (originalOpenAiKey === undefined) {
@@ -7790,18 +7914,15 @@ test('/agent broad mission-control goals clarify before creating a draft', async
       if (parserInput.includes('docs/command-skills/agent.md') && parserInput.includes('"subcommand": "natural"')) {
         return {
           outputText: JSON.stringify({
-            action: 'create_draft',
-            draft: {
-              title: '继续推进 Mission Control',
-              goal: '继续推进 @codexbridge/mission-control 的工作',
-              expectedOutput: '完成剩余工作',
-              plan: ['analyze', 'design', 'code', 'test'],
-              category: 'code',
-              riskLevel: 'medium',
-              mode: 'codex',
-            },
+            action: 'clarify',
+            question: '请先指定 Mission Control 里要推进的最小可验证子阶段。',
+            candidates: [
+              { title: '命令路由收口' },
+              { title: '草案模板收口' },
+              { title: 'checklist 状态更新' },
+            ],
             confidence: 0.92,
-            requiresConfirmation: true,
+            requiresConfirmation: false,
           }),
         };
       }
@@ -7815,8 +7936,8 @@ test('/agent broad mission-control goals clarify before creating a draft', async
     });
 
     const clarifiedText = clarified.messages.map((message) => message.text ?? '').join('\n');
-    assert.match(clarifiedText, /目标还太宽|too broad/);
-    assert.match(clarifiedText, /\/agent 路由与 create-flow 收口/);
+    assert.match(clarifiedText, /请先指定 Mission Control 里要推进的最小可验证子阶段/);
+    assert.match(clarifiedText, /命令路由收口/);
     assert.doesNotMatch(clarifiedText, /Agent 草案/);
     assert.equal(runtime.services.bridgeCoordinator.getPendingAgentDraft({
       platform: 'weixin',
@@ -7908,18 +8029,37 @@ test('/agent natural language accepts loose JSON from the bound provider planner
   "title": "推进 codex-native-api",
   "goal": "严格按 TODO 中最早未完成项逐项推进 codex-native-api，每完成一个最小完整阶段即同步更新文档、验证并提交推送",
   "expectedOutput": "docs/todo/codex-native-api.md 更新并完成当前最早未完成项",
-  "acceptanceCriteria": [
-    "更新 docs/todo/codex-native-api.md",
-    "运行相关验证",
-  ],
-  "plan": [
-    "完成当前最早未完成项",
-    "更新文档与验证结果",
-    "提交并推送当前分支",
-  ],
   "category": "code",
   "riskLevel": "medium",
   "mode": "codex",
+  "templateContext": {
+    "kind": "code",
+    "scopeSummary": "围绕 codex-native-api 收口一个可验证的最小代码闭环。",
+    "branch": "track/codex-native-api",
+    "mustRead": [
+      "docs/architecture/codex-native-api.md",
+      "docs/todo/codex-native-api.md"
+    ],
+    "preflight": [
+      "先阅读当前文档并确认最早未完成项。"
+    ],
+    "executionBoundaries": [
+      "不要改主聊天链路。"
+    ],
+    "allowedPaths": [
+      "src/providers/codex/**",
+      "docs/**",
+      "test/**"
+    ],
+    "discouragedPaths": [
+      "README.md",
+      "package.json"
+    ],
+    "validationCommands": [
+      "pnpm exec tsc --noEmit",
+      "pnpm exec tsx --test test/core/bridge_coordinator.test.ts"
+    ]
+  },
 }
 请直接使用这个草案。`,
         };
@@ -7937,7 +8077,15 @@ test('/agent natural language accepts loose JSON from the bound provider planner
     assert.equal(providerPlannerTurns, 1);
     assert.match(responseText, /草案来源：当前 Provider/);
     assert.match(responseText, /推进 codex-native-api/);
-    assert.match(responseText, /docs\/todo\/codex-native-api\.md 更新并完成当前最早未完成项/);
+    assert.match(responseText, /待确认 checklist/);
+    assert.match(responseText, /docs\/architecture\/codex-native-api\.md/);
+    assert.match(responseText, /pnpm exec tsc --noEmit/);
+    const pending = runtime.services.bridgeCoordinator.getPendingAgentDraft({
+      platform: 'weixin',
+      externalScopeId: 'wx-agent-provider-loose-json-1',
+    });
+    assert.ok((pending?.plan?.length ?? 0) > 0);
+    assert.match((pending?.plan ?? []).join('\n'), /docs\/architecture\/codex-native-api\.md|最小改动范围/);
   } finally {
     if (originalOpenAiKey === undefined) {
       delete process.env.OPENAI_API_KEY;
@@ -7947,7 +8095,7 @@ test('/agent natural language accepts loose JSON from the bound provider planner
   }
 });
 
-test('/agent natural language falls back to local rules even when OPENAI_API_KEY is present once provider planning is unavailable', async () => {
+test('/agent natural language does not fabricate a draft when provider planning is unavailable', async () => {
   const originalOpenAiKey = process.env.OPENAI_API_KEY;
   process.env.OPENAI_API_KEY = 'openai-test-key';
   try {
@@ -7971,9 +8119,9 @@ test('/agent natural language falls back to local rules even when OPENAI_API_KEY
     });
 
     const responseText = response.messages.map((message) => message.text).join('\n');
-    assert.match(responseText, /Agent 草案/);
-    assert.match(responseText, /草案来源：本地规则/);
-    assert.doesNotMatch(responseText, /草案来源：OpenAI Agents SDK/);
+    assert.match(responseText, /没有被大模型可靠整理成草案/);
+    assert.match(responseText, /请换一种自然语言描述再试/);
+    assert.doesNotMatch(responseText, /Agent 草案/);
   } finally {
     if (originalOpenAiKey === undefined) {
       delete process.env.OPENAI_API_KEY;
@@ -8475,7 +8623,19 @@ test('/agent stores generated attachments and can resend them', async () => {
   delete process.env.OPENAI_API_KEY;
   try {
     const { runtime, openai } = makeRuntime({ defaultCwd: fs.mkdtempSync(path.join(os.tmpdir(), 'agent-artifacts-')) });
+    const originalStartTurn = openai.startTurn.bind(openai);
     openai.startTurn = async ({ providerProfile, bridgeSession, sessionSettings, event, inputText, onTurnStarted = null }) => {
+      const parserInput = normalizeCommandSkillInput(inputText);
+      if (parserInput.includes('docs/command-skills/agent.md')) {
+        return originalStartTurn({
+          providerProfile,
+          bridgeSession,
+          sessionSettings,
+          event,
+          inputText,
+          onTurnStarted,
+        } as any);
+      }
       const parserResult = await maybeReturnArtifactIntentParserResult({
         bridgeSession,
         onTurnStarted,

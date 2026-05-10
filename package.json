@@ -18,6 +18,7 @@
     "codex-gateway:test": "tsx --test packages/codex-gateway/test/*.test.ts",
     "codex-gateway:typecheck": "tsc -p packages/codex-gateway/tsconfig.json --noEmit",
     "codex-native-api:build": "tsc -p packages/codex-native-api/tsconfig.json",
+    "codex-native-api:check-boundary": "node scripts/check-codex-native-api-boundary.mjs",
     "codex-native-api:test": "tsx --test packages/codex-native-api/test/*.test.ts",
     "codex-native-api:typecheck": "tsc -p packages/codex-native-api/tsconfig.json --noEmit",
     "weixin:login": "tsx src/cli.ts weixin login",

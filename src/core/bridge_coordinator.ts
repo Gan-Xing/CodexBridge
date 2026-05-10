@@ -6293,11 +6293,7 @@ export class BridgeCoordinator {
         ], this.buildScopedSessionMeta(event));
       }
       if (commandResult.action === 'create_draft') {
-        const createFlow = this.buildAgentCreateFlowOutcome(event, scopeRef, body, 'codex', commandResult.candidate);
-        if (createFlow.kind === 'clarify') {
-          return this.renderAgentClarifyResponse(event, createFlow.question, createFlow.candidates);
-        }
-        const draft = this.buildPendingAgentDraft(event, scopeRef, createFlow.candidate, body, 'codex');
+        const draft = this.buildPendingAgentDraft(event, scopeRef, commandResult.candidate, body, 'codex');
         this.setPendingAgentDraft(scopeRef, draft);
         return this.renderAgentDraftResponse(event, draft);
       }
@@ -6306,40 +6302,14 @@ export class BridgeCoordinator {
     const createFlow = await this.normalizeAgentDraft(event, scopeRef, body, {
       skipCodex: true,
     });
-    if (createFlow.kind === 'clarify') {
-      return this.renderAgentClarifyResponse(event, createFlow.question, createFlow.candidates);
+    if (!createFlow) {
+      return messageResponse([
+        this.t('coordinator.agent.parseFailed'),
+      ], this.buildScopedSessionMeta(event));
     }
-    const draft = this.buildPendingAgentDraft(event, scopeRef, createFlow.candidate, body, createFlow.normalizedBy);
+    const draft = this.buildPendingAgentDraft(event, scopeRef, createFlow, body, 'provider');
     this.setPendingAgentDraft(scopeRef, draft);
     return this.renderAgentDraftResponse(event, draft);
-  }
-
-  buildAgentCreateFlowOutcome(
-    event,
-    scopeRef: PlatformScopeRef,
-    rawInput: string,
-    normalizedBy: 'codex' | 'provider' | 'local',
-    seedCandidate: AgentDraftCandidate | null = null,
-  ): AgentCreateFlowOutcome {
-    const boundSession = this.bridgeSessions.resolveScopeSession(scopeRef);
-    const inheritedSettings = boundSession
-      ? this.bridgeSessions.getSessionSettings(boundSession.id)
-      : null;
-    const locale = normalizeLocale(
-      inheritedSettings?.locale
-      ?? this.resolveScopeLocale(scopeRef, event)
-      ?? this.currentI18n.locale,
-    ) ?? 'zh-CN';
-    const cwd = normalizeCwd(boundSession?.cwd)
-      ?? this.resolveEventCwd(event)
-      ?? null;
-    return buildAgentCreateFlowCandidate({
-      rawInput,
-      cwd,
-      locale,
-      normalizedBy,
-      seedCandidate,
-    });
   }
 
   async handleAgentConfirmCommand(event, confirmSpec = '') {
@@ -6422,7 +6392,10 @@ export class BridgeCoordinator {
       maxAttempts: 2,
     });
     this.clearPendingAgentDraft(scopeRef);
-    const created = this.agentJobs.startJob(job.id);
+    const created = this.agentJobs.startJob(job.id, {
+      confirmChecklist: true,
+      confirmPrompt: true,
+    });
     const index = this.agentJobs.listForScope(scopeRef).findIndex((entry) => entry.id === created.id) + 1;
     return this.renderAgentMissionStartResponse(event, created, index, { created: true });
   }
@@ -7156,18 +7129,18 @@ export class BridgeCoordinator {
     scopeRef: PlatformScopeRef,
     rawInput: string,
     options: { skipCodex?: boolean } = {},
-  ): Promise<AgentCreateFlowOutcome> {
+  ): Promise<AgentDraftCandidate | null> {
     if (!options.skipCodex) {
       const codexDraft = await this.normalizeAgentDraftWithCodex(event, scopeRef, rawInput).catch(() => null);
       if (codexDraft) {
-        return this.buildAgentCreateFlowOutcome(event, scopeRef, rawInput, 'codex', codexDraft);
+        return codexDraft;
       }
     }
     const providerDraft = await this.normalizeAgentDraftWithProvider(event, scopeRef, rawInput).catch(() => null);
     if (providerDraft) {
-      return this.buildAgentCreateFlowOutcome(event, scopeRef, rawInput, 'provider', providerDraft);
+      return providerDraft;
     }
-    return this.buildAgentCreateFlowOutcome(event, scopeRef, rawInput, 'local');
+    return null;
   }
 
   async normalizeAgentDraftWithProvider(
@@ -7190,7 +7163,7 @@ export class BridgeCoordinator {
         subcommand: 'natural',
         operation: 'normalize_draft',
       },
-      buildPrompt: () => buildAgentDraftPrompt(rawInput, runtimeContext.locale),
+      buildPrompt: () => buildAgentDraftPrompt(rawInput, runtimeContext.locale, collectAgentRepoContext(runtimeContext.cwd)),
       parseResult: parseAgentDraftCandidate,
     });
   }
@@ -7216,7 +7189,12 @@ export class BridgeCoordinator {
         subcommand: 'edit',
         operation: 'merge_draft_edit',
       },
-      buildPrompt: () => buildAgentDraftEditPrompt(draft, instruction, normalizeLocale(draft.locale) ?? 'zh-CN'),
+      buildPrompt: () => buildAgentDraftEditPrompt(
+        draft,
+        instruction,
+        normalizeLocale(draft.locale) ?? 'zh-CN',
+        collectAgentRepoContext(runtimeContext.cwd),
+      ),
       parseResult: parseAgentDraftCandidate,
     });
   }
@@ -7367,6 +7345,7 @@ export class BridgeCoordinator {
       : null;
     const locale = pendingDraft?.locale ?? inheritedSettings?.locale ?? this.resolveScopeLocale(scopeRef, event);
     const cwd = normalizeCwd(pendingDraft?.cwd) ?? normalizeCwd(boundSession?.cwd) ?? this.resolveEventCwd(event) ?? null;
+    const repoContext = collectAgentRepoContext(cwd);
     return this.invokeCommandSkillTurn<AgentCommandSkillResult>({
       event,
       runtimeContext: {
@@ -7397,6 +7376,7 @@ export class BridgeCoordinator {
         timezone: extractEventTimezone(event),
         pendingDraft,
         jobs: this.agentJobs?.listForScope?.(scopeRef) ?? [],
+        repoContext,
       }),
       parseResult: parseAgentCommandSkillResult,
     });
@@ -7523,13 +7503,18 @@ export class BridgeCoordinator {
     }
     let updated = job;
     if (detail.mission.status === 'draft') {
-      updated = this.agentJobs.startJob(job.id);
+      updated = this.agentJobs.startJob(job.id, {
+        confirmChecklist: true,
+        confirmPrompt: true,
+      });
     } else if (detail.mission.status === 'awaiting_checklist_confirm') {
       updated = this.agentJobs.startJob(job.id, {
         confirmChecklist: true,
+        confirmPrompt: true,
       });
     } else if (detail.mission.status === 'awaiting_prompt_confirm') {
       updated = this.agentJobs.startJob(job.id, {
+        confirmChecklist: true,
         confirmPrompt: true,
       });
     } else if (detail.mission.status === 'scope_change_pending') {
@@ -12911,7 +12896,11 @@ function buildReviewResultLocalizationPrompt(
   ].join('\n');
 }
 
-function buildAgentDraftPrompt(rawInput: string, locale: string | null): string {
+function buildAgentDraftPrompt(
+  rawInput: string,
+  locale: string | null,
+  repoContext: AgentRepoContext,
+): string {
   const language = normalizeLocale(locale) === 'zh-CN' ? '中文' : 'English';
   return [
     `请把下面的微信 /agent 请求整理成严格 JSON，只返回 JSON，不要 Markdown。输出语言：${language}。`,
@@ -12919,12 +12908,28 @@ function buildAgentDraftPrompt(rawInput: string, locale: string | null): string 
     '{"title":"短标题","goal":"明确目标","expectedOutput":"最终交付物","acceptanceCriteria":["验收条件1","验收条件2"],"immutablePrompt":"固定 Prompt","loopPolicy":{"maxAttempts":2,"maxTurns":8,"maxCycles":null,"maxNoProgressCycles":3},"plan":["正式待办1","正式待办2"],"category":"code|research|ops|doc|media|mixed","riskLevel":"low|medium|high","mode":"codex|agents|hybrid"}',
     '要求：多步骤任务优先 hybrid；代码仓库任务用 codex；纯研究/计划可用 agents；plan 代表正式待办 checklist，保持 3-6 条，不要写泛泛的分析/设计/开发/测试模板步骤。',
     '',
+    '协作上下文：',
+    JSON.stringify({
+      cwd: repoContext.cwd,
+      repoRoot: repoContext.repoRoot,
+      repoName: repoContext.repoName,
+      branch: repoContext.branch,
+      packageManager: repoContext.packageManager,
+      packageScripts: repoContext.packageScripts,
+      topLevelEntries: repoContext.topLevelEntries,
+    }, null, 2),
+    '',
     '用户请求：',
     rawInput,
   ].join('\n');
 }
 
-function buildAgentDraftEditPrompt(draft: PendingAgentDraft, instruction: string, locale: SupportedLocale): string {
+function buildAgentDraftEditPrompt(
+  draft: PendingAgentDraft,
+  instruction: string,
+  locale: SupportedLocale,
+  repoContext: AgentRepoContext,
+): string {
   const currentDraft = {
     title: draft.title,
     goal: draft.goal,
@@ -12936,6 +12941,7 @@ function buildAgentDraftEditPrompt(draft: PendingAgentDraft, instruction: string
     category: draft.category,
     riskLevel: draft.riskLevel,
     mode: draft.mode,
+    templateContext: draft.templateContext ?? null,
   };
   const localizedInstruction = locale === 'zh-CN'
     ? `你是 CodexBridge 的 agent 草案编辑器。请把用户的“修改提示”合并到“当前草案”里，输出更新后的完整 agent 草案 JSON。
@@ -12953,6 +12959,17 @@ function buildAgentDraftEditPrompt(draft: PendingAgentDraft, instruction: string
 - plan 是正式待办 checklist，不是泛化的软件生命周期模板；保持 3-6 条，条目要具体可判定。
 - 不要把当前草案丢掉后仅按修改提示重新生成。
 - 如果无法可靠合并，返回一个最接近当前草案且已应用明确修改的完整 JSON。
+
+协作上下文：
+${JSON.stringify({
+  cwd: repoContext.cwd,
+  repoRoot: repoContext.repoRoot,
+  repoName: repoContext.repoName,
+  branch: repoContext.branch,
+  packageManager: repoContext.packageManager,
+  packageScripts: repoContext.packageScripts,
+  topLevelEntries: repoContext.topLevelEntries,
+}, null, 2)}
 
 当前草案 JSON：
 ${JSON.stringify(currentDraft, null, 2)}
@@ -12974,6 +12991,17 @@ Edit rules:
 - Keep plan to 3-6 concrete checklist items. Do not return generic analyze/design/code/test filler unless they are truly the confirmed checklist.
 - Do not discard the current draft and regenerate only from the edit instruction.
 - If the edit cannot be merged reliably, return the closest full JSON draft that preserves the current draft and applies the explicit changes.
+
+Collaboration context:
+${JSON.stringify({
+  cwd: repoContext.cwd,
+  repoRoot: repoContext.repoRoot,
+  repoName: repoContext.repoName,
+  branch: repoContext.branch,
+  packageManager: repoContext.packageManager,
+  packageScripts: repoContext.packageScripts,
+  topLevelEntries: repoContext.topLevelEntries,
+}, null, 2)}
 
 Current draft JSON:
 ${JSON.stringify(currentDraft, null, 2)}
@@ -13237,7 +13265,6 @@ function parseAgentDraftCandidate(value: unknown): AgentDraftCandidate | null {
   const plan = Array.isArray(draft.plan)
     ? draft.plan.map((line) => compactWhitespace(line)).filter(Boolean).slice(0, 8)
     : [];
-  const localeHint = inferAgentDraftLocaleHint(title, goal, expectedOutput, ...plan);
   const acceptanceCriteria = Array.isArray(draft.acceptanceCriteria ?? draft.acceptance_criteria)
     ? (draft.acceptanceCriteria ?? draft.acceptance_criteria)
       .map((line: unknown) => compactWhitespace(line))
@@ -13245,30 +13272,174 @@ function parseAgentDraftCandidate(value: unknown): AgentDraftCandidate | null {
       .slice(0, 8)
     : [];
   const loopPolicy = parseAgentLoopPolicy(draft.loopPolicy ?? draft.loop_policy);
-  const normalizedPlan = plan.length > 0 ? plan : buildLocalAgentPlan(goal);
+  const templateContext = parseAgentDraftTemplateContext(draft.templateContext ?? draft.template_context);
+  const localeHint = inferAgentDraftLocaleHint(title, goal, expectedOutput, plan.join('\n'), acceptanceCriteria.join('\n'));
+  const normalizedPlan = plan.length > 0 ? plan : buildDefaultAgentPlan({
+    title,
+    goal,
+    expectedOutput,
+    templateContext,
+    localeHint,
+  });
+  const normalizedAcceptanceCriteria = acceptanceCriteria.length > 0
+    ? acceptanceCriteria
+    : buildDefaultAgentAcceptanceCriteria(expectedOutput, localeHint);
+  const immutablePrompt = compactWhitespace(draft.immutablePrompt ?? draft.immutable_prompt ?? '')
+    || buildDefaultAgentImmutablePrompt({
+      title,
+      goal,
+      expectedOutput,
+      acceptanceCriteria: normalizedAcceptanceCriteria,
+      plan: normalizedPlan,
+      localeHint,
+    });
   return {
     title: truncateText(title, 40),
     goal,
     expectedOutput,
-    acceptanceCriteria: acceptanceCriteria.length > 0
-      ? acceptanceCriteria
-      : buildDefaultAgentAcceptanceCriteria(expectedOutput, localeHint),
-    immutablePrompt: compactWhitespace(draft.immutablePrompt ?? draft.immutable_prompt ?? '')
-      || buildDefaultAgentImmutablePrompt({
-        title,
-        goal,
-        expectedOutput,
-        acceptanceCriteria: acceptanceCriteria.length > 0
-          ? acceptanceCriteria
-          : buildDefaultAgentAcceptanceCriteria(expectedOutput, localeHint),
-        plan: normalizedPlan,
-        localeHint,
-      }),
+    acceptanceCriteria: normalizedAcceptanceCriteria,
+    immutablePrompt,
     loopPolicy,
     plan: normalizedPlan,
     category: normalizeAgentCategory(draft.category),
     riskLevel: normalizeAgentRisk(draft.riskLevel ?? draft.risk_level),
     mode: normalizeAgentMode(draft.mode),
+    templateContext,
+  };
+}
+
+function buildDefaultAgentPlan(input: {
+  title: string;
+  goal: string;
+  expectedOutput: string;
+  templateContext: AgentDraftTemplateContext | null;
+  localeHint: SupportedLocale | null;
+}): string[] {
+  const isZh = input.localeHint === 'zh-CN';
+  const goal = compactWhitespace(input.goal) || compactWhitespace(input.title) || compactWhitespace(input.expectedOutput);
+  const templateContext = input.templateContext;
+  if (templateContext?.kind === 'code') {
+    return buildDefaultCodeAgentPlan(goal, input.expectedOutput, templateContext, isZh);
+  }
+  return buildDefaultGenericAgentPlan(goal, input.expectedOutput, templateContext, isZh);
+}
+
+function buildDefaultCodeAgentPlan(
+  goal: string,
+  expectedOutput: string,
+  templateContext: AgentDraftTemplateContext,
+  isZh: boolean,
+): string[] {
+  const mustRead = dedupeStrings((templateContext.mustRead ?? []).map((entry) => compactWhitespace(entry)).filter(Boolean)).slice(0, 3);
+  const preflight = dedupeStrings((templateContext.preflight ?? []).map((entry) => compactWhitespace(entry)).filter(Boolean)).slice(0, 2);
+  const boundaries = dedupeStrings((templateContext.executionBoundaries ?? []).map((entry) => compactWhitespace(entry)).filter(Boolean)).slice(0, 2);
+  const allowedPaths = dedupeStrings((templateContext.allowedPaths ?? []).map((entry) => compactWhitespace(entry)).filter(Boolean)).slice(0, 3);
+  const validationCommands = dedupeStrings((templateContext.validationCommands ?? []).map((entry) => compactWhitespace(entry)).filter(Boolean)).slice(0, 3);
+  const plan: string[] = [];
+  if (mustRead.length > 0) {
+    plan.push(isZh
+      ? `先阅读并对齐 ${mustRead.join('、')}，锁定“${goal}”的最小改动范围`
+      : `Read and align ${mustRead.join(', ')} to lock the smallest change surface for "${goal}"`);
+  } else {
+    plan.push(isZh
+      ? `先阅读与“${goal}”直接相关的文档、代码和测试，锁定最小改动范围`
+      : `Read the docs, code, and tests directly related to "${goal}" to lock the smallest change surface`);
+  }
+  if (allowedPaths.length > 0) {
+    plan.push(isZh
+      ? `只在 ${allowedPaths.join('、')} 范围内完成最小实现，并保持修改边界清晰`
+      : `Complete the smallest implementation inside ${allowedPaths.join(', ')} and keep the change boundary clear`);
+  } else {
+    plan.push(isZh
+      ? '在当前仓库里完成最小可验证实现，并避免扩散到无关模块'
+      : 'Complete the smallest verifiable implementation in the current repo and avoid unrelated modules');
+  }
+  if (preflight.length > 0) {
+    plan.push(isZh
+      ? `先完成前置检查：${preflight.join('；')}`
+      : `Complete the preflight checks first: ${preflight.join('; ')}`);
+  }
+  if (boundaries.length > 0) {
+    plan.push(isZh
+      ? `严格遵守执行边界：${boundaries.join('；')}`
+      : `Respect the execution boundaries: ${boundaries.join('; ')}`);
+  }
+  if (validationCommands.length > 0) {
+    plan.push(isZh
+      ? `运行验证：${validationCommands.join('；')}`
+      : `Run validation with: ${validationCommands.join('; ')}`);
+  } else {
+    plan.push(isZh
+      ? `运行相关验证，确认“${expectedOutput}”可以被实际交付`
+      : `Run relevant validation to confirm "${expectedOutput}" can be delivered`);
+  }
+  plan.push(isZh
+    ? '更新相关 TODO / 文档并整理结果、风险和下一步'
+    : 'Update the related TODO/docs and summarize the result, risks, and next step');
+  return dedupeStrings(plan).slice(0, 6);
+}
+
+function buildDefaultGenericAgentPlan(
+  goal: string,
+  expectedOutput: string,
+  templateContext: AgentDraftTemplateContext | null,
+  isZh: boolean,
+): string[] {
+  const scopeSummary = compactWhitespace(templateContext?.scopeSummary ?? '');
+  const plan: string[] = [];
+  if (scopeSummary) {
+    plan.push(isZh
+      ? `先对齐当前上下文：${scopeSummary}`
+      : `Align the current context first: ${scopeSummary}`);
+  } else {
+    plan.push(isZh
+      ? `先收集与“${goal}”直接相关的上下文，锁定可执行范围`
+      : `Collect the context directly related to "${goal}" and lock the executable scope`);
+  }
+  plan.push(isZh
+    ? '完成最小可验证动作，并保持结果可复现'
+    : 'Complete the smallest verifiable action and keep the result reproducible');
+  plan.push(isZh
+    ? `验证结果是否真正满足“${expectedOutput}”`
+    : `Verify whether the result truly satisfies "${expectedOutput}"`);
+  plan.push(isZh
+    ? '整理剩余风险、阻塞点和下一步'
+    : 'Summarize remaining risks, blockers, and the next step');
+  return dedupeStrings(plan).slice(0, 6);
+}
+
+function parseAgentDraftTemplateContext(value: unknown): AgentDraftTemplateContext | null {
+  const parsed = value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+  if (!parsed) {
+    return null;
+  }
+  const kind = String(parsed.kind ?? '').trim().toLowerCase();
+  if (kind !== 'code' && kind !== 'generic') {
+    return null;
+  }
+  const scopeSummary = compactWhitespace(parsed.scopeSummary ?? parsed.scope_summary ?? '');
+  if (!scopeSummary) {
+    return null;
+  }
+  const branch = normalizeNullableText(parsed.branch);
+  const mustRead = normalizeStringArray(parsed.mustRead ?? parsed.must_read);
+  const preflight = normalizeStringArray(parsed.preflight);
+  const executionBoundaries = normalizeStringArray(parsed.executionBoundaries ?? parsed.execution_boundaries);
+  const allowedPaths = normalizeStringArray(parsed.allowedPaths ?? parsed.allowed_paths);
+  const discouragedPaths = normalizeStringArray(parsed.discouragedPaths ?? parsed.discouraged_paths);
+  const validationCommands = normalizeStringArray(parsed.validationCommands ?? parsed.validation_commands);
+  return {
+    kind,
+    scopeSummary,
+    branch,
+    mustRead,
+    preflight,
+    executionBoundaries,
+    allowedPaths,
+    discouragedPaths,
+    validationCommands,
   };
 }
 
@@ -13879,51 +14050,6 @@ type AgentRepoContext = {
   topLevelEntries: string[];
 };
 
-function buildAgentCreateFlowCandidate({
-  rawInput,
-  cwd,
-  locale,
-  normalizedBy,
-  seedCandidate = null,
-}: {
-  rawInput: string;
-  cwd: string | null;
-  locale: SupportedLocale;
-  normalizedBy: 'codex' | 'provider' | 'local';
-  seedCandidate?: AgentDraftCandidate | null;
-}): AgentCreateFlowOutcome {
-  const goal = compactWhitespace(seedCandidate?.goal ?? rawInput);
-  const category = normalizeAgentCategory(seedCandidate?.category ?? inferAgentCategory(goal));
-  const repoContext = collectAgentRepoContext(cwd);
-  const clarification = buildAgentCreateFlowClarification(goal, category, locale, repoContext);
-  if (clarification) {
-    return clarification;
-  }
-  return {
-    kind: 'draft',
-    normalizedBy,
-    candidate: finalizeAgentDraftCandidate({
-      rawInput,
-      cwd,
-      locale,
-      seed: seedCandidate
-        ? {
-          title: seedCandidate.title,
-          goal: seedCandidate.goal,
-          expectedOutput: seedCandidate.expectedOutput,
-          acceptanceCriteria: seedCandidate.acceptanceCriteria,
-          immutablePrompt: seedCandidate.immutablePrompt,
-          loopPolicy: seedCandidate.loopPolicy,
-          plan: seedCandidate.plan,
-          category: seedCandidate.category,
-          riskLevel: seedCandidate.riskLevel,
-          mode: seedCandidate.mode,
-        }
-        : null,
-    }),
-  };
-}
-
 function finalizeAgentDraftCandidate({
   rawInput,
   cwd,
@@ -13936,605 +14062,19 @@ function finalizeAgentDraftCandidate({
   seed?: Partial<AgentDraftCandidate> | null;
 }): AgentDraftCandidate {
   const normalizedGoal = compactWhitespace(seed?.goal ?? rawInput);
-  const localeHint = locale ?? inferAgentDraftLocaleHint(seed?.title ?? '', normalizedGoal);
-  const repoContext = collectAgentRepoContext(cwd);
-  const category = normalizeAgentCategory(seed?.category ?? inferAgentCategory(normalizedGoal));
-  const planningOnly = isPlanningOnlyAgentGoal(rawInput, seed);
-  if (category === 'code') {
-    return buildCodeAgentDraftCandidate({
-      rawInput,
-      goal: normalizedGoal,
-      localeHint,
-      repoContext,
-      planningOnly,
-      seed,
-    });
-  }
-  return buildGenericAgentDraftCandidate({
-    rawInput,
-    goal: normalizedGoal,
-    localeHint,
-    repoContext,
-    planningOnly,
-    seed,
-    category,
-  });
-}
-
-function buildLocalAgentDraftCandidate(rawInput: string): AgentDraftCandidate {
-  return finalizeAgentDraftCandidate({
-    rawInput,
-    cwd: null,
-    locale: inferAgentDraftLocaleHint(rawInput),
-  });
-}
-
-function buildLocalAgentPlan(goal: string): string[] {
-  const base = compactWhitespace(goal);
-  return [
-    '锁定这条 Mission 的目标、边界和当前上下文',
-    base.includes('代码') || /code|test|build|repo|仓库|修复|实现/u.test(base)
-      ? '在相关代码与测试中定位最小改动范围'
-      : '收集相关上下文并拆解正式 checklist',
-    '执行最小下一步并保留关键过程记录',
-    '运行可用验证或明确验证阻塞',
-    '总结结果、风险和下一步',
-  ];
-}
-
-function buildCodeAgentDraftCandidate({
-  rawInput,
-  goal,
-  localeHint,
-  repoContext,
-  planningOnly,
-  seed = null,
-}: {
-  rawInput: string;
-  goal: string;
-  localeHint: SupportedLocale | null;
-  repoContext: AgentRepoContext;
-  planningOnly: boolean;
-  seed?: Partial<AgentDraftCandidate> | null;
-}): AgentDraftCandidate {
-  const isZh = localeHint === 'zh-CN';
-  const missionControlTask = isMissionControlRepoTask(rawInput, repoContext);
-  const title = truncateText(compactWhitespace(seed?.title ?? goal) || (isZh ? '代码任务' : 'Code mission'), 40);
-  const templateContext = missionControlTask
-    ? buildMissionControlCodeTemplateContext(localeHint, repoContext, planningOnly)
-    : buildGenericCodeTemplateContext(localeHint, repoContext, goal, planningOnly);
-  const expectedOutput = compactWhitespace(seed?.expectedOutput ?? '')
-    || (planningOnly
-      ? (isZh
-        ? '一份 repo-aware 方案、正式 checklist、验证建议和风险说明，不修改仓库文件，并返回当前微信会话。'
-        : 'A repo-aware implementation plan, formal checklist, validation guidance, and risks, without changing repository files, returned to the current chat.')
-      : (isZh
-        ? '完成受限范围内的代码/文档/测试变更，给出验证结果、剩余风险和下一步，并返回当前微信会话。'
-        : 'Complete the bounded code/document/test changes, report verification results, remaining risks, and the next step, and return to the current chat.'));
-  const plan = resolveCodeAgentChecklist(seed?.plan ?? null, templateContext, localeHint, planningOnly);
-  const acceptanceCriteria = normalizeAgentAcceptanceCriteria(seed?.acceptanceCriteria ?? null, {
-    localeHint,
-    fallback: planningOnly
-      ? [
-        isZh ? '输出 repo-aware 的实现/验证方案和正式 checklist。' : 'Produce a repo-aware implementation and validation plan with a formal checklist.',
-        isZh ? '明确说明不改代码的执行边界。' : 'Make the no-code-change execution boundary explicit.',
-        isZh ? '给出主要风险、阻塞点和下一步建议。' : 'Call out the main risks, blockers, and next-step recommendation.',
-      ]
-      : [
-        isZh ? '在已确认边界内完成目标变更。' : 'Complete the target change within the confirmed boundary.',
-        isZh ? '至少运行一条相关验证命令，或明确说明验证阻塞。' : 'Run at least one relevant validation command, or explain the verification blocker clearly.',
-        isZh ? '总结变更结果、剩余风险和下一步。' : 'Summarize the outcome, remaining risks, and the next step.',
-      ],
-  });
   return {
-    title,
-    goal,
-    expectedOutput,
-    acceptanceCriteria,
-    immutablePrompt: buildCodeAgentImmutablePrompt({
-      title,
-      goal,
-      expectedOutput,
-      acceptanceCriteria,
-      plan,
-      localeHint,
-      templateContext,
-      planningOnly,
-    }),
-    loopPolicy: buildDefaultAgentLoopPolicy(),
-    plan,
-    category: 'code',
-    riskLevel: planningOnly
-      ? 'low'
-      : normalizeAgentRisk(seed?.riskLevel ?? inferAgentRisk(goal)),
-    mode: planningOnly
-      ? 'hybrid'
-      : normalizeAgentMode(seed?.mode ?? inferAgentMode(goal)),
-    templateContext,
+    title: truncateText(compactWhitespace(seed?.title ?? normalizedGoal ?? rawInput) || rawInput, 40),
+    goal: normalizedGoal || compactWhitespace(rawInput),
+    expectedOutput: compactWhitespace(seed?.expectedOutput ?? ''),
+    acceptanceCriteria: normalizeAgentChecklist(seed?.acceptanceCriteria ?? null),
+    immutablePrompt: compactWhitespace(seed?.immutablePrompt ?? ''),
+    loopPolicy: seed?.loopPolicy ?? buildDefaultAgentLoopPolicy(),
+    plan: normalizeAgentChecklist(seed?.plan ?? null),
+    category: normalizeAgentCategory(seed?.category),
+    riskLevel: normalizeAgentRisk(seed?.riskLevel),
+    mode: normalizeAgentMode(seed?.mode),
+    templateContext: seed?.templateContext ?? null,
   };
-}
-
-function buildGenericAgentDraftCandidate({
-  rawInput,
-  goal,
-  localeHint,
-  repoContext,
-  planningOnly,
-  seed = null,
-  category = 'mixed',
-}: {
-  rawInput: string;
-  goal: string;
-  localeHint: SupportedLocale | null;
-  repoContext: AgentRepoContext;
-  planningOnly: boolean;
-  seed?: Partial<AgentDraftCandidate> | null;
-  category?: AgentJobCategory;
-}): AgentDraftCandidate {
-  const isZh = localeHint === 'zh-CN';
-  const title = truncateText(compactWhitespace(seed?.title ?? goal) || (isZh ? '通用任务' : 'General mission'), 40);
-  const templateContext = buildGenericAgentTemplateContext(localeHint, repoContext, goal, category);
-  const expectedOutput = compactWhitespace(seed?.expectedOutput ?? '')
-    || (isZh
-      ? '完成正式 checklist，返回结果摘要、关键证据、剩余风险和下一步，并回到当前微信会话。'
-      : 'Complete the formal checklist and return the result summary, key evidence, remaining risks, and next step to the current chat.');
-  const plan = resolveGenericAgentChecklist(seed?.plan ?? null, localeHint, category, planningOnly);
-  const acceptanceCriteria = normalizeAgentAcceptanceCriteria(seed?.acceptanceCriteria ?? null, {
-    localeHint,
-    fallback: [
-      isZh ? `产出约定交付物：${expectedOutput}` : `Produce the agreed deliverable: ${expectedOutput}`,
-      isZh ? '提供可核对的结果证据，或明确说明验证阻塞。' : 'Provide checkable evidence for the result, or explain the verification blocker clearly.',
-      isZh ? '总结剩余风险、阻塞点或后续建议。' : 'Summarize remaining risks, blockers, or follow-up recommendations.',
-    ],
-  });
-  return {
-    title,
-    goal,
-    expectedOutput,
-    acceptanceCriteria,
-    immutablePrompt: buildGenericAgentImmutablePrompt({
-      title,
-      goal,
-      expectedOutput,
-      acceptanceCriteria,
-      plan,
-      localeHint,
-      templateContext,
-      planningOnly,
-    }),
-    loopPolicy: buildDefaultAgentLoopPolicy(),
-    plan,
-    category,
-    riskLevel: planningOnly
-      ? 'low'
-      : normalizeAgentRisk(seed?.riskLevel ?? inferAgentRisk(goal)),
-    mode: normalizeAgentMode(seed?.mode ?? inferAgentMode(goal)),
-    templateContext,
-  };
-}
-
-function buildAgentCreateFlowClarification(
-  goal: string,
-  category: AgentJobCategory,
-  localeHint: SupportedLocale,
-  repoContext: AgentRepoContext,
-): AgentCreateFlowOutcome | null {
-  if (!isBroadAgentGoal(goal, category)) {
-    return null;
-  }
-  const isZh = localeHint === 'zh-CN';
-  if (isMissionControlRepoTask(goal, repoContext)) {
-    return {
-      kind: 'clarify',
-      question: isZh
-        ? '这个 Mission 目标还太宽，先收窄到一个可验证的 Mission Control 子阶段再起草。你想先做哪一块？'
-        : 'This Mission goal is still too broad. Narrow it to one verifiable Mission Control slice before drafting. Which slice do you want first?',
-      candidates: [
-        { title: '/agent 路由与 create-flow 收口' },
-        { title: 'code / generic draft 模板与固定 prompt scaffold' },
-        { title: '每轮 checklist / progress 状态更新' },
-        { title: 'PlanChangeRequest 与 checklist refinement 边界' },
-      ],
-    };
-  }
-  return {
-    kind: 'clarify',
-    question: isZh
-      ? '这个目标还太宽，先限定一个可验证的最小范围。请指出你想优先推进的 package / 路径 / 能力切片。'
-      : 'This goal is still too broad. Please narrow it to one verifiable package, path, or capability slice first.',
-    candidates: [
-      { title: isZh ? '一个具体 package 或目录' : 'One specific package or directory' },
-      { title: isZh ? '一个明确失败项或验证目标' : 'One explicit failing test or validation target' },
-      { title: isZh ? '一个单独的接口、命令或文档收口' : 'One interface, command, or documentation slice' },
-    ],
-  };
-}
-
-function buildMissionControlCodeTemplateContext(
-  localeHint: SupportedLocale | null,
-  repoContext: AgentRepoContext,
-  planningOnly: boolean,
-): AgentDraftTemplateContext {
-  const isZh = localeHint === 'zh-CN';
-  const mustRead = filterExistingRepoPaths(repoContext.repoRoot, [
-    'docs/architecture/agent-draft-templates.md',
-    'skills/agent-draft-router/SKILL.md',
-    'docs/architecture/mission-control.md',
-    'docs/architecture/mission-control-codexbridge-integration.md',
-    'docs/todo/mission-control.md',
-  ]);
-  const validationCommands = resolveMissionControlValidationCommands(repoContext);
-  return {
-    kind: 'code',
-    scopeSummary: isZh
-      ? '在 CodexBridge 第一 host 边界内收口一个可验证的 Mission Control 子阶段，不扩散到 Phase 10、later providers 或无关工作流。'
-      : 'Close one verifiable Mission Control slice inside the first-host CodexBridge boundary without widening into Phase 10, later providers, or unrelated workflows.',
-    branch: repoContext.branch,
-    mustRead,
-    preflight: isZh
-      ? [
-        '检查 git status，保护已有未提交改动，不覆盖用户修改。',
-        '对比代码、测试、文档和 docs/todo/mission-control.md，确认当前 phase 与真实实现一致。',
-        '先以 mission-control 架构文档锁定 package/host 边界，再决定最小改动面。',
-      ]
-      : [
-        'Check git status and protect existing uncommitted changes before editing.',
-        'Compare code, tests, docs, and docs/todo/mission-control.md to confirm the real phase/state.',
-        'Use the Mission Control architecture docs to lock the package/host boundary before choosing the smallest change slice.',
-      ],
-    executionBoundaries: planningOnly
-      ? (isZh
-        ? [
-          '这次只做方案与分析，不修改仓库文件，不进入实现或部署。',
-          '保持 /agent 作为 host surface，不新增 /mission 来绕过集成边界。',
-          '只输出 checklist-first 方案，不把内部 substeps 当成正式 checklist 变更。',
-        ]
-        : [
-          'This pass is planning-only: do not modify repository files or move into implementation/deploy.',
-          'Keep /agent as the host surface; do not introduce /mission to bypass the integration boundary.',
-          'Output a checklist-first plan and do not treat internal substeps as formal checklist changes.',
-        ])
-      : (isZh
-        ? [
-          '只在已确认的 Mission Control 子阶段内收口，不顺手扩展到 Phase 10、later providers 或真实 GitHub/Linear source。',
-          '保持 /agent 显式子命令程序优先，自然语言 intake 只做 bounded routing + create-flow。',
-          '先区分 workpad 内部 substeps 与正式 checklist 变更；正式变更必须经过显式 change gate。',
-        ]
-        : [
-          'Stay inside the confirmed Mission Control slice instead of widening into Phase 10, later providers, or real GitHub/Linear sources.',
-          'Keep explicit /agent subcommands deterministic; natural-language intake is limited to bounded routing plus create-flow.',
-          'Separate workpad substeps from formal checklist mutations; formal changes must go through an explicit change gate.',
-        ]),
-    allowedPaths: [
-      'packages/mission-control/**',
-      'src/core/bridge_coordinator.ts',
-      'src/core/agent_job_service.ts',
-      'src/core/mission_control_agent_job_adapter.ts',
-      'docs/command-skills/agent.md',
-      'docs/architecture/agent-draft-templates.md',
-      'skills/agent-draft-router/**',
-      'docs/todo/mission-control.md',
-    ],
-    discouragedPaths: [
-      'docs/todo/roadmap.md',
-      'README.md',
-      'package.json',
-    ],
-    validationCommands,
-  };
-}
-
-function buildGenericCodeTemplateContext(
-  localeHint: SupportedLocale | null,
-  repoContext: AgentRepoContext,
-  goal: string,
-  planningOnly: boolean,
-): AgentDraftTemplateContext {
-  const isZh = localeHint === 'zh-CN';
-  const matchedEntries = matchRepoEntriesFromGoal(goal, repoContext.topLevelEntries);
-  const allowedPaths = matchedEntries.length > 0
-    ? matchedEntries
-    : inferGenericCodeAllowedPaths(goal);
-  return {
-    kind: 'code',
-    scopeSummary: isZh
-      ? `在 ${repoContext.repoName ?? '当前仓库'} 内围绕“${goal}”完成一个可验证的最小代码闭环。`
-      : `Deliver one verifiable minimum code slice for "${goal}" inside ${repoContext.repoName ?? 'the current repository'}.`,
-    branch: repoContext.branch,
-    mustRead: filterExistingRepoPaths(repoContext.repoRoot, ['README.md']),
-    preflight: isZh
-      ? [
-        '检查 git status 并保护用户已有改动。',
-        '先读取相关代码、测试和文档，再锁定最小改动范围。',
-      ]
-      : [
-        'Check git status and protect existing user changes.',
-        'Read the relevant code, tests, and docs before locking the smallest change boundary.',
-      ],
-    executionBoundaries: planningOnly
-      ? (isZh
-        ? [
-          '只做方案与分析，不修改仓库文件。',
-          '如果需要进一步实现，先把正式 checklist 和验证方案写清楚。',
-        ]
-        : [
-          'Planning-only: do not modify repository files.',
-          'If implementation is needed later, make the formal checklist and validation plan explicit first.',
-        ])
-      : (isZh
-        ? [
-          '只改与目标直接相关的文件，不顺手重构无关模块。',
-          '优先做最小可验证改动，再决定是否继续扩大范围。',
-        ]
-        : [
-          'Only modify files directly relevant to the goal; do not opportunistically refactor unrelated modules.',
-          'Prefer the smallest verifiable change before widening scope.',
-        ]),
-    allowedPaths,
-    discouragedPaths: ['README.md', 'package.json'],
-    validationCommands: resolveGenericValidationCommands(goal, repoContext),
-  };
-}
-
-function buildGenericAgentTemplateContext(
-  localeHint: SupportedLocale | null,
-  repoContext: AgentRepoContext,
-  goal: string,
-  category: AgentJobCategory,
-): AgentDraftTemplateContext {
-  const isZh = localeHint === 'zh-CN';
-  return {
-    kind: 'generic',
-    scopeSummary: isZh
-      ? `围绕“${goal}”产出一个正式 checklist 驱动的 ${category} 任务闭环。`
-      : `Produce a formal checklist-driven ${category} mission around "${goal}".`,
-    branch: repoContext.branch,
-    mustRead: [],
-    preflight: isZh
-      ? ['先确认目标、交付物和执行边界，再开始正式起草。']
-      : ['Confirm the goal, deliverable, and execution boundary before drafting.'],
-    executionBoundaries: isZh
-      ? [
-        '围绕已确认 checklist 推进，不把内部笔记静默升级为正式 scope 变化。',
-        '如果缺少阻塞信息，只追问一个最小必要问题。',
-      ]
-      : [
-        'Work against the confirmed checklist and do not silently upgrade internal notes into formal scope changes.',
-        'If blocking information is missing, ask only one minimally necessary question.',
-      ],
-    allowedPaths: [],
-    discouragedPaths: [],
-    validationCommands: [],
-  };
-}
-
-function buildCodeAgentImmutablePrompt(input: {
-  title: string;
-  goal: string;
-  expectedOutput: string;
-  acceptanceCriteria: string[];
-  plan: string[];
-  localeHint?: SupportedLocale | null;
-  templateContext: AgentDraftTemplateContext;
-  planningOnly: boolean;
-}): string {
-  const isZh = input.localeHint === 'zh-CN';
-  const lines = [
-    isZh ? 'Agent 草案 | 代码任务' : 'Agent Draft | Code Mission',
-    '',
-    `${isZh ? '任务标题' : 'Mission title'}：${input.title}`,
-    `${isZh ? '不可变目标' : 'Immutable goal'}：${input.goal}`,
-    `${isZh ? '范围摘要' : 'Scope summary'}：${input.templateContext.scopeSummary}`,
-  ];
-  if (input.templateContext.branch) {
-    lines.push(`${isZh ? '当前工作分支' : 'Current branch'}：${input.templateContext.branch}`);
-  }
-  if (input.templateContext.mustRead.length > 0) {
-    lines.push('', isZh ? '开始前请先阅读：' : 'Read these first:');
-    lines.push(...input.templateContext.mustRead.map((entry) => `- ${entry}`));
-  }
-  if (input.templateContext.preflight.length > 0) {
-    lines.push('', isZh ? '开始前必须做：' : 'Preflight:');
-    lines.push(...input.templateContext.preflight.map((entry, index) => `${index + 1}. ${entry}`));
-  }
-  if (input.templateContext.executionBoundaries.length > 0) {
-    lines.push('', isZh ? '执行边界：' : 'Execution boundaries:');
-    lines.push(...input.templateContext.executionBoundaries.map((entry, index) => `${index + 1}. ${entry}`));
-  }
-  if (input.templateContext.allowedPaths.length > 0) {
-    lines.push('', isZh ? '主要允许修改：' : 'Allowed paths:');
-    lines.push(...input.templateContext.allowedPaths.map((entry) => `- ${entry}`));
-  }
-  if (input.templateContext.discouragedPaths.length > 0) {
-    lines.push('', isZh ? '尽量不要修改：' : 'Discouraged paths:');
-    lines.push(...input.templateContext.discouragedPaths.map((entry) => `- ${entry}`));
-  }
-  lines.push(
-    '',
-    isZh ? '正式 checklist：' : 'Formal checklist:',
-    ...input.plan.map((item, index) => `${index + 1}. ${item}`),
-    '',
-    isZh ? '验收标准：' : 'Acceptance criteria:',
-    ...input.acceptanceCriteria.map((criterion, index) => `${index + 1}. ${criterion}`),
-  );
-  if (input.templateContext.validationCommands.length > 0) {
-    lines.push('', isZh ? '验证要求：' : 'Validation commands:');
-    lines.push(...input.templateContext.validationCommands.map((entry) => `- ${entry}`));
-  }
-  lines.push(
-    '',
-    isZh ? '执行规则：' : 'Execution rules:',
-    isZh
-      ? '1. 每轮循环后必须显式更新当前 checklist item 状态、overall completion、next step、latest blocker、latest progress summary。'
-      : '1. After every cycle, explicitly update the current checklist item status, overall completion, next step, latest blocker, and latest progress summary.',
-    isZh
-      ? '2. workpad 里的 substeps 可以细化，但不得静默改写已确认的正式 checklist。'
-      : '2. Workpad substeps may be refined internally, but do not silently rewrite the confirmed formal checklist.',
-    isZh
-      ? '3. 如果正式 checklist 需要 split / append / reorder / merge / drop / rename，必须先提出显式 PlanChangeRequest 或等价 change-gated 建议。'
-      : '3. If the formal checklist needs a split / append / reorder / merge / drop / rename change, raise an explicit PlanChangeRequest or equivalent change-gated proposal first.',
-    isZh
-      ? '4. 只在真正阻塞时提一个最小澄清问题，否则优先执行最小下一步。'
-      : '4. Ask one minimal clarification question only when it is truly blocking; otherwise prefer the smallest next executable step.',
-    isZh
-      ? '5. 保护用户已有改动，不覆盖无关本地修改。'
-      : '5. Protect existing user changes and do not overwrite unrelated local modifications.',
-  );
-  if (!input.planningOnly) {
-    lines.push(
-      isZh
-        ? '6. 如果本轮允许仓库改动，提交说明必须使用双语 Conventional Commit，例如 `feat(mission-control): 收紧 /agent create-flow / tighten /agent create-flow`。'
-        : '6. When repository changes are allowed, use a bilingual Conventional Commit title such as `feat(mission-control): 收紧 /agent create-flow / tighten /agent create-flow`.',
-    );
-  }
-  lines.push(
-    '',
-    isZh ? '最终交付物：' : 'Expected output:',
-    input.expectedOutput,
-  );
-  return lines.join('\n').trim();
-}
-
-function buildGenericAgentImmutablePrompt(input: {
-  title: string;
-  goal: string;
-  expectedOutput: string;
-  acceptanceCriteria: string[];
-  plan: string[];
-  localeHint?: SupportedLocale | null;
-  templateContext: AgentDraftTemplateContext;
-  planningOnly: boolean;
-}): string {
-  if (input.localeHint === 'zh-CN') {
-    return [
-      `任务标题：${input.title}`,
-      '不可变目标：',
-      input.goal,
-      '',
-      '范围摘要：',
-      input.templateContext.scopeSummary,
-      '',
-      '正式 checklist：',
-      ...input.plan.map((item, index) => `${index + 1}. ${item}`),
-      '',
-      '验收标准：',
-      ...input.acceptanceCriteria.map((criterion, index) => `${index + 1}. ${criterion}`),
-      '',
-      '循环要求：',
-      '1. 每轮循环后都要显式更新当前 checklist item 状态、overall completion、next step、latest blocker、latest progress summary。',
-      '2. workpad 可以记录内部 substeps，但正式 checklist 变更必须经过显式 change gate。',
-      input.planningOnly
-        ? '3. 本次只做方案与分析，不执行超出边界的代码或外部操作。'
-        : '3. 优先执行最小下一步，直到完成、明确失败或需要人工介入。',
-      '',
-      '最终交付物：',
-      input.expectedOutput,
-    ].join('\n');
-  }
-  return [
-    `Mission title: ${input.title}`,
-    'Immutable goal:',
-    input.goal,
-    '',
-    'Scope summary:',
-    input.templateContext.scopeSummary,
-    '',
-    'Formal checklist:',
-    ...input.plan.map((item, index) => `${index + 1}. ${item}`),
-    '',
-    'Acceptance criteria:',
-    ...input.acceptanceCriteria.map((criterion, index) => `${index + 1}. ${criterion}`),
-    '',
-    'Loop requirements:',
-    '1. After every cycle, explicitly update the current checklist item status, overall completion, next step, latest blocker, and latest progress summary.',
-    '2. Workpad substeps may be refined internally, but formal checklist changes must go through an explicit change gate.',
-    input.planningOnly
-      ? '3. This pass is planning-only; do not perform out-of-bound code or external actions.'
-      : '3. Prefer the smallest next executable step until the mission completes, fails clearly, or needs human input.',
-    '',
-    'Expected output:',
-    input.expectedOutput,
-  ].join('\n');
-}
-
-function resolveCodeAgentChecklist(
-  seedPlan: string[] | null,
-  templateContext: AgentDraftTemplateContext,
-  localeHint: SupportedLocale | null,
-  planningOnly: boolean,
-): string[] {
-  const normalizedSeed = normalizeAgentChecklist(seedPlan);
-  if (normalizedSeed.length > 0 && !isGenericLifecycleChecklist(normalizedSeed)) {
-    return normalizedSeed;
-  }
-  const isZh = localeHint === 'zh-CN';
-  if (templateContext.allowedPaths.includes('packages/mission-control/**')) {
-    return planningOnly
-      ? [
-        '核对 Mission Control 当前 docs/todo、架构基线与相关代码/测试，锁定本轮缺口',
-        '分析允许路径内的实现方案、边界与验证策略，不修改仓库文件',
-        '产出 checklist-first 的实现建议、change gate 和验证建议',
-        '总结风险、阻塞点与下一步',
-      ]
-      : [
-        '核对 Mission Control 当前 docs/todo、架构基线与相关代码/测试，锁定本轮最小子阶段',
-        '在允许路径内实现该子阶段，保持 package / host 边界清晰',
-        '同步更新相关命令文档、架构说明和 docs/todo/mission-control.md',
-        '运行 mission-control 相关验证并修复本轮引入的问题',
-        '汇总验证结果、剩余风险和下一步，并为本轮提交做收口',
-      ];
-  }
-  return planningOnly
-    ? [
-      isZh ? '核对目标、上下文和当前约束，锁定不改代码的执行范围' : 'Review the goal, context, and constraints to lock a planning-only scope',
-      isZh ? '阅读相关代码、测试和文档，整理实现选项与影响面' : 'Read the relevant code, tests, and docs to map the implementation options and impact',
-      isZh ? '产出正式 checklist、验证建议和风险说明' : 'Produce the formal checklist, validation guidance, and risk notes',
-      isZh ? '总结下一步建议' : 'Summarize the next-step recommendation',
-    ]
-    : [
-      isZh ? '锁定相关代码、测试和文档中的最小改动范围' : 'Lock the smallest relevant change boundary across code, tests, and docs',
-      isZh ? '在允许路径内实现目标变更并保护用户已有修改' : 'Implement the target change inside the allowed paths while protecting existing user changes',
-      isZh ? '补齐必要的测试、文档或 checklist 对齐项' : 'Update the necessary tests, docs, or checklist-alignment items',
-      isZh ? '运行相关验证并处理明显回归' : 'Run the relevant validation and address obvious regressions',
-      isZh ? '总结结果、剩余风险和下一步' : 'Summarize the outcome, remaining risks, and next step',
-    ];
-}
-
-function resolveGenericAgentChecklist(
-  seedPlan: string[] | null,
-  localeHint: SupportedLocale | null,
-  category: AgentJobCategory,
-  planningOnly: boolean,
-): string[] {
-  const normalizedSeed = normalizeAgentChecklist(seedPlan);
-  if (normalizedSeed.length > 0 && !isGenericLifecycleChecklist(normalizedSeed)) {
-    return normalizedSeed;
-  }
-  const isZh = localeHint === 'zh-CN';
-  if (category === 'doc') {
-    return [
-      isZh ? '整理现有上下文、边界和目标受众' : 'Collect the existing context, boundaries, and target audience',
-      isZh ? '拟定正式结构和关键论点' : 'Draft the formal structure and key points',
-      isZh ? '完成文档初稿并自检 against checklist' : 'Produce the document draft and self-check it against the checklist',
-      isZh ? '总结剩余风险和下一步' : 'Summarize remaining risks and the next step',
-    ];
-  }
-  if (category === 'research') {
-    return [
-      isZh ? '明确问题、边界和输出格式' : 'Clarify the question, boundary, and output format',
-      isZh ? '收集并核对关键来源或上下文' : 'Collect and verify the key sources or context',
-      isZh ? '整理结论、差异与建议' : 'Synthesize the conclusions, differences, and recommendations',
-      isZh ? '总结风险、缺口和下一步' : 'Summarize the risks, gaps, and next step',
-    ];
-  }
-  return [
-    isZh ? '锁定目标、边界和正式交付物' : 'Lock the goal, boundary, and formal deliverable',
-    isZh ? '拆解并执行最小 checklist 下一步' : 'Break down and execute the smallest next checklist step',
-    planningOnly
-      ? (isZh ? '整理结论、风险和下一步建议' : 'Summarize the conclusions, risks, and next-step recommendation')
-      : (isZh ? '核对结果 against checklist 并补齐缺口' : 'Check the result against the checklist and close obvious gaps'),
-    isZh ? '输出最终结果、风险和下一步' : 'Deliver the final result, risks, and next step',
-  ];
 }
 
 function buildDefaultAgentAcceptanceCriteria(expectedOutput: string, localeHint: SupportedLocale | null = null): string[] {
@@ -14806,55 +14346,6 @@ function normalizeAgentAcceptanceCriteria(
 function isPlanningOnlyAgentGoal(rawInput: string, seed: Partial<AgentDraftCandidate> | null = null): boolean {
   const haystack = [rawInput, seed?.goal, seed?.expectedOutput].filter(Boolean).join('\n').toLowerCase();
   return /只做方案|不要改代码|先分析|只分析|方案优先|planning only|plan only|do not change code|analysis only/u.test(haystack);
-}
-
-function isMissionControlRepoTask(goal: string, repoContext: AgentRepoContext): boolean {
-  const normalizedGoal = goal.toLowerCase();
-  return normalizedGoal.includes('mission-control')
-    || normalizedGoal.includes('mission control')
-    || normalizedGoal.includes('@codexbridge/mission-control')
-    || normalizedGoal.includes('/agent')
-    || normalizedGoal.includes('create-flow')
-    || normalizedGoal.includes('checklist')
-    || (
-      repoContext.repoName?.toLowerCase() === 'codexbridge'
-      && /codexbridge|mission|agent draft|draft route|draft router/u.test(normalizedGoal)
-    );
-}
-
-function isBroadAgentGoal(goal: string, category: AgentJobCategory): boolean {
-  const normalized = compactWhitespace(goal).toLowerCase();
-  if (!normalized) {
-    return true;
-  }
-  if (
-    /(?:all remaining|finish all|complete all|whole project|entire repo|fix the whole|everything left)/u.test(normalized)
-    || /(?:所有剩余|全部剩余|完成所有|补完所有|修完所有|整个项目|整个仓库|整个工程|全部 todo|所有 todo|所有任务|全部任务)/u.test(normalized)
-  ) {
-    return true;
-  }
-  if (
-    category === 'code'
-    && /(?:继续推进|继续完成|继续做).*(?:mission control|mission-control|@codexbridge\/mission-control|工作)/u.test(normalized)
-  ) {
-    return true;
-  }
-  return false;
-}
-
-function isGenericLifecycleChecklist(plan: string[]): boolean {
-  if (plan.length === 0) {
-    return false;
-  }
-  const genericTokens = [
-    /^(?:analyze|analysis|澄清目标|分析|调研)$/u,
-    /^(?:design|设计|方案)$/u,
-    /^(?:code|implement|开发|实现)$/u,
-    /^(?:test|测试|验证)$/u,
-    /^(?:deploy|发布|上线)$/u,
-  ];
-  const matched = plan.filter((item) => genericTokens.some((pattern) => pattern.test(item.toLowerCase()))).length;
-  return matched >= Math.min(3, plan.length);
 }
 
 function dedupeStrings(values: string[]): string[] {
@@ -15446,7 +14937,7 @@ function formatAgentNormalizer(value: string, i18n: Translator): string {
   if (value === 'codex') {
     return i18n.t('coordinator.agent.normalizer.codex');
   }
-  return i18n.t('coordinator.agent.normalizer.local');
+  return i18n.t('coordinator.agent.normalizer.fallback');
 }
 
 function formatAgentMode(value: string, i18n: Translator): string {
@@ -15744,6 +15235,7 @@ function buildAgentCommandSkillPrompt({
   timezone,
   pendingDraft,
   jobs,
+  repoContext,
 }: {
   event: InboundTextEvent;
   subcommand: 'add' | 'edit' | 'natural';
@@ -15753,6 +15245,7 @@ function buildAgentCommandSkillPrompt({
   timezone: string | null;
   pendingDraft: PendingAgentDraft | null;
   jobs: AgentJob[];
+  repoContext: AgentRepoContext;
 }): string {
   const normalizedTimezone = normalizeAssistantPromptTimezone(timezone);
   const payload = {
@@ -15770,6 +15263,15 @@ function buildAgentCommandSkillPrompt({
     },
     pendingDraft: pendingDraft ? agentDraftToCommandSkillJson(pendingDraft) : null,
     jobs: jobs.map((job, index) => agentJobToCommandSkillJson(job, index + 1)),
+    repoContext: {
+      cwd: repoContext.cwd,
+      repoRoot: repoContext.repoRoot,
+      repoName: repoContext.repoName,
+      branch: repoContext.branch,
+      packageManager: repoContext.packageManager,
+      packageScripts: repoContext.packageScripts,
+      topLevelEntries: repoContext.topLevelEntries,
+    },
     skillPath: AGENT_COMMAND_SKILL_PATH,
   };
   return [
@@ -15777,6 +15279,8 @@ function buildAgentCommandSkillPrompt({
     '',
     `Please read and follow this command skill file: ${AGENT_COMMAND_SKILL_PATH}`,
     'Use it to interpret the /agent command request below.',
+    'This is a collaborative agent router. The skill owns task typing, scope narrowing, and draft-shape decisions; Bridge will only relay the skill response and will not reinterpret it with extra host-side heuristics.',
+    'Generate plan[] as the formal checklist from the user goal and repoContext. Never leave plan[] empty; if you cannot derive at least 3 concrete checklist items, return clarify instead of create_draft.',
     'Return exactly one JSON object that matches the skill contract.',
     'Do not use Markdown. Do not explain. Do not create, run, stop, retry, delete, or persist Agent jobs yourself.',
     '',

@@ -18,14 +18,13 @@ Bridge invokes this skill only for semantic forms:
 
 Important host boundary:
 
-- For bare `/agent <text>` and `/agent add <text>`, this skill is a bounded
-  router first.
-- `create_draft` means "the request is allowed to enter host-owned create-flow".
-- Bridge may then re-type the task, ask a narrowing question, and rebuild the
-  formal checklist / immutable prompt / loop policy from repo-aware context
-  before showing the draft.
-- Do not assume the draft body you return for `create_draft` will be displayed
-  verbatim without host-side create-flow refinement.
+- For bare `/agent <text>` and `/agent add <text>`, this skill is the
+  normalization boundary.
+- This skill owns task typing, scope narrowing, and draft-shape decisions.
+- `create_draft` means "the request is sufficiently bounded for a new pending
+  draft; Bridge should store the draft after basic schema validation."
+- Bridge should not reinterpret the skill response with extra host-side scope
+  heuristics after this skill answers.
 
 For task-type-specific draft shaping, especially `code` missions, also follow:
 
@@ -48,13 +47,22 @@ Bridge sends a prompt with this payload shape:
     "platform": "weixin",
     "externalScopeId": "..."
   },
+  "repoContext": {
+    "cwd": null,
+    "repoRoot": null,
+    "repoName": null,
+    "branch": null,
+    "packageManager": "pnpm",
+    "packageScripts": [],
+    "topLevelEntries": []
+  },
   "pendingDraft": null,
   "jobs": [],
   "skillPath": "docs/command-skills/agent.md"
 }
 ```
 
-Use only `pendingDraft` and `jobs` from the payload as state. Do not invent jobs, drafts, ids, indexes, outputs, files, or attachments.
+Use only `pendingDraft`, `jobs`, and `repoContext` from the payload as state. Do not invent jobs, drafts, ids, indexes, outputs, files, fixed paths, or attachments.
 
 ## Output Contract
 
@@ -269,10 +277,13 @@ Checklist rules:
 - Use 3 to 6 concrete checklist items in `plan`.
 - Include a verification step for code, data changes, artifacts, operations, and publishing.
 - `plan` is the user-confirmed TODO/checklist, not a generic software lifecycle template.
+- Build `plan` from the user's goal plus the current `repoContext` and pending state; do not leave it empty.
+- If you cannot derive at least 3 concrete checklist items from the goal and context, return `clarify` instead of `create_draft`.
+- `goal` must distill the user's intent into a single direct sentence; keep it concise and use at most one comma. Do not expand it into explanation, plan, or scope narration.
 - Avoid filler such as "analyze / design / code / test / deploy" unless those are truly the correct checklist items for this exact mission.
 - For `category: "code"`, prefer repo-aware checklist items plus a fixed
-  immutable prompt scaffold; do not fall back to generic lifecycle wording
-  when concrete repo/task boundaries can be derived.
+  immutable prompt scaffold. Do not depend on host-side keyword heuristics to
+  derive task type, scope, or template choice.
 - `acceptanceCriteria` should describe how Mission Control knows the task is done.
 - `immutablePrompt` should be reusable for every loop cycle of the mission.
 - For `category: "code"`, include bilingual Conventional Commit requirements

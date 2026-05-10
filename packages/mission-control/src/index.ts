@@ -41,28 +41,323 @@ export type MissionControlOwnedResponsibility = typeof MISSION_CONTROL_OWNS[numb
 export type MissionControlExcludedResponsibility =
   typeof MISSION_CONTROL_DOES_NOT_OWN[number];
 
-export * from './types.js';
-export * from './domain_records.js';
-export * from './state_machine.js';
-export * from './repository.js';
-export * from './in_memory_mission_repository.js';
-export * from './json_file_mission_repository.js';
-export * from './workflow.js';
-export * from './workflow_resolver.js';
-export * from './prompt_contract.js';
-export * from './workpad_view.js';
-export * from './workspace.js';
-export * from './lease_coordinator.js';
-export * from './control_actions.js';
-export * from './cycle_result.js';
-export * from './provider.js';
-export * from './host_adapter.js';
-export * from './source.js';
-export * from './source_mission.js';
-export * from './progress.js';
-export * from './supervision.js';
-export * from './codex_provider.js';
-export * from './verifier.js';
-export * from './runtime.js';
-export * from './api_contract.js';
-export * from './api.js';
+export { DirectMissionControlApi } from './api.js';
+export type { DirectMissionControlApiOptions } from './api.js';
+export {
+  createMissionRetrySnapshot,
+  createMissionResumeSnapshot,
+  createMissionStopRequest,
+  materializeMissionStop,
+  resolveMissionStopReason,
+  shouldMissionRetryReuseAccumulatedContext,
+  canMissionRequestStop,
+  shouldMissionStopImmediately,
+} from './control_actions.js';
+export type {
+  CreateMissionResumeSnapshotOptions,
+  CreateMissionRetrySnapshotOptions,
+  CreateMissionStopRequestOptions,
+  MaterializeMissionStopOptions,
+} from './control_actions.js';
+export {
+  CodexMissionProvider,
+  normalizeCodexMissionDriverResult,
+  toCodexMissionDriverExecutionInput,
+} from './codex_provider.js';
+export type {
+  CodexMissionDriver,
+  CodexMissionDriverExecutionInput,
+  CodexMissionDriverStartResult,
+  CodexMissionDriverWaitResult,
+} from './codex_provider.js';
+export {
+  MISSION_CYCLE_RESULT_SCHEMA_VERSION,
+  applyMissionVerifierResultToChecklistSnapshot,
+  completeChecklistSnapshot,
+  createMissionCycleResult,
+  getActiveChecklistItem,
+  getActiveFormalChecklistItem,
+  getChecklistProgressItems,
+  getLatestMissionCycleResult,
+  listMissionCycleResults,
+  mapMissionStatusToMissionControlOutcome,
+  readMissionCycleResult,
+  summarizeChecklistSnapshotProgress,
+} from './cycle_result.js';
+export type {
+  ApplyMissionChecklistResultOptions,
+  ChecklistItemSelectorOptions,
+  ChecklistProgressSummary,
+  CreateMissionCycleResultInput,
+  MissionControlOutcome,
+  MissionCycleAudit,
+  MissionCycleResult,
+} from './cycle_result.js';
+export {
+  buildChecklistSnapshotId,
+  buildDefaultImmutablePrompt,
+  buildMissionGenerationId,
+  buildMissionWorkItemId,
+  createMissionChecklistSnapshot,
+  createMissionGeneration,
+  createMissionRetryAggregate,
+  createMissionWorkItem,
+  hashChecklistSnapshot,
+  mapMissionStatusToGenerationStatus,
+  normalizeMissionLoopPolicy,
+  normalizeMissionRecord,
+  normalizeWorkflowHash,
+  normalizeWorkflowResolverReason,
+} from './domain_records.js';
+export {
+  createNoopMissionHostAdapter,
+} from './host_adapter.js';
+export type {
+  MissionHostAdapter,
+  MissionHostApprovalRequest,
+  MissionHostArtifactPublication,
+  MissionHostContext,
+  MissionHostNotification,
+  MissionHostProgressUpdate,
+  MissionHostThreadBinding,
+} from './host_adapter.js';
+export { InMemoryMissionRepository } from './in_memory_mission_repository.js';
+export { JsonFileMissionRepository } from './json_file_mission_repository.js';
+export {
+  MissionConcurrentLimitError,
+  MissionLeaseConflictError,
+  MissionLeaseCoordinator,
+} from './lease_coordinator.js';
+export type { MissionLeaseCoordinatorOptions } from './lease_coordinator.js';
+export {
+  applyMissionProviderStartToAttempt,
+  canScheduleMissionContinuation,
+  mapMissionProviderResultToMissionStatus,
+} from './provider.js';
+export type {
+  MissionExecutionInput,
+  MissionProvider,
+  MissionProviderArtifact,
+  MissionProviderArtifactType,
+  MissionProviderHandoffState,
+  MissionProviderOutcome,
+  MissionProviderResult,
+  MissionProviderStartResult,
+} from './provider.js';
+export {
+  createMissionAttemptPromptContract,
+  renderMissionAttemptPromptContract,
+} from './prompt_contract.js';
+export type {
+  CreateMissionAttemptPromptContractInput,
+  MissionAttemptPromptContract,
+  MissionPromptChecklistItem,
+} from './prompt_contract.js';
+export {
+  RepositoryMissionProgressSink,
+  applyMissionProgressUpdateToWorkpad,
+  persistMissionProgressUpdate,
+} from './progress.js';
+export type {
+  MissionProgressKind,
+  MissionProgressSink,
+  MissionProgressUpdate,
+  PersistMissionProgressUpdateOptions,
+} from './progress.js';
+export type { MissionRepository } from './repository.js';
+export { MissionRuntime } from './runtime.js';
+export type {
+  MissionRunOptions,
+  MissionRunResult,
+  MissionRuntimeOptions,
+} from './runtime.js';
+export {
+  createManualWorkItemSourceSummary,
+  createWorkItemSourceSummary,
+  createWorkItemSourceSummaryFromWorkItem,
+} from './source.js';
+export type {
+  WorkItemSourceAdapter,
+  WorkItemSourceCreateInput,
+  WorkItemSourceListInput,
+  WorkItemSourceListResult,
+  WorkItemSourceSummary,
+  WorkItemSourceUpdateInput,
+} from './source.js';
+export {
+  createMissionAggregateFromSourceSummary,
+} from './source_mission.js';
+export type {
+  CreateMissionAggregateFromSourceSummaryInput,
+  MissionAggregateFromSourceSummary,
+} from './source_mission.js';
+export {
+  MISSION_STATUS_TRANSITIONS,
+  assertMissionStatusTransition,
+  canTransitionMissionStatus,
+  createMission,
+  createMissionWorkpad,
+  isMissionResumable,
+  transitionMission,
+} from './state_machine.js';
+export type { TransitionMissionOptions } from './state_machine.js';
+export {
+  MissionSupervisor,
+  createMissionSupervisionSnapshot,
+  didMissionSupervisionProgress,
+  isMissionSupervisable,
+} from './supervision.js';
+export type {
+  ListSupervisableMissionOptions,
+  MissionSupervisionSnapshot,
+  MissionSupervisorCycleRecord,
+  MissionSupervisorOptions,
+  MissionSupervisorRunOptions,
+  MissionSupervisorRunReport,
+  MissionSupervisorStopReason,
+} from './supervision.js';
+export type {
+  ChecklistItem,
+  ChecklistItemKind,
+  ChecklistItemStatus,
+  ChecklistSnapshot,
+  CreateMissionInput,
+  Mission,
+  MissionAttempt,
+  MissionAttemptStatus,
+  MissionCheckpoint,
+  MissionEnvironmentStamp,
+  MissionEvent,
+  MissionEventKind,
+  MissionGeneration,
+  MissionGenerationStatus,
+  MissionGenerationTrigger,
+  MissionLease,
+  MissionLoopPolicy,
+  MissionPendingApproval,
+  MissionPendingApprovalOption,
+  MissionPriority,
+  MissionRiskLevel,
+  MissionSource,
+  MissionStatus,
+  MissionStopRequest,
+  MissionVerifierVerdict,
+  MissionWorkflowResolverReason,
+  MissionWorkpad,
+  PlanChangeRequest,
+  PlanChangeRequestStatus,
+  WorkItem,
+} from './types.js';
+export {
+  applyMissionVerifierResultToAttempt,
+  applyMissionVerifierResultToMission,
+  applyMissionVerifierResultToWorkpad,
+  createMissionRepairPrompt,
+  createMissionVerifierResult,
+  evaluateMissionVerifierBudget,
+  mapMissionVerifierVerdictToAttemptStatus,
+  mapMissionVerifierVerdictToMissionStatus,
+  normalizeMissionPlanChangeSuggestion,
+  normalizeMissionVerifierVerdict,
+  resolveMissionPlanChangeSuggestion,
+  resolveMissionVerifierBudget,
+} from './verifier.js';
+export type {
+  CreateMissionRepairPromptInput,
+  CreateMissionVerifierResultInput,
+  MissionPlanChangeSuggestion,
+  MissionVerifier,
+  MissionVerifierBudget,
+  MissionVerifierBudgetUsage,
+  MissionVerifierInput,
+  MissionVerifierResult,
+  ResolvedMissionPlanChangeSuggestion,
+} from './verifier.js';
+export {
+  DEFAULT_MISSION_WORKFLOW_PROMPT_BODY,
+  DEFAULT_MISSION_WORKFLOW_RELATIVE_PATH,
+  MissionWorkflowError,
+  MissionWorkflowLoader,
+  hashMissionWorkflowText,
+} from './workflow.js';
+export type {
+  LoadedMissionWorkflow,
+  MissionWorkflowContinuationMode,
+  MissionWorkflowDefaultHandoffState,
+  MissionWorkflowFinalReportSection,
+  MissionWorkflowLoadInput,
+  MissionWorkflowLoaderOptions,
+  MissionWorkflowPolicy,
+  MissionWorkflowSource,
+} from './workflow.js';
+export {
+  MissionWorkflowResolver,
+} from './workflow_resolver.js';
+export type {
+  MissionWorkflowResolutionInput,
+  MissionWorkflowResolverOptions,
+  MissionWorkflowResolverRule,
+  MissionWorkflowSelection,
+} from './workflow_resolver.js';
+export {
+  createMissionWorkpadStatusView,
+  renderMissionWorkpadStatusView,
+} from './workpad_view.js';
+export type {
+  CreateMissionWorkpadStatusViewInput,
+  MissionWorkpadStatusView,
+} from './workpad_view.js';
+export {
+  MissionWorkspaceService,
+  defaultMissionWorkspaceRoot,
+} from './workspace.js';
+export type {
+  EnsureMissionWorkspaceOptions,
+  MissionWorkspaceAssignment,
+  MissionWorkspaceEnvironmentStamp,
+  MissionWorkspaceLayout,
+  MissionWorkspaceMode,
+  MissionWorkspaceServiceOptions,
+} from './workspace.js';
+export type {
+  CreateMissionCommandInput,
+  GetMissionAttemptsInput,
+  GetMissionDetailInput,
+  GetMissionExecutionInput,
+  GetMissionLoopSnapshotInput,
+  GetMissionTimelineInput,
+  ListMissionSummariesInput,
+  MissionArtifactRefView,
+  MissionAttemptsView,
+  MissionControlBoundaryMetadata,
+  MissionCheckpointView,
+  MissionChecklistStatusView,
+  MissionControlActor,
+  MissionControlApi,
+  MissionControlCommands,
+  MissionControlQueries,
+  MissionControlRequest,
+  MissionControlResponse,
+  MissionControlStreams,
+  MissionDetailView,
+  MissionEnvironmentStampView,
+  MissionExecutionRefsView,
+  MissionExecutionView,
+  MissionHostBindingView,
+  MissionLoopSnapshotView,
+  MissionStreamFrame,
+  MissionSummaryFilter,
+  MissionSummaryView,
+  MissionTimelineEntry,
+  MissionTimelineView,
+  MissionWorkflowStatusView,
+  ProposePlanChangeInput,
+  ResolvePlanChangeInput,
+  ResumeMissionInput,
+  RetryMissionInput,
+  StartMissionInput,
+  StopMissionInput,
+  StreamMissionInput,
+  SubmitApprovalInput,
+  SyncMissionSourceInput,
+} from './api_contract.js';

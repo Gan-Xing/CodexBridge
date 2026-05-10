@@ -1,6 +1,6 @@
 ---
 name: agent-draft-router
-description: Generate checklist-first CodexBridge `/agent` drafts from natural-language intake using bounded action routing, task-type templates, scope clarification, and immutable prompt scaffolds. Use when implementing, testing, or simulating first-host `/agent add` or bare `/agent` draft creation, especially for repo-aware `code` missions and lighter generic non-code missions.
+description: Generate checklist-first CodexBridge `/agent` drafts from natural-language intake using bounded action routing, skill-owned task typing, scope clarification, and immutable prompt scaffolds. Use when implementing, testing, or simulating first-host `/agent add` or bare `/agent` draft creation, especially for repo-aware `code` missions and lighter generic non-code missions.
 ---
 
 # Agent Draft Router
@@ -23,8 +23,8 @@ Read that document when you need the full `code` or generic template contract.
 2. Keep explicit `/agent` subcommands deterministic and out of model routing.
 3. For bare `/agent <text>` or `/agent add <text>`, emit only a bounded action.
 4. If the action is add/create, enter create-flow:
-   - determine task type
-   - clarify over-broad scope
+   - determine task type inside the skill
+   - clarify only when the missing information is truly blocking
    - generate the formal checklist
    - generate the immutable prompt
    - generate loop policy
@@ -59,8 +59,8 @@ Only continue into create-flow when the action clearly resolves to add/create.
 
 Inside create-flow:
 
-1. Determine task type.
-2. If the goal is too broad, ask a narrowing question before drafting.
+1. Determine task type from the current request and repo context.
+2. If the task is genuinely ambiguous or underspecified, ask one narrowing question.
 3. Generate a formal checklist, not a generic software lifecycle.
 4. Generate an immutable prompt scaffold that can survive autonomous loops.
 5. Keep internal substeps separate from formal checklist mutation.
@@ -74,6 +74,10 @@ For `code` missions, prefer:
 - explicit verification commands
 - explicit execution boundaries
 - bilingual Conventional Commit requirements when repository changes are in scope
+- repo context from the invocation payload over fixed path assumptions
+- distill the user input into one direct sentence with at most one comma; do not expand it into rationale, checklist, or scope narration
+- generate `plan[]` from the user goal plus repo context, and never leave it empty
+- if at least 3 concrete checklist items cannot be derived from the goal and context, return `clarify` instead of forcing `create_draft`
 
 Do not fall back to:
 

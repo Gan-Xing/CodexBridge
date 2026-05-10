@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 import test from 'node:test';
 import {
   MISSION_CYCLE_RESULT_SCHEMA_VERSION,
@@ -39,4 +41,35 @@ test('mission control package exposes a no-op host adapter baseline', async () =
     bridgeSessionId: null,
     providerThreadId: null,
   });
+});
+
+test('mission control package metadata and build layout stay aligned', () => {
+  const packageJsonPath = path.resolve(import.meta.dirname, '../package.json');
+  const tsconfigPath = path.resolve(import.meta.dirname, '../tsconfig.json');
+  const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8')) as {
+    private?: boolean;
+    exports?: Record<string, { types?: string; default?: string } | string>;
+    files?: string[];
+  };
+  const tsconfig = JSON.parse(fs.readFileSync(tsconfigPath, 'utf8')) as {
+    compilerOptions?: { outDir?: string; rootDir?: string };
+  };
+
+  assert.equal(packageJson.private, true);
+  assert.deepEqual(Object.keys(packageJson.exports ?? {}).sort(), ['.', './package.json']);
+  assert.equal((packageJson.exports?.['.'] as { types?: string })?.types, './dist/index.d.ts');
+  assert.equal((packageJson.exports?.['.'] as { default?: string })?.default, './dist/index.js');
+  assert.deepEqual(packageJson.files, ['dist', 'README.md']);
+  assert.equal(tsconfig.compilerOptions?.rootDir, 'src');
+  assert.equal(tsconfig.compilerOptions?.outDir, 'dist');
+});
+
+test('mission control root entrypoint uses explicit public exports', () => {
+  const indexPath = path.resolve(import.meta.dirname, '../src/index.ts');
+  const source = fs.readFileSync(indexPath, 'utf8');
+
+  assert.equal(source.includes('export * from'), false);
+  assert.match(source, /export \{\s*[\s\S]*DirectMissionControlApi/);
+  assert.match(source, /export type \{\s*[\s\S]*MissionControlApi/);
+  assert.match(source, /export type \{\s*[\s\S]*MissionRepository/);
 });

@@ -859,6 +859,9 @@ Only after:
     - `packages/codex-native-api/test/package_exports.test.ts`
   - root native-api entry files under `src/providers/codex/native_*` now act as
     re-export shims into the package source during the first extraction phase
+  - the package boundary is now guarded by:
+    - `scripts/check-codex-native-api-boundary.mjs`
+    - `pnpm codex-native-api:check-boundary`
 
 ## Suggested Phase 1 Deliverable
 

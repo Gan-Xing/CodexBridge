@@ -257,7 +257,7 @@ Examples:
 /agent del 1
 ```
 
-Implementation note: planning, draft editing, and verification now default to the Provider currently bound to the WeChat chat. Responses is preferred first; compatible routes, native Codex paths, and local rules only appear when the bound Provider path is unavailable. Background execution continues on the detached task session created from that same Provider profile. Long text results are kept separately from the preview, so `/agent result <index>` can page through the full answer and `/agent result <index> file` can export it as phone-friendly TXT. Jobs with generated attachments keep artifact records, so `/agent send <index>` can resend the file if WeChat rate-limits the first delivery.
+Implementation note: planning, draft editing, and verification reuse the Provider currently bound to the WeChat chat first. Background execution continues on the detached task session created from that same Provider profile. Long text results are kept separately from the preview, so `/agent result <index>` can page through the full answer and `/agent result <index> file` can export it as phone-friendly TXT. Jobs with generated attachments keep artifact records, so `/agent send <index>` can resend the file if WeChat rate-limits the first delivery.
 
 ### `/as`, `/log`, `/todo`, `/remind`, and `/note`
 

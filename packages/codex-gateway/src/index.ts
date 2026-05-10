@@ -38,10 +38,86 @@ export type CodexGatewayOwnedResponsibility = typeof CODEX_GATEWAY_OWNS[number];
 
 export type CodexGatewayExcludedResponsibility = typeof CODEX_GATEWAY_DOES_NOT_OWN[number];
 
-export * from './capabilities/capability_presets.js';
-export * from './capabilities/cliproxy_model_catalog.js';
-export * from './capabilities/protocol_boundary.js';
-export * from './capabilities/thinking_policy.js';
-export * from './converters/responses_adapter.js';
-export * from './server/responses_adapter_server.js';
-export * from './server/standalone_server.js';
+export {
+  OPENAI_COMPATIBLE_PROFILE_PRESET_REGISTRATIONS,
+  buildOpenAICompatibleCapabilityCatalogMetadata,
+  buildOpenAICompatibleExternalModelCatalog,
+  buildOpenAICompatibleModelCatalog,
+  getOpenAICompatibleProviderPreset,
+} from './capabilities/capability_presets.js';
+export type {
+  OpenAICompatibleCapabilityCatalogMetadata,
+  OpenAICompatibleCapabilityPresetId,
+  OpenAICompatibleProfilePresetRegistration,
+  OpenAICompatibleProviderPreset,
+} from './capabilities/capability_presets.js';
+export {
+  CLIPROXY_COMPAT_MODEL_CATALOG,
+  buildCliproxyModelCapabilitiesForEntry,
+  buildCliproxyModelCatalogEntries,
+  buildCliproxyModelCapabilityMap,
+  buildCliproxyModelIds,
+  findCliproxyModelCatalogEntry,
+} from './capabilities/cliproxy_model_catalog.js';
+export type {
+  BuildCliproxyModelCatalogEntriesOptions,
+  CliproxyModelCatalogEntry,
+  CliproxyModelCategory,
+} from './capabilities/cliproxy_model_catalog.js';
+export { assessCodexGatewayProtocolBoundary } from './capabilities/protocol_boundary.js';
+export type {
+  CodexGatewayProtocolBoundaryDecision,
+  CodexGatewayTargetProtocol,
+} from './capabilities/protocol_boundary.js';
+export {
+  applyThinkingPolicyToOpenAIChatRequest,
+  getOpenAICompatibleThinkingPolicy,
+  getProviderThinkingSupport,
+  mergeOpenAICompatibleProviderCapabilities,
+  resolveOpenAICompatibleProviderCapabilitiesForModel,
+  resolveReasoningEffortForProvider,
+  stripThinkingConfig,
+} from './capabilities/thinking_policy.js';
+export type {
+  JsonRecord,
+  OpenAICompatibleModelCapabilities,
+  OpenAICompatibleModelInfo,
+  OpenAICompatibleMultimodalCapabilities,
+  OpenAICompatiblePayloadCompatibility,
+  OpenAICompatiblePayloadModelRule,
+  OpenAICompatiblePayloadRule,
+  OpenAICompatibleProviderCapabilities,
+  OpenAICompatibleRetryCapabilities,
+  OpenAICompatibleThinkingPolicy,
+  OpenAICompatibleThinkingPolicyOverrides,
+  OpenAICompatibleUsageCapabilities,
+} from './capabilities/thinking_policy.js';
+export {
+  chatCompletionsResponseToResponses,
+  inspectOpenAICompatiblePayloadCompatibility,
+  responsesRequestToChatCompletions,
+  responsesRequestToCompactionResponse,
+  translateChatCompletionsSseStreamToResponsesSse,
+  translateChatCompletionsSseToResponsesEvents,
+} from './converters/responses_adapter.js';
+export type {
+  ChatToResponsesOptions,
+  ResponsesSseTranslateOptions,
+  ResponsesToChatOptions,
+} from './converters/responses_adapter.js';
+export {
+  OpenAICompatibleResponsesAdapterServer,
+  reserveLocalPort,
+} from './server/responses_adapter_server.js';
+export type {
+  CodexGatewayTraceEvent,
+  CodexGatewayTraceSink,
+  OpenAICompatibleResponsesAdapterServerOptions,
+} from './server/responses_adapter_server.js';
+export {
+  createCodexGatewayStandaloneServerConfigFromEnv,
+  createCodexGatewayStandaloneServerFromEnv,
+  loadCodexGatewayStandaloneEnvFile,
+  resolveCodexGatewayStandaloneServerEnv,
+} from './server/standalone_server.js';
+export type { CodexGatewayStandaloneServerConfig } from './server/standalone_server.js';

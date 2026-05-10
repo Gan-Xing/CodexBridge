@@ -245,8 +245,8 @@ test('AgentJobService createJob seeds a manual source-backed mission while keepi
   assert.equal(detail?.hostBindings.bridgeSessionId, bridgeSession.id);
   assert.equal(detail?.hostBindings.codexThreadId, bridgeSession.codexThreadId);
   assert.equal(detail?.workflow.status, 'loaded');
-  assert.equal(detail?.checklistStatus.currentItem?.title, created.acceptanceCriteria?.[0] ?? null);
-  assert.equal(detail?.checklistStatus.totalItems, 5);
+  assert.equal(detail?.checklistStatus.currentItem?.title, created.plan[0] ?? null);
+  assert.equal(detail?.checklistStatus.totalItems, created.plan.length);
   assert.equal(detail?.workpadStatus.status, 'draft');
   assert.equal(detail?.currentChecklistSnapshot?.sourceRef, created.id);
   assert.deepEqual(detail?.currentChecklistSnapshot?.acceptanceCriteria, created.acceptanceCriteria);

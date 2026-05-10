@@ -30,11 +30,111 @@ export type CodexNativeApiOwnedResponsibility = typeof CODEX_NATIVE_API_OWNS[num
 export type CodexNativeApiExcludedResponsibility =
   typeof CODEX_NATIVE_API_DOES_NOT_OWN[number];
 
-export * from './provider.js';
-export * from './auth_state.js';
-export * from './native_api_types.js';
-export * from './native_api_continuation_registry.js';
-export * from './native_runtime.js';
-export * from './native_api_side_task_router.js';
-export * from './native_api_server.js';
-export * from './native_api_service.js';
+export {
+  decodeJwtPayload,
+  extractCodexTokenIdentity,
+  readCodexAccountIdentity,
+  readCodexAuthState,
+  resolveCodexAuthPath,
+  resolveCodexHome,
+  writeCodexAuthFile,
+} from './auth_state.js';
+export type {
+  CodexAuthIdentity,
+  CodexAuthState,
+  CodexAuthTokens,
+  CodexTokenIdentity,
+  WriteCodexAuthOptions,
+} from './auth_state.js';
+export { InMemoryCodexNativeApiContinuationRegistry } from './native_api_continuation_registry.js';
+export type {
+  CodexNativeApiContinuationEntry,
+  CodexNativeApiContinuationLookupResult,
+  CodexNativeApiContinuationRegistry,
+  CodexNativeApiContinuationRegistryDescriptor,
+} from './native_api_continuation_registry.js';
+export { CodexNativeApiServer } from './native_api_server.js';
+export type {
+  CodexNativeApiRuntimeContext,
+  CodexNativeApiServerOptions,
+} from './native_api_server.js';
+export { CodexNativeApiService } from './native_api_service.js';
+export type {
+  CodexNativeApiServiceBinding,
+  CodexNativeApiServiceOptions,
+} from './native_api_service.js';
+export { CodexNativeApiSideTaskRouter } from './native_api_side_task_router.js';
+export type {
+  CodexNativeApiSideTaskClass,
+  CodexNativeApiSideTaskExecutionResult,
+  CodexNativeApiSideTaskRequest,
+  CodexNativeApiSideTaskRoute,
+  CodexNativeApiSideTaskRouterOptions,
+} from './native_api_side_task_router.js';
+export type {
+  CodexNativeInboundAttachment,
+  CodexNativeInboundEvent,
+  CodexNativeSession,
+  CodexNativeSessionSettings,
+} from './native_api_types.js';
+export { CodexNativeRuntime } from './native_runtime.js';
+export type {
+  CodexNativeRuntimeContinuationTurnOptions,
+  CodexNativeRuntimeReadiness,
+  CodexNativeRuntimeReconnectResult,
+  CodexNativeRuntimeReconnectSummary,
+  CodexNativeRuntimeReconnectSummaryEntry,
+  CodexNativeRuntimeRunTurnOptions,
+  CodexNativeRuntimeTurnHooks,
+  CodexNativeRuntimeTurnPreparation,
+  CodexNativeRuntimeTurnResult,
+  CodexNativeRuntimeTurnStartedMeta,
+} from './native_runtime.js';
+export type {
+  OutputArtifact,
+  OutputArtifactKind,
+  ProviderAppInfo,
+  ProviderApprovalRequest,
+  ProviderInboundAttachmentKind,
+  ProviderMcpOauthLoginResult,
+  ProviderMcpServerStatus,
+  ProviderModelInfo,
+  ProviderPluginAppSummary,
+  ProviderPluginContract,
+  ProviderPluginDetail,
+  ProviderPluginInstallResult,
+  ProviderPluginLoadError,
+  ProviderPluginMarketplace,
+  ProviderPluginSkillSummary,
+  ProviderPluginSummary,
+  ProviderPluginsListResult,
+  ProviderProfile,
+  ProviderReviewTarget,
+  ProviderSkillError,
+  ProviderSkillInfo,
+  ProviderSkillToolDependency,
+  ProviderSkillsListResult,
+  ProviderThreadGoal,
+  ProviderThreadListResult,
+  ProviderThreadStartResult,
+  ProviderThreadSummary,
+  ProviderThreadTurn,
+  ProviderThreadTurnItem,
+  ProviderTurnArtifactDeliveredItem,
+  ProviderTurnArtifactDeliveryStage,
+  ProviderTurnArtifactDeliveryState,
+  ProviderTurnArtifactKind,
+  ProviderTurnArtifactNoticeCode,
+  ProviderTurnArtifactRejectedItem,
+  ProviderTurnArtifactRejectionReason,
+  ProviderTurnAttachment,
+  ProviderTurnEvent,
+  ProviderTurnProgress,
+  ProviderTurnResult,
+  ProviderTurnSession,
+  ProviderTurnSessionSettings,
+  ProviderUsageBucket,
+  ProviderUsageCredits,
+  ProviderUsageReport,
+  ProviderUsageWindow,
+} from './provider.js';
