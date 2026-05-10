@@ -3,6 +3,13 @@
 Mission Control runtime package, currently developed inside the CodexBridge
 repository.
 
+## Status
+
+Development for this package is currently paused.
+
+It remains in the repository as historical/internal reference material, but it
+is not part of the active roadmap at this time.
+
 Immutable target:
 
 > `@codexbridge/mission-control` provides a durable, goal-driven runtime that

@@ -1,8 +1,8 @@
-export const CODEX_NATIVE_API_PACKAGE_NAME = '@codexbridge/codex-native-api' as const;
+export const CODEX_NATIVE_API_PACKAGE_NAME = 'codex-native-api' as const;
 
-export const CODEX_NATIVE_API_PACKAGE_PHASE = 'phase-5-first-extraction' as const;
+export const CODEX_NATIVE_API_PACKAGE_PHASE = 'public-core-preview' as const;
 
-export const CODEX_NATIVE_API_RELEASE_CHANNEL = 'internal-only' as const;
+export const CODEX_NATIVE_API_RELEASE_CHANNEL = 'public-preview' as const;
 
 export const CODEX_NATIVE_API_OWNS = [
   'logged-in-codex-localhost-api',
@@ -13,6 +13,7 @@ export const CODEX_NATIVE_API_OWNS = [
   'continuation-registry',
   'native-api-side-task-routing',
   'localhost-auth-and-health',
+  'cross-platform-daemon-service-manager',
 ] as const;
 
 export const CODEX_NATIVE_API_DOES_NOT_OWN = [
@@ -46,6 +47,20 @@ export type {
   CodexTokenIdentity,
   WriteCodexAuthOptions,
 } from './auth_state.js';
+export {
+  DefaultCodexNativeProviderPlugin,
+  InMemoryProviderProfileRepository,
+  SingleProviderRegistry,
+  createDefaultCodexNativeProviderBootstrap,
+  loadDefaultCodexNativeProviderProfile,
+} from './default_provider.js';
+export type {
+  DefaultCodexNativeProviderBootstrap,
+  DefaultCodexProviderProfile,
+  DefaultCodexProviderProfileConfig,
+  ProviderProfileRepositoryLike,
+  ProviderRegistryLike,
+} from './default_provider.js';
 export { InMemoryCodexNativeApiContinuationRegistry } from './native_api_continuation_registry.js';
 export type {
   CodexNativeApiContinuationEntry,

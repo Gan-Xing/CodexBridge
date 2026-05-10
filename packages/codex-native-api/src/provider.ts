@@ -347,6 +347,10 @@ export interface ProviderTurnProgress {
   outputKind: string;
 }
 
+export interface ProviderResponseItem {
+  [key: string]: unknown;
+}
+
 export type OutputArtifactKind = 'image' | 'file' | 'video' | 'audio';
 
 export interface OutputArtifact {
@@ -388,6 +392,7 @@ export interface ProviderTurnResult {
   threadId?: string | null;
   title?: string | null;
   status?: string | null;
+  responseItems?: ProviderResponseItem[];
   outputArtifacts?: OutputArtifact[];
   outputMedia?: Array<{
     kind: 'image';
@@ -469,6 +474,7 @@ export interface ProviderPluginContract {
     sessionSettings: ProviderTurnSessionSettings | null;
     event: ProviderTurnEvent;
     inputText: string;
+    developerInstructions?: string | null;
     onProgress?: ((progress: ProviderTurnProgress) => Promise<void> | void) | null;
     onTurnStarted?: ((meta: Record<string, unknown>) => Promise<void> | void) | null;
     onApprovalRequest?: ((request: ProviderApprovalRequest) => Promise<void> | void) | null;

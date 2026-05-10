@@ -5,10 +5,12 @@ import { spawnSync } from 'node:child_process';
 const distTestDir = path.join(process.cwd(), 'dist', 'test');
 fs.rmSync(distTestDir, { recursive: true, force: true });
 
+const AGENT_COMMAND_ENV_FLAG = 'CODEXBRIDGE_ENABLE_AGENT_COMMAND';
 const LIVE_AGENT_TEST_ENV_FLAG = 'CODEXBRIDGE_TEST_ALLOW_LIVE_AGENT';
 const LIVE_OPENAI_COMPATIBLE_TEST_ENV_FLAG = 'CODEXBRIDGE_TEST_LIVE_OPENAI_COMPATIBLE';
 loadOptionalEnvFile(process.env.CODEXBRIDGE_TEST_ENV_FILE);
 const isolatedEnv = { ...process.env };
+isolatedEnv[AGENT_COMMAND_ENV_FLAG] ??= '1';
 const allowLiveAgent = isolatedEnv[LIVE_AGENT_TEST_ENV_FLAG] === '1';
 const allowLiveOpenAICompatible = isolatedEnv[LIVE_OPENAI_COMPATIBLE_TEST_ENV_FLAG] === '1';
 

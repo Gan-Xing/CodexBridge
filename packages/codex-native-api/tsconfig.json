@@ -1,18 +1,29 @@
 {
-  "extends": "../../tsconfig.json",
   "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
     "allowJs": false,
+    "rootDir": "src",
+    "outDir": "dist",
+    "strict": false,
+    "noEmitOnError": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
     "declaration": true,
     "declarationMap": true,
     "noEmit": false,
-    "outDir": "dist",
-    "rootDir": "src",
-    "strict": true
+    "types": ["node"]
   },
   "include": [
     "src/**/*.ts"
   ],
   "exclude": [
+    "dist",
+    "node_modules",
     "test/**/*.ts"
   ]
 }

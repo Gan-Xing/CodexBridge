@@ -3,6 +3,14 @@
 This document tracks the implementation backlog for
 `@codexbridge/mission-control`.
 
+## Status
+
+This workstream is currently paused.
+
+Keep this document as a historical backlog and reference. It should not be
+treated as an active implementation queue unless the product direction changes
+again.
+
 It is the execution-oriented companion to:
 
 - `docs/architecture/mission-control.md`

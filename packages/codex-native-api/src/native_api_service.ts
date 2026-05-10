@@ -2,25 +2,22 @@ import {
   CodexNativeApiServer,
   type CodexNativeApiServerOptions,
 } from './native_api_server.js';
+import { resolveCodexAuthPath } from './auth_state.js';
+import {
+  createDefaultCodexNativeProviderBootstrap,
+  type ProviderProfileRepositoryLike,
+  type ProviderRegistryLike,
+} from './default_provider.js';
 import { CodexNativeRuntime } from './native_runtime.js';
 import type {
   ProviderPluginContract,
   ProviderProfile,
 } from './provider.js';
 
-interface ProviderProfileRepositoryLike {
-  get(id: string): ProviderProfile | null | undefined;
-  list(): ProviderProfile[];
-}
-
-interface ProviderRegistryLike {
-  getProvider<T extends ProviderPluginContract>(providerKind: string): T;
-}
-
 export interface CodexNativeApiServiceOptions {
   runtime?: CodexNativeRuntime;
-  providerProfiles: ProviderProfileRepositoryLike;
-  providerRegistry: ProviderRegistryLike;
+  providerProfiles?: ProviderProfileRepositoryLike;
+  providerRegistry?: ProviderRegistryLike;
   defaultProviderProfileId?: string | null;
   providerProfileId?: string | null;
   authPath?: string | null;
@@ -82,9 +79,12 @@ export class CodexNativeApiService {
     now,
     createResponseId,
   }: CodexNativeApiServiceOptions) {
-    this.providerProfiles = providerProfiles;
-    this.providerRegistry = providerRegistry;
-    this.defaultProviderProfileId = normalizeString(defaultProviderProfileId) || null;
+    const bootstrap = createDefaultCodexNativeProviderBootstrap(env);
+    this.providerProfiles = providerProfiles ?? bootstrap.providerProfiles;
+    this.providerRegistry = providerRegistry ?? bootstrap.providerRegistry;
+    this.defaultProviderProfileId = normalizeString(defaultProviderProfileId)
+      || normalizeString(bootstrap.defaultProviderProfileId)
+      || null;
     this.requestedProviderProfileId = normalizeString(providerProfileId) || null;
     this.authPath = normalizeString(authPath) || null;
     this.env = env;
@@ -125,7 +125,7 @@ export class CodexNativeApiService {
       providerProfileId: providerProfile.id,
       providerKind: providerProfile.providerKind,
       providerDisplayName: providerProfile.displayName,
-      authPath: this.authPath,
+      authPath: this.authPath ?? resolveCodexAuthPath(this.env),
     };
   }
 

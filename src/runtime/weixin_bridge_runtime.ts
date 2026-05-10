@@ -1,4 +1,5 @@
 import { parseSlashCommand } from '../core/command_parser.js';
+import { isAgentCommandEnabled } from '../core/command_availability.js';
 import { writeSequencedDebugLog } from '../core/sequenced_stderr.js';
 import { WeixinPoller } from '../platforms/weixin/poller.js';
 import { createI18n, type Translator } from '../i18n/index.js';
@@ -1317,27 +1318,28 @@ export class WeixinBridgeRuntime {
         this.trackBackgroundTask(task);
       }
     }
-    const agentJobs = typeof this.agentJobs?.claimSupervisableJobs === 'function'
-      ? this.agentJobs.claimSupervisableJobs('weixin')
-      : this.agentJobs?.claimQueuedJobs?.('weixin') ?? [];
-    if (!Array.isArray(agentJobs)) {
-      return;
-    }
-    for (const job of agentJobs) {
-      const jobId = typeof job?.id === 'string' ? job.id : '';
-      if (jobId && this.scheduledAgentJobIds.has(jobId)) {
-        continue;
-      }
-      if (jobId) {
-        this.scheduledAgentJobIds.add(jobId);
-      }
-      const task = this.runAgentJob(job)
-        .finally(() => {
-          if (jobId) {
-            this.scheduledAgentJobIds.delete(jobId);
+    if (isAgentCommandEnabled()) {
+      const agentJobs = typeof this.agentJobs?.claimSupervisableJobs === 'function'
+        ? this.agentJobs.claimSupervisableJobs('weixin')
+        : this.agentJobs?.claimQueuedJobs?.('weixin') ?? [];
+      if (Array.isArray(agentJobs)) {
+        for (const job of agentJobs) {
+          const jobId = typeof job?.id === 'string' ? job.id : '';
+          if (jobId && this.scheduledAgentJobIds.has(jobId)) {
+            continue;
           }
-        });
-      this.trackBackgroundTask(task);
+          if (jobId) {
+            this.scheduledAgentJobIds.add(jobId);
+          }
+          const task = this.runAgentJob(job)
+            .finally(() => {
+              if (jobId) {
+                this.scheduledAgentJobIds.delete(jobId);
+              }
+            });
+          this.trackBackgroundTask(task);
+        }
+      }
     }
     const reminders = this.assistantRecords?.claimDueReminders?.('weixin') ?? [];
     if (Array.isArray(reminders)) {
@@ -1365,6 +1367,12 @@ export class WeixinBridgeRuntime {
   }
 
   async runAgentJob(job: any): Promise<RuntimeResponse> {
+    if (!isAgentCommandEnabled()) {
+      return {
+        type: 'message',
+        messages: [],
+      };
+    }
     const scopeId = String(job?.externalScopeId ?? '');
     if (!scopeId || await this.isScopeBusyForAgent(job)) {
       if (job?.id && typeof this.agentJobs?.claimSupervisableJobs !== 'function') {
@@ -1471,6 +1479,9 @@ export class WeixinBridgeRuntime {
     job: any,
     notification: MissionHostNotification,
   ): Promise<void> {
+    if (!isAgentCommandEnabled()) {
+      return;
+    }
     const content = typeof this.bridgeCoordinator.renderAgentMissionNotification === 'function'
       ? await this.bridgeCoordinator.renderAgentMissionNotification(job, notification)
       : null;

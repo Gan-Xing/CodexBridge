@@ -3,6 +3,29 @@ import test from 'node:test';
 import { WeixinBridgeRuntime } from '../../src/runtime/weixin_bridge_runtime.js';
 import { createI18n } from '../../src/i18n/index.js';
 
+async function withEnvOverride<T>(
+  key: string,
+  value: string | null,
+  callback: () => Promise<T> | T,
+): Promise<T> {
+  const hadOwnValue = Object.prototype.hasOwnProperty.call(process.env, key);
+  const previousValue = process.env[key];
+  if (value === null) {
+    delete process.env[key];
+  } else {
+    process.env[key] = value;
+  }
+  try {
+    return await callback();
+  } finally {
+    if (hadOwnValue && previousValue !== undefined) {
+      process.env[key] = previousValue;
+    } else {
+      delete process.env[key];
+    }
+  }
+}
+
 interface RuntimeHarnessOptions {
   coordinator: any;
   automationJobs?: any;
@@ -801,6 +824,42 @@ test('WeixinBridgeRuntime prefers supervision-backed agent scheduling and does n
 
   releaseAgentRun?.();
   await runtime.waitForIdle();
+});
+
+test('WeixinBridgeRuntime skips agent supervision when the command is disabled', async () => {
+  await withEnvOverride('CODEXBRIDGE_ENABLE_AGENT_COMMAND', null, async () => {
+    let claimed = false;
+    let dispatched = false;
+    const runtime = makeRuntime({
+      agentJobs: {
+        claimSupervisableJobs() {
+          claimed = true;
+          return [{
+            id: 'agent-disabled-1',
+            platform: 'weixin',
+            externalScopeId: 'wxid_agent_disabled',
+            title: 'Hidden agent job',
+          }];
+        },
+      },
+      sendText: async () => {},
+      coordinator: {
+        async reconcileActiveTurn() {
+          return null;
+        },
+        async runAgentJob() {
+          dispatched = true;
+          return completeResponse('should not run');
+        },
+      },
+    });
+
+    await runtime.runAutomationSweep();
+    await runtime.waitForIdle();
+
+    assert.equal(claimed, false);
+    assert.equal(dispatched, false);
+  });
 });
 
 test('WeixinBridgeRuntime proactively delivers package-backed agent loop notifications per host policy without duplicating terminal replies', async () => {

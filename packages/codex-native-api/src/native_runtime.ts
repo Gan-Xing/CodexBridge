@@ -27,6 +27,7 @@ export interface CodexNativeRuntimeReadiness {
 export interface CodexNativeRuntimeTurnPreparation {
   event: CodexNativeInboundEvent;
   inputText: string;
+  developerInstructions?: string | null;
   collaborationMode?: CodexNativeSessionSettings['collaborationMode'];
   personality?: CodexNativeSessionSettings['personality'];
   accessPreset?: CodexNativeSessionSettings['accessPreset'];
@@ -361,6 +362,7 @@ export class CodexNativeRuntime {
       sessionSettings,
       event: request.event,
       inputText: request.inputText,
+      developerInstructions: request.developerInstructions ?? null,
       onProgress,
       onTurnStarted: typeof onTurnStarted === 'function'
         ? async (meta) => {

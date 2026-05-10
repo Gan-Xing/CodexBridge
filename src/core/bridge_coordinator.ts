@@ -5,6 +5,7 @@ import crypto from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { execFileSync } from 'node:child_process';
 import { formatPlatformScopeKey } from './contracts.js';
+import { isAgentCommandEnabled } from './command_availability.js';
 import { parseSlashCommand } from './command_parser.js';
 import { NotFoundError } from './errors.js';
 import {
@@ -1067,6 +1068,9 @@ export class BridgeCoordinator {
   }
 
   renderAgentMissionNotification(job: AgentJob, notification: MissionHostNotification): string | null {
+    if (!isAgentCommandEnabled()) {
+      return null;
+    }
     const cycleResult = notification?.cycleResult ?? null;
     const loopSnapshot = notification?.loopSnapshot ?? null;
     if (!shouldRenderAgentMissionNotification(cycleResult, loopSnapshot)) {
@@ -1306,6 +1310,12 @@ export class BridgeCoordinator {
       case 'review':
         return this.handleReviewCommand(event, command.args, options);
       case 'agent':
+        if (!isAgentCommandEnabled()) {
+          return messageResponse([
+            this.t('coordinator.command.unsupported', { name: command.name }),
+            this.t('coordinator.command.useHelps'),
+          ], this.buildScopedSessionMeta(event));
+        }
         return this.handleAgentCommand(event, command.args);
       case 'skills':
         return this.handleSkillsCommand(event, command.args);
@@ -5881,7 +5891,10 @@ export class BridgeCoordinator {
           return this.renderReviewClarifyResponse(event, commandResult.question, commandResult.candidates);
         } else {
           return messageResponse([
-            commandResult.reason || this.t('coordinator.review.empty'),
+            sanitizeReviewCommandReason(
+              commandResult.reason || this.t('coordinator.review.empty'),
+              this.currentI18n,
+            ),
           ], this.buildScopedSessionMeta(event));
         }
       } else {
@@ -12329,6 +12342,8 @@ function buildReviewCommandSkillPrompt({
         'commit',
         'custom',
       ],
+      canEscalateToBackgroundExecution: isAgentCommandEnabled(),
+      backgroundExecutionCommand: isAgentCommandEnabled() ? '/agent' : null,
       customOptions: [
         'instructions',
         'focus',
@@ -12347,6 +12362,7 @@ function buildReviewCommandSkillPrompt({
     '',
     `Please read and follow this command skill file: ${REVIEW_COMMAND_SKILL_PATH}`,
     'Use it to interpret the /review command request below.',
+    'If backgroundExecutionCommand is null, do not recommend /agent or any hidden command. Keep reject reasons generic.',
     'Return exactly one JSON object that matches the skill contract.',
     'Do not use Markdown. Do not explain. Do not execute the review yourself.',
     '',
@@ -15086,6 +15102,14 @@ function shouldRenderAgentMissionNotification(
   return cycleResult.status === 'continue' && cycleResult.stage.startsWith('verifier.');
 }
 
+function sanitizeReviewCommandReason(reason: string, i18n: Translator): string {
+  const normalized = compactWhitespace(reason);
+  if (isAgentCommandEnabled() || !/\/ag(?:ent)?\b/iu.test(normalized)) {
+    return normalized;
+  }
+  return i18n.t('coordinator.review.backgroundExecutionUnavailable');
+}
+
 function parseAutomationAddSpec(text: string) {
   const input = String(text ?? '').trim();
   const match = input.match(/^\/\S+\s+add\s+(.+)$/iu);
@@ -17438,38 +17462,6 @@ function getCommandHelpSpecs(i18n: Translator) {
       i18n.t('coordinator.help.note.review'),
     ],
   }),
-  agent: freezeCommandHelp({
-    name: 'agent',
-    aliases: ['ag'],
-    summary: i18n.t('coordinator.help.summary.agent'),
-    usage: [
-      '/agent <任务>',
-      '/agent confirm',
-      '/agent edit <修改提示>',
-      '/agent list',
-      '/agent show <序号>',
-      '/agent result <序号> [页码]',
-      '/agent result <序号> file',
-      '/agent send <序号>',
-      '/agent stop <序号>',
-      '/agent retry <序号>',
-      '/agent rename <序号> <新标题>',
-      '/agent del <序号>',
-      '/agent -h',
-    ],
-    examples: [
-      '/agent 检查当前项目测试并修复失败项',
-      '/agent confirm',
-      '/agent show 1',
-      '/agent result 1',
-      '/agent result 1 file',
-      '/agent send 1',
-      '/agent retry 1',
-    ],
-    notes: [
-      i18n.t('coordinator.help.note.agent'),
-    ],
-  }),
   skills: freezeCommandHelp({
     name: 'skills',
     aliases: ['sk'],
@@ -18257,7 +18249,6 @@ const COMMAND_HELP_ORDER = Object.freeze([
   'login',
   'stop',
   'review',
-  'agent',
   'skills',
   'plugins',
   'apps',
@@ -18308,7 +18299,6 @@ const COMMAND_ALIAS_DEFINITIONS = Object.freeze({
   login: ['lg'],
   stop: ['sp'],
   review: ['rv'],
-  agent: ['ag'],
   skills: ['sk'],
   plugins: ['pg'],
   apps: ['ap'],

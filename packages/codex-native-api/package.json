@@ -1,9 +1,35 @@
 {
-  "name": "@codexbridge/codex-native-api",
-  "version": "0.0.0",
-  "private": true,
+  "name": "codex-native-api",
+  "version": "0.1.0",
+  "private": false,
   "type": "module",
-  "description": "Localhost API facade over the logged-in Codex app-server runtime.",
+  "description": "Local-first API facade and cross-platform daemon wrapper over the logged-in Codex app-server runtime.",
+  "keywords": [
+    "codex",
+    "localhost",
+    "api",
+    "responses",
+    "chat-completions",
+    "openai-compatible",
+    "daemon",
+    "systemd",
+    "launchd"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Gan-Xing/CodexBridge.git",
+    "directory": "packages/codex-native-api"
+  },
+  "homepage": "https://github.com/Gan-Xing/CodexBridge/tree/main/packages/codex-native-api",
+  "bugs": {
+    "url": "https://github.com/Gan-Xing/CodexBridge/issues"
+  },
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "codex-native-api": "./dist/cli.js"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -17,10 +43,16 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "prepack": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test test/*.test.ts"
   },
   "engines": {
     "node": ">=24"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.3"
   }
 }

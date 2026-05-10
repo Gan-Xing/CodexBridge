@@ -5,17 +5,20 @@ CodexBridge is a Codex-centered gateway for connecting multiple chat platforms t
 ## Current Direction
 
 - First delivery target: `WeChat + Codex`
-- Future platforms: `Telegram`, additional chat transports
-- Future Codex provider profiles: configuration-only OpenAI-compatible backends such as `MiniMax`, `DeepSeek`, `Qwen`, `OpenRouter`, `Kimi`, `Gemini`, and `iFlow`
+- Package-side experiments are paused for now
+- `packages/codex-gateway` is not under active development
+- `packages/mission-control` is not under active development
+- `packages/codex-native-api` is retained as the only package planned for possible future work, but it is also paused for now
 - Core rule: platforms are adapters, Codex stays the execution engine, and Codex thread state stays the source of truth
 
 ## Documents
 
 - [Core architecture](./docs/architecture/codexbridge-core-architecture.md)
-- [Mission Control architecture](./docs/architecture/mission-control.md)
 - [Roadmap TODO](./docs/todo/roadmap.md)
-- [Codex Gateway TODO](./docs/todo/codex-gateway.md)
-- [Mission Control TODO](./docs/todo/mission-control.md)
+- [Codex Native API TODO](./docs/todo/codex-native-api.md)
+- [Codex Gateway TODO - paused](./docs/todo/codex-gateway.md)
+- [Mission Control TODO - paused](./docs/todo/mission-control.md)
+- [Mission Control architecture - historical reference](./docs/architecture/mission-control.md)
 - [WeChat slash command reference](./docs/usage/weixin-slash-commands.md)
 
 ## Repository Layout
@@ -36,19 +39,26 @@ docs/
 
 Project bootstrap is now focused on:
 
-1. Landing the core session and binding model
-2. Keeping platform and provider plugins independent
-3. Making `WeChat + Codex` the first real implementation path
+1. Keeping `WeChat + Codex` as the product center
+2. Avoiding more backend/package expansion until the bridge direction is clearer
+3. Treating `codex-gateway` and `mission-control` as paused workstreams
+4. Keeping `codex-native-api` only as a retained future option, not as active work
 
 Current implemented bridge pieces:
 
-- Core session routing with WeChat-friendly slash commands, including `/helps`, `/status`, `/usage`, `/login`, `/stop`, `/review`, `/agent`, `/plan`, `/skills`, `/plugins`, `/automation`, `/weibo`, `/new`, `/uploads`, `/as`, `/log`, `/todo`, `/remind`, `/note`, `/provider`, `/models`, `/model`, `/personality`, `/instructions`, `/fast`, `/threads`, `/search`, `/next`, `/prev`, `/open`, `/peek`, `/rename`, `/permissions`, `/allow`, `/deny`, `/reconnect`, `/retry`, `/restart`, and `/lang`
+- Core session routing with WeChat-friendly slash commands, including `/helps`, `/status`, `/usage`, `/login`, `/stop`, `/review`, `/plan`, `/skills`, `/plugins`, `/automation`, `/weibo`, `/new`, `/uploads`, `/as`, `/log`, `/todo`, `/remind`, `/note`, `/provider`, `/models`, `/model`, `/personality`, `/instructions`, `/fast`, `/threads`, `/search`, `/next`, `/prev`, `/open`, `/peek`, `/rename`, `/permissions`, `/allow`, `/deny`, `/reconnect`, `/retry`, `/restart`, and `/lang`
 - `/open` now rebinds the current scope and immediately returns a short recent-turn preview, so users can resume an old thread with one command instead of calling `/peek` first
 - File-backed JSON repositories for persistent bridge state
 - WeChat platform skeleton for Hermes-compatible iLink config loading, QR account state reuse, inbound DM normalization, long-poll client/poller wiring, context-token persistence, text chunking, and outbound text/typing delivery
 - Codex profile loader and initial Codex app-server client/plugin path for shared thread execution
 - WeChat runtime wiring that feeds poll events into the shared bridge coordinator and sends responses back through the WeChat transport
 - OpenAI-compatible Responses adapter for non-OpenAI Chat Completions providers, including compact fallback, SSE stream translation, tool-call repair, provider/model capability rules, and gated live-provider smoke tests
+
+Package workstream status:
+
+- `packages/codex-gateway`: paused
+- `packages/mission-control`: paused
+- `packages/codex-native-api`: retained for later only; currently paused
 
 ## OpenAI-Compatible Provider Validation
 
@@ -87,13 +97,6 @@ Recommended entrypoints:
 /review
 /rv
 /review base main
-/agent 帮我检查当前项目测试并修复失败项
-/agent confirm
-/agent show 1
-/agent result 1
-/agent result 1 file
-/agent send 1
-/agent retry 1
 /plan
 /pl
 /plan on
@@ -250,44 +253,6 @@ Examples:
 
 `/plan on` enables native `plan` mode for later turns in the current bridge session. `/plan off` restores the native `default` collaboration mode. This is a mode toggle, not an approval flow.
 
-### `/agent` and `/ag`
-
-Create a confirmed background Agent job for deeper multi-step work.
-
-Examples:
-
-```text
-/agent 帮我研究并实现一个小功能，然后测试
-/agent confirm
-/agent edit 改成只做方案，不修改代码
-/agent list
-/agent show 1
-/agent result 1
-/agent result 1 file
-/agent send 1
-/agent stop 1
-/agent retry 1
-/agent del 1
-```
-
-The experimental workflow is hybrid but Codex-first: Codex app-server is preferred for planning, execution, and verification so an existing Codex subscription is used by default. OpenAI Agents SDK is only a fallback when an Agent API key is configured and the Codex normalization/verifier path is unavailable. Long text results can be paged with `/agent result <index>` or exported as a phone-friendly TXT attachment with `/agent result <index> file`. Jobs with generated attachments keep artifact records, so `/agent send <index>` can resend the file if WeChat rate-limits the first delivery. If both Codex normalization and Agents SDK are unavailable, local fallback still creates a usable draft and verifier path.
-
-Agent planner/verifier configuration:
-
-```bash
-# OpenAI default
-OPENAI_API_KEY=...
-CODEXBRIDGE_AGENT_MODEL=gpt-5.5
-
-# OpenAI-compatible provider, for example MiniMax
-CODEXBRIDGE_AGENT_API_KEY=...
-CODEXBRIDGE_AGENT_BASE_URL=https://api.minimaxi.com/v1
-CODEXBRIDGE_AGENT_MODEL=MiniMax-M2.7
-CODEXBRIDGE_AGENT_API=chat_completions
-```
-
-`CODEXBRIDGE_AGENT_API_KEY` takes precedence over `OPENAI_API_KEY` for the fallback Agents SDK path. The default path still uses Codex app-server first. When `CODEXBRIDGE_AGENT_BASE_URL` or `OPENAI_BASE_URL` is set, the bridge defaults Agents SDK calls to Chat Completions compatibility mode unless `CODEXBRIDGE_AGENT_API=responses` is explicitly set.
-
 OpenAI-compatible runtime adapter:
 
 - CodexBridge can expose non-OpenAI providers through a local Responses adapter while Codex app-server still talks to a Responses-shaped endpoint.
@@ -359,7 +324,6 @@ Best-practice rule:
 - use `/helps` for command discovery
 - use `/login` and `/login list` to manage the host Codex account pool before switching accounts with `/login <index>`
 - use `/review`, `/review base <branch>`, or `/review commit <sha>` when you want a native Codex code review without changing the current thread binding
-- use `/agent <task>` when the task needs planning, background execution, verifier checks, and one automatic retry before delivery
 - use `/plan on` when you want later turns in the current session to prioritize planning first, and `/plan off` when you want to restore the default collaboration mode
 - use `/skills` to inspect what Codex can currently see in the active project, `/skills search <keyword>` for related matches, and `/skills show <index>` to understand what a skill is for before enabling or disabling it
 - use `/auto add ...` in natural language first; the bridge will draft a schedule, then `/auto confirm` creates the job

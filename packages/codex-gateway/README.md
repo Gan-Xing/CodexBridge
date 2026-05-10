@@ -2,6 +2,13 @@
 
 Internal package for the Codex Gateway protocol layer.
 
+## Status
+
+Development for this package is currently paused.
+
+It remains in the repository as historical/internal reference material, but it
+is not part of the active roadmap at this time.
+
 Current release policy:
 
 - keep this package `private: true`

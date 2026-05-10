@@ -25,6 +25,29 @@ function normalizeCommandSkillInput(value: unknown) {
   return String(value ?? '').replace(/\\/g, '/');
 }
 
+async function withEnvOverride<T>(
+  key: string,
+  value: string | null,
+  callback: () => Promise<T> | T,
+): Promise<T> {
+  const hadOwnValue = Object.prototype.hasOwnProperty.call(process.env, key);
+  const previousValue = process.env[key];
+  if (value === null) {
+    delete process.env[key];
+  } else {
+    process.env[key] = value;
+  }
+  try {
+    return await callback();
+  } finally {
+    if (hadOwnValue && previousValue !== undefined) {
+      process.env[key] = previousValue;
+    } else {
+      delete process.env[key];
+    }
+  }
+}
+
 function buildDefaultAgentSkillOutput(inputText: unknown): string | null {
   const normalized = normalizeCommandSkillInput(inputText);
   if (!normalized.includes('"command": "agent"')) {
@@ -2299,6 +2322,7 @@ test('/helps lists all supported slash commands and help entrypoints', async () 
   assert.match(text, /\/login \(\/lg\) 管理本机 Codex 登录账号/);
   assert.match(text, /\/stop \(\/sp\) 请求中断当前正在执行的回复/);
   assert.match(text, /\/review \(\/rv\) 对当前工作区改动运行原生 Codex 代码审查/);
+  assert.doesNotMatch(text, /\/agent/);
   assert.match(text, /\/uploads \(\/up, \/ul\) 开启上传暂存模式/);
   assert.match(text, /\/as \(\/assistant\) 助理记录统一入口/);
   assert.match(text, /\/todo \(\/td\) 指定为待办类型的助理入口/);
@@ -2340,6 +2364,7 @@ test('/helps renders English help text when locale is set to en', async () => {
   assert.match(text, /\/usage \(\/us\) Show the current Codex account plus 5-hour and weekly remaining usage/);
   assert.match(text, /\/login \(\/lg\) Manage the host Codex login account/);
   assert.match(text, /\/review \(\/rv\) Run a native Codex code review for the current workspace changes/);
+  assert.doesNotMatch(text, /\/agent/);
   assert.match(text, /\/uploads \(\/up, \/ul\) Enter upload staging mode/);
   assert.match(text, /\/as \(\/assistant\) Unified assistant record entry/);
   assert.match(text, /\/todo \(\/td\) Typed assistant entry for todo records/);
@@ -2375,6 +2400,56 @@ test('/login starts a pending Codex device login flow', async () => {
   assert.match(text, /验证码：ABCD-EFGH/);
   assert.match(text, /这是全局 Codex 登录/);
   assert.equal(codexAuthManager.startCalls.length, 1);
+});
+
+test('/agent stays hidden and unavailable when the command flag is disabled', async () => {
+  await withEnvOverride('CODEXBRIDGE_ENABLE_AGENT_COMMAND', null, async () => {
+    const { runtime, openai } = makeRuntime({ defaultCwd: '/tmp/openai-default' });
+    const originalStartTurn = openai.startTurn.bind(openai);
+    openai.startTurn = async (params: any) => {
+      const parserInput = normalizeCommandSkillInput(params?.inputText);
+      if (parserInput.includes('docs/command-skills/review.md') && parserInput.includes('"command": "review"')) {
+        return {
+          outputText: JSON.stringify({
+            schemaVersion: 'codexbridge.review-command-skill.v1',
+            ok: false,
+            action: 'reject',
+            confidence: 0.98,
+            requiresConfirmation: false,
+            reason: '这是执行或修复请求，不是只读审查。应该使用 /agent。',
+          }),
+        };
+      }
+      return originalStartTurn(params);
+    };
+
+    const helps = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-user-agent-hidden-1',
+      text: '/helps',
+    });
+    assert.doesNotMatch(helps.messages[0]?.text ?? '', /\/agent/);
+
+    const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-user-agent-hidden-1',
+      text: '/agent list',
+    });
+
+    assert.equal(result.messages[0]?.text ?? '', '不支持的命令：/agent');
+    assert.equal(result.messages[1]?.text ?? '', '用 /helps 查看可用命令。');
+
+    const review = await runtime.services.bridgeCoordinator.handleInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wx-user-agent-hidden-1',
+      text: '/review 顺手把发现的问题也修了',
+    });
+
+    assert.equal(
+      review.messages[0]?.text ?? '',
+      '这是执行或修复请求，不是只读审查。当前后台执行命令已隐藏，请直接用普通消息描述你要完成的目标。',
+    );
+  });
 });
 
 test('/login returns a friendly message when the OpenAI device endpoint is blocked', async () => {

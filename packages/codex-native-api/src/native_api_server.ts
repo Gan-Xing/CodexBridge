@@ -17,6 +17,7 @@ import type {
   ProviderModelInfo,
   ProviderPluginContract,
   ProviderProfile,
+  ProviderResponseItem,
   ProviderTurnProgress,
 } from './provider.js';
 
@@ -103,6 +104,8 @@ export class CodexNativeApiServer {
 
   private readonly host: string;
 
+  private readonly localhostOnly: boolean;
+
   private readonly requestedPort: number;
 
   private readonly authToken: string | null;
@@ -152,6 +155,7 @@ export class CodexNativeApiServer {
     this.runtime = runtime;
     this.resolveRuntimeContext = resolveRuntimeContext;
     this.host = normalizeString(host) || DEFAULT_HOST;
+    this.localhostOnly = isLoopbackHost(this.host);
     this.requestedPort = Number.isFinite(port) ? Number(port) : 0;
     this.authToken = normalizeString(authToken) || null;
     this.defaultModel = normalizeString(defaultModel) || null;
@@ -318,10 +322,11 @@ export class CodexNativeApiServer {
     writeJson(response, ready ? 200 : 503, {
       object: 'health.check',
       status: ready ? 'ok' : (readiness.runtimeReachable ? 'degraded' : 'unavailable'),
-      localhost_only: true,
+      localhost_only: this.localhostOnly,
       native_api: buildNativeApiObservability({
         routePath: '/v1/health',
         providerProfile: context.providerProfile,
+        localhostOnly: this.localhostOnly,
       }),
       route_capabilities: {
         models: {
@@ -332,6 +337,10 @@ export class CodexNativeApiServer {
           continuation: true,
           stream: true,
           compact: false,
+          builtin_tools: {
+            web_search: true,
+          },
+          function_tools: false,
         },
         chat_completions: {
           create: true,
@@ -369,10 +378,11 @@ export class CodexNativeApiServer {
       data: inspected.models.map((model) => serializeModel(model, context.providerProfile)),
       models: inspected.models.map((model) => serializeModel(model, context.providerProfile)),
       meta: {
-        localhost_only: true,
+        localhost_only: this.localhostOnly,
         native_api: buildNativeApiObservability({
           routePath: '/v1/models',
           providerProfile: context.providerProfile,
+          localhostOnly: this.localhostOnly,
         }),
         continuation_registry: serializeContinuationRegistryDescriptor(this.continuationRegistry.describe()),
         native_runtime: buildRuntimeMetadata({
@@ -496,7 +506,14 @@ export class CodexNativeApiServer {
       const outputText = normalizeString(execution.result.outputText);
       const previewText = normalizeString(execution.result.previewText);
       const effectiveText = outputText || previewText;
-      if (!effectiveText) {
+      const transcriptOutput = normalizeProviderResponseItemsToResponsesOutput(execution.result.responseItems);
+      const hasCompletedOutput = Boolean(outputText) || transcriptOutput.length > 0;
+      const responseOutput = appendFallbackAssistantResponseOutput(
+        transcriptOutput,
+        effectiveText,
+        hasCompletedOutput ? 'completed' : 'incomplete',
+      );
+      if (responseOutput.length === 0) {
         writeJson(response, 502, {
           error: {
             message: normalizeString(execution.result.errorMessage) || 'Codex native runtime returned no response text.',
@@ -560,6 +577,17 @@ export class CodexNativeApiServer {
       return;
     }
     const requestBody = body as JsonRecord;
+    const toolPreparation = prepareResponsesBuiltinTooling(requestBody);
+    if (toolPreparation.error) {
+      writeJson(response, 400, {
+        error: {
+          message: toolPreparation.error.message,
+          type: 'invalid_request_error',
+          code: toolPreparation.error.code,
+        },
+      });
+      return;
+    }
     const stream = Boolean(requestBody.stream);
     const previousResponseId = normalizeString(requestBody.previous_response_id) || null;
     const prompt = buildPromptFromResponsesRequest(requestBody);
@@ -668,6 +696,7 @@ export class CodexNativeApiServer {
         effectiveCwd,
         reasoningEffort,
         serviceTier,
+        developerInstructions: toolPreparation.developerInstructions,
       });
       return;
     }
@@ -688,12 +717,20 @@ export class CodexNativeApiServer {
         effectiveCwd,
         reasoningEffort,
         serviceTier,
+        developerInstructions: toolPreparation.developerInstructions,
         requestUser: normalizeNullableString(requestBody.user),
       });
       const outputText = normalizeString(execution.result.outputText);
       const previewText = normalizeString(execution.result.previewText);
       const effectiveText = outputText || previewText;
-      if (!effectiveText) {
+      const transcriptOutput = normalizeProviderResponseItemsToResponsesOutput(execution.result.responseItems);
+      const hasCompletedOutput = Boolean(outputText) || transcriptOutput.length > 0;
+      const responseOutput = appendFallbackAssistantResponseOutput(
+        transcriptOutput,
+        effectiveText,
+        hasCompletedOutput ? 'completed' : 'incomplete',
+      );
+      if (responseOutput.length === 0) {
         writeJson(response, 502, {
           error: {
             message: normalizeString(execution.result.errorMessage) || 'Codex native runtime returned no response text.',
@@ -730,9 +767,9 @@ export class CodexNativeApiServer {
         responseId,
         createdAt,
         responseModel: effectiveModel,
-        status: outputText ? 'completed' : 'incomplete',
-        outputText: effectiveText,
-        incompleteDetails: outputText ? null : {
+        status: hasCompletedOutput ? 'completed' : 'incomplete',
+        output: responseOutput,
+        incompleteDetails: hasCompletedOutput ? null : {
           reason: 'native_runtime_partial',
         },
         nativeApi: buildNativeApiObservability({
@@ -782,6 +819,7 @@ export class CodexNativeApiServer {
     effectiveCwd,
     reasoningEffort,
     serviceTier,
+    developerInstructions = null,
     requestUser = null,
     onProgress = null,
     onTurnStarted = null,
@@ -801,6 +839,7 @@ export class CodexNativeApiServer {
     effectiveCwd: string | null;
     reasoningEffort: string | null;
     serviceTier: string | null;
+    developerInstructions?: string | null;
     requestUser?: string | null;
     onProgress?: ((progress: ProviderTurnProgress) => Promise<void> | void) | null;
     onTurnStarted?: ((meta: CodexNativeRuntimeTurnStartedMeta) => Promise<void> | void) | null;
@@ -818,6 +857,7 @@ export class CodexNativeApiServer {
         onTurnStarted,
         prepareTurn: (session) => ({
           inputText: prompt,
+          developerInstructions,
           locale,
           metadata: {
             source: 'codex-native-api',
@@ -857,6 +897,7 @@ export class CodexNativeApiServer {
         onTurnStarted,
         prepareTurn: (session) => ({
           inputText: prompt,
+          developerInstructions,
           locale,
           metadata: {
             source: 'codex-native-api',
@@ -897,6 +938,7 @@ export class CodexNativeApiServer {
     effectiveCwd,
     reasoningEffort,
     serviceTier,
+    developerInstructions = null,
   }: {
     response: ServerResponse;
     request: JsonRecord;
@@ -917,6 +959,7 @@ export class CodexNativeApiServer {
     effectiveCwd: string | null;
     reasoningEffort: string | null;
     serviceTier: string | null;
+    developerInstructions?: string | null;
   }): Promise<void> {
     const initialNativeRuntime = buildRuntimeMetadata({
       providerProfile: context.providerProfile,
@@ -975,6 +1018,7 @@ export class CodexNativeApiServer {
         effectiveCwd,
         reasoningEffort,
         serviceTier,
+        developerInstructions,
         requestUser: normalizeNullableString(request.user),
         onTurnStarted: (meta) => {
           latestTurnMeta = {
@@ -990,6 +1034,13 @@ export class CodexNativeApiServer {
       const outputText = rawString(execution.result.outputText);
       const previewText = rawString(execution.result.previewText);
       const effectiveText = outputText || previewText;
+      const transcriptOutput = normalizeProviderResponseItemsToResponsesOutput(execution.result.responseItems);
+      const hasCompletedOutput = Boolean(outputText) || transcriptOutput.length > 0;
+      const responseOutput = appendFallbackAssistantResponseOutput(
+        transcriptOutput,
+        effectiveText,
+        hasCompletedOutput ? 'completed' : 'incomplete',
+      );
       const nativeRuntime = buildRuntimeMetadata({
         providerProfile: context.providerProfile,
         readiness,
@@ -1002,7 +1053,7 @@ export class CodexNativeApiServer {
         turnId: execution.result.turnId ?? latestTurnMeta.turnId,
         bridgeSessionId: execution.session.id,
       };
-      if (!effectiveText) {
+      if (responseOutput.length === 0) {
         flushEvents(failResponsesStreamState(streamState, {
           message: normalizeString(execution.result.errorMessage) || 'Codex native runtime returned no response text.',
           type: 'native_runtime_error',
@@ -1019,7 +1070,9 @@ export class CodexNativeApiServer {
         finishSse(response);
         return;
       }
-      flushEvents(syncResponsesStreamMessageToTerminalText(streamState, effectiveText));
+      if (effectiveText) {
+        flushEvents(syncResponsesStreamMessageToTerminalText(streamState, effectiveText));
+      }
       if (previousResponseId) {
         this.continuationRegistry.touch(previousResponseId);
       }
@@ -1037,8 +1090,9 @@ export class CodexNativeApiServer {
         lastUsedAt: startedAt,
       });
       flushEvents(finishResponsesStreamState(streamState, {
-        status: outputText ? 'completed' : 'incomplete',
-        incompleteDetails: outputText ? null : {
+        status: hasCompletedOutput ? 'completed' : 'incomplete',
+        output: responseOutput,
+        incompleteDetails: hasCompletedOutput ? null : {
           reason: 'native_runtime_partial',
         },
         nativeApi: buildNativeApiObservability({
@@ -1381,6 +1435,247 @@ function buildPromptFromResponsesRequest(request: JsonRecord): string {
   return sections.join('\n\n').trim();
 }
 
+function prepareResponsesBuiltinTooling(request: JsonRecord): {
+  developerInstructions: string | null;
+  error: {
+    message: string;
+    code: string;
+  } | null;
+} {
+  const toolDeclarations = normalizeArray(request.tools);
+  const normalizedTools: JsonRecord[] = [];
+  for (const tool of toolDeclarations) {
+    if (!tool || typeof tool !== 'object' || Array.isArray(tool)) {
+      return {
+        developerInstructions: null,
+        error: {
+          message: 'The first native /v1/responses slice only supports JSON-object builtin tool declarations.',
+          code: 'unsupported_responses_tooling',
+        },
+      };
+    }
+    const normalizedType = normalizeResponsesBuiltinToolType((tool as JsonRecord).type);
+    if (normalizedType !== 'web_search') {
+      return {
+        developerInstructions: null,
+        error: {
+          message: 'The first native /v1/responses slice currently supports only the built-in web_search tool. Function tools and custom tools are not wired yet.',
+          code: 'unsupported_responses_tooling',
+        },
+      };
+    }
+    normalizedTools.push({
+      ...(tool as JsonRecord),
+      type: normalizedType,
+    });
+  }
+  if (request.tools !== undefined) {
+    request.tools = normalizedTools;
+  }
+
+  let toolPolicy: 'default' | 'toolless' | 'web_search_optional' | 'web_search_required' = 'default';
+  const declaredBuiltinTools = normalizedTools.map((tool) => normalizeString(tool.type)).filter(Boolean);
+  if (declaredBuiltinTools.includes('web_search')) {
+    toolPolicy = 'web_search_optional';
+  }
+
+  const toolChoice = request.tool_choice;
+  if (toolChoice !== undefined && toolChoice !== null) {
+    if (typeof toolChoice === 'string') {
+      const normalizedChoice = normalizeString(toolChoice);
+      const normalizedBuiltinChoice = normalizeResponsesBuiltinToolType(normalizedChoice);
+      if (normalizedChoice === 'auto') {
+        request.tool_choice = 'auto';
+      } else if (normalizedChoice === 'none') {
+        request.tool_choice = 'none';
+        toolPolicy = 'toolless';
+      } else if (normalizedChoice === 'required') {
+        if (!declaredBuiltinTools.includes('web_search')) {
+          return {
+            developerInstructions: null,
+            error: {
+              message: 'tool_choice=\"required\" currently requires declaring the built-in web_search tool in tools.',
+              code: 'unsupported_responses_tooling',
+            },
+          };
+        }
+        request.tool_choice = 'required';
+        toolPolicy = 'web_search_required';
+      } else if (normalizedBuiltinChoice === 'web_search') {
+        request.tool_choice = 'web_search';
+        ensureBuiltinWebSearchToolDeclaration(request);
+        toolPolicy = 'web_search_required';
+      } else {
+        return {
+          developerInstructions: null,
+          error: {
+            message: 'The first native /v1/responses slice currently supports tool_choice values of auto, none, required, or explicit web_search only.',
+            code: 'unsupported_responses_tooling',
+          },
+        };
+      }
+    } else if (typeof toolChoice === 'object' && !Array.isArray(toolChoice)) {
+      const rawType = normalizeString((toolChoice as JsonRecord).type);
+      const normalizedBuiltinChoice = normalizeResponsesBuiltinToolType(rawType);
+      if (!rawType || rawType === 'auto') {
+        request.tool_choice = 'auto';
+      } else if (rawType === 'none') {
+        request.tool_choice = 'none';
+        toolPolicy = 'toolless';
+      } else if (rawType === 'required') {
+        if (!declaredBuiltinTools.includes('web_search')) {
+          return {
+            developerInstructions: null,
+            error: {
+              message: 'tool_choice.type=\"required\" currently requires declaring the built-in web_search tool in tools.',
+              code: 'unsupported_responses_tooling',
+            },
+          };
+        }
+        request.tool_choice = 'required';
+        toolPolicy = 'web_search_required';
+      } else if (normalizedBuiltinChoice === 'web_search') {
+        request.tool_choice = {
+          ...(toolChoice as JsonRecord),
+          type: 'web_search',
+        };
+        ensureBuiltinWebSearchToolDeclaration(request);
+        toolPolicy = 'web_search_required';
+      } else if (rawType === 'allowed_tools') {
+        const normalizedAllowedTools: JsonRecord[] = [];
+        for (const allowedTool of normalizeArray((toolChoice as JsonRecord).tools)) {
+          if (!allowedTool || typeof allowedTool !== 'object' || Array.isArray(allowedTool)) {
+            return {
+              developerInstructions: null,
+              error: {
+                message: 'tool_choice.allowed_tools entries must be JSON objects.',
+                code: 'unsupported_responses_tooling',
+              },
+            };
+          }
+          const normalizedAllowedType = normalizeResponsesBuiltinToolType((allowedTool as JsonRecord).type);
+          if (normalizedAllowedType !== 'web_search') {
+            return {
+              developerInstructions: null,
+              error: {
+                message: 'The first native /v1/responses slice currently supports only built-in web_search entries inside tool_choice.allowed_tools.',
+                code: 'unsupported_responses_tooling',
+              },
+            };
+          }
+          normalizedAllowedTools.push({
+            ...(allowedTool as JsonRecord),
+            type: normalizedAllowedType,
+          });
+        }
+        if (normalizedAllowedTools.length === 0) {
+          return {
+            developerInstructions: null,
+            error: {
+              message: 'tool_choice.allowed_tools must include at least one supported built-in tool.',
+              code: 'unsupported_responses_tooling',
+            },
+          };
+        }
+        request.tool_choice = {
+          ...(toolChoice as JsonRecord),
+          type: 'allowed_tools',
+          tools: normalizedAllowedTools,
+        };
+        ensureBuiltinWebSearchToolDeclaration(request);
+        toolPolicy = 'web_search_optional';
+      } else {
+        return {
+          developerInstructions: null,
+          error: {
+            message: 'The first native /v1/responses slice currently supports only builtin web_search tool_choice objects.',
+            code: 'unsupported_responses_tooling',
+          },
+        };
+      }
+    } else {
+      return {
+        developerInstructions: null,
+        error: {
+          message: 'tool_choice must be a string or JSON object.',
+          code: 'unsupported_responses_tooling',
+        },
+      };
+    }
+  }
+
+  return {
+    developerInstructions: buildResponsesBuiltinToolDeveloperInstructions(toolPolicy),
+    error: null,
+  };
+}
+
+function buildResponsesBuiltinToolDeveloperInstructions(
+  toolPolicy: 'default' | 'toolless' | 'web_search_optional' | 'web_search_required',
+): string | null {
+  switch (toolPolicy) {
+    case 'toolless':
+      return [
+        'codex-native-api tool policy for this /v1/responses request:',
+        '- The client explicitly disabled tool use for this turn.',
+        '- Do not use shell commands, file edits, MCP tools, plugins, web search, or image generation.',
+        '- Answer only from the supplied conversation context and the model\'s own reasoning.',
+      ].join('\n');
+    case 'web_search_optional':
+      return [
+        'codex-native-api tool policy for this /v1/responses request:',
+        '- The only supported built-in tool for this turn is web_search.',
+        '- You may use the built-in web_search capability when fresh or external information would materially improve the answer.',
+        '- Do not substitute shell commands, file edits, MCP tools, plugins, or image generation for web_search.',
+        '- Return a normal assistant answer after any needed search.',
+      ].join('\n');
+    case 'web_search_required':
+      return [
+        'codex-native-api tool policy for this /v1/responses request:',
+        '- The client explicitly selected the built-in web_search tool.',
+        '- You must use the built-in web_search capability before the final answer.',
+        '- Do not substitute shell commands, file edits, MCP tools, plugins, or image generation for web_search.',
+        '- Return a normal assistant answer after the search.',
+      ].join('\n');
+    default:
+      return null;
+  }
+}
+
+function ensureBuiltinWebSearchToolDeclaration(request: JsonRecord): void {
+  const existingTools = normalizeArray(request.tools);
+  if (existingTools.some((tool) => normalizeResponsesBuiltinToolType(tool?.type) === 'web_search')) {
+    request.tools = existingTools.map((tool) => {
+      if (!tool || typeof tool !== 'object' || Array.isArray(tool)) {
+        return tool;
+      }
+      const normalizedType = normalizeResponsesBuiltinToolType((tool as JsonRecord).type);
+      return normalizedType
+        ? {
+          ...(tool as JsonRecord),
+          type: normalizedType,
+        }
+        : tool;
+    });
+    return;
+  }
+  request.tools = [
+    ...existingTools,
+    { type: 'web_search' },
+  ];
+}
+
+function normalizeResponsesBuiltinToolType(type: unknown): string {
+  switch (normalizeString(type)) {
+    case 'web_search':
+    case 'web_search_preview':
+    case 'web_search_preview_2025_03_11':
+      return 'web_search';
+    default:
+      return '';
+  }
+}
+
 function detectUnsupportedChatCompletionsFeature(
   request: JsonRecord,
 ): {
@@ -1618,6 +1913,205 @@ function normalizeChatCompletionsContentPart(part: unknown): JsonRecord | null {
 function renderChatCompletionsMessageContent(content: unknown): string {
   const normalized = normalizeChatCompletionsMessageContent(content);
   return renderResponsesContent(normalized);
+}
+
+function normalizeProviderResponseItemsToResponsesOutput(responseItems: unknown): JsonRecord[] {
+  return normalizeArray(responseItems)
+    .map((item) => normalizeProviderResponseItem(item))
+    .filter((item): item is JsonRecord => Boolean(item));
+}
+
+function normalizeProviderResponseItem(item: unknown): JsonRecord | null {
+  const candidate = normalizeRecord(item);
+  if (!candidate) {
+    return null;
+  }
+  const type = normalizeString(candidate.type);
+  switch (type) {
+    case 'message':
+      return normalizeProviderResponseMessageItem(candidate);
+    case 'reasoning':
+      return {
+        id: normalizeNullableString(candidate.id) || `rs_${crypto.randomUUID()}`,
+        type: 'reasoning',
+        status: 'completed',
+        summary: Array.isArray(candidate.summary) ? cloneJson(candidate.summary) : [],
+      };
+    case 'function_call':
+      if (normalizeString(candidate.name) === 'tool_suggest') {
+        return null;
+      }
+      return normalizeProviderFunctionCallItem(candidate);
+    case 'custom_tool_call':
+      return normalizeProviderCustomToolCallItem(candidate);
+    case 'function_call_output':
+    case 'custom_tool_call_output':
+      return normalizeProviderToolOutputItem(candidate, type);
+    default:
+      return null;
+  }
+}
+
+function normalizeProviderResponseMessageItem(candidate: JsonRecord): JsonRecord | null {
+  if (normalizeString(candidate.role) !== 'assistant') {
+    return null;
+  }
+  const phase = normalizeString(candidate.phase);
+  if (phase && phase !== 'final_answer') {
+    return null;
+  }
+  const content = normalizeProviderResponseMessageContent(candidate.content);
+  if (content.length === 0) {
+    return null;
+  }
+  return {
+    id: normalizeNullableString(candidate.id) || `msg_${crypto.randomUUID()}`,
+    type: 'message',
+    status: 'completed',
+    role: 'assistant',
+    content,
+  };
+}
+
+function normalizeProviderResponseMessageContent(content: unknown): JsonRecord[] {
+  return normalizeArray(content)
+    .map((part) => normalizeProviderResponseMessagePart(part))
+    .filter((part): part is JsonRecord => Boolean(part));
+}
+
+function normalizeProviderResponseMessagePart(part: unknown): JsonRecord | null {
+  const candidate = normalizeRecord(part);
+  if (!candidate) {
+    const text = normalizeString(part);
+    return text
+      ? {
+        type: 'output_text',
+        text,
+        annotations: [],
+      }
+      : null;
+  }
+  const type = normalizeString(candidate.type);
+  if (type === 'output_text' || type === 'text') {
+    const text = normalizeString(candidate.text);
+    if (!text) {
+      return null;
+    }
+    return {
+      type: 'output_text',
+      text,
+      annotations: Array.isArray(candidate.annotations) ? cloneJson(candidate.annotations) : [],
+    };
+  }
+  const text = normalizeString(candidate.text);
+  if (!text) {
+    return null;
+  }
+  return {
+    type: 'output_text',
+    text,
+    annotations: [],
+  };
+}
+
+function normalizeProviderFunctionCallItem(candidate: JsonRecord): JsonRecord | null {
+  const callId = normalizeNullableString(candidate.call_id);
+  const name = normalizeNullableString(candidate.name);
+  if (!callId || !name) {
+    return null;
+  }
+  return {
+    id: normalizeNullableString(candidate.id) || `fc_${crypto.randomUUID()}`,
+    type: 'function_call',
+    call_id: callId,
+    name,
+    arguments: normalizeProviderToolArguments(candidate.arguments),
+    status: 'completed',
+  };
+}
+
+function normalizeProviderCustomToolCallItem(candidate: JsonRecord): JsonRecord | null {
+  const callId = normalizeNullableString(candidate.call_id);
+  const name = normalizeNullableString(candidate.name);
+  if (!callId || !name) {
+    return null;
+  }
+  return omitUndefined({
+    id: normalizeNullableString(candidate.id) || `ctc_${crypto.randomUUID()}`,
+    type: 'custom_tool_call',
+    call_id: callId,
+    name,
+    input: normalizeNullableString(candidate.input),
+    arguments: normalizeProviderToolArguments(candidate.arguments),
+    status: 'completed',
+  });
+}
+
+function normalizeProviderToolOutputItem(candidate: JsonRecord, type: string): JsonRecord | null {
+  const callId = normalizeNullableString(candidate.call_id);
+  const output = normalizeProviderToolOutput(candidate.output);
+  if (!callId || output === null) {
+    return null;
+  }
+  return {
+    id: normalizeNullableString(candidate.id) || `tool_out_${crypto.randomUUID()}`,
+    type,
+    call_id: callId,
+    output,
+    status: 'completed',
+  };
+}
+
+function normalizeProviderToolArguments(value: unknown): string {
+  if (typeof value === 'string') {
+    return value;
+  }
+  if (value == null) {
+    return '{}';
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return '{}';
+  }
+}
+
+function normalizeProviderToolOutput(value: unknown): string | null {
+  if (typeof value === 'string') {
+    return value;
+  }
+  if (value == null) {
+    return null;
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function appendFallbackAssistantResponseOutput(
+  output: JsonRecord[],
+  fallbackText: string | null,
+  status: 'completed' | 'incomplete',
+): JsonRecord[] {
+  if (!fallbackText || output.some((item) => item.type === 'message' && item.role === 'assistant')) {
+    return output;
+  }
+  return [
+    ...output,
+    {
+      id: `msg_${crypto.randomUUID()}`,
+      type: 'message',
+      status,
+      role: 'assistant',
+      content: [{
+        type: 'output_text',
+        text: fallbackText,
+        annotations: [],
+      }],
+    },
+  ];
 }
 
 function buildResponsesObject({
@@ -2122,11 +2616,13 @@ function finishResponsesStreamState(
   state: ResponsesStreamState,
   {
     status,
+    output = null,
     incompleteDetails = null,
     nativeApi = null,
     nativeRuntime,
   }: {
     status: string;
+    output?: JsonRecord[] | null;
     incompleteDetails?: JsonRecord | null;
     nativeApi?: JsonRecord | null;
     nativeRuntime: JsonRecord;
@@ -2147,7 +2643,7 @@ function finishResponsesStreamState(
         createdAt: state.createdAt,
         responseModel: state.responseModel,
         status,
-        output: cloneJson(state.output),
+        output: Array.isArray(output) ? output : cloneJson(state.output),
         incompleteDetails,
         nativeApi: nativeApi ?? state.initialNativeApi,
         nativeRuntime,
@@ -2306,6 +2802,7 @@ function withResponsesStreamSequence(state: ResponsesStreamState, payload: JsonR
 function buildNativeApiObservability({
   routePath,
   providerProfile,
+  localhostOnly = true,
   responseId = null,
   chatCompletionId = null,
   previousResponseId = null,
@@ -2316,6 +2813,7 @@ function buildNativeApiObservability({
 }: {
   routePath: string;
   providerProfile: ProviderProfile;
+  localhostOnly?: boolean;
   responseId?: string | null;
   chatCompletionId?: string | null;
   previousResponseId?: string | null;
@@ -2327,7 +2825,7 @@ function buildNativeApiObservability({
   const resumed = Boolean(previousResponseId || continuationEntry);
   return omitUndefined({
     route_path: normalizeString(routePath) || '/v1/responses',
-    localhost_only: true,
+    localhost_only: localhostOnly,
     request_target: {
       provider_profile_id: providerProfile.id,
       provider_kind: providerProfile.providerKind,
@@ -2428,6 +2926,11 @@ function deriveRequestTitle(prefix: string, prompt: string): string {
     return prefix;
   }
   return `${prefix}: ${preview}`;
+}
+
+function isLoopbackHost(value: string): boolean {
+  const normalized = normalizeString(value).toLowerCase();
+  return normalized === '127.0.0.1' || normalized === 'localhost' || normalized === '::1';
 }
 
 function firstNonEmptyLine(value: string): string {

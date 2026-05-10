@@ -3,6 +3,14 @@
 This document tracks the implementation backlog for the `track/codex-native-api`
 workstream.
 
+## Status
+
+This workstream is retained as the only package-level backend candidate still
+kept for possible future development, but it is currently paused.
+
+Keep this document as a preserved backlog and reference point. It should not be
+treated as an active implementation queue right now.
+
 It is the execution-oriented companion to:
 
 - `docs/architecture/codexbridge-core-architecture.md`
@@ -44,7 +52,7 @@ It should **not** own:
 - user-facing slash-command policy unless a command is explicitly added later
 - commercial billing, top-up, or payment workflows
 
-## Track Branch
+## Historical Track Branch
 
 Primary long-lived branch for this workstream:
 

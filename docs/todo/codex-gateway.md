@@ -3,6 +3,14 @@
 This document tracks the implementation backlog for
 `@codexbridge/codex-gateway`.
 
+## Status
+
+This workstream is currently paused.
+
+Keep this document as a historical backlog and reference. It should not be
+treated as an active implementation queue unless the product direction changes
+again.
+
 It is the execution-oriented companion to:
 
 - `docs/architecture/codexbridge-core-architecture.md`
@@ -60,7 +68,7 @@ Avoid frequent edits here unless the change is truly cross-cutting:
 - `README.md`
 - `package.json`
 
-## Current Active Focus
+## Last Active Focus
 
 - [x] Stop treating OpenRouter live smoke as an active Phase 4 blocker; defer it until credentials are available again
 - [x] Keep new provider onboarding config-first and capability-driven instead of adding one-off provider classes
