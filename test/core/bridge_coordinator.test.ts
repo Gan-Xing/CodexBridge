@@ -2177,6 +2177,50 @@ test('stale active turns are reconciled before starting a new conversation turn'
   assert.equal(runtime.services.activeTurns.resolveScopeTurn(scopeRef), null);
 });
 
+test('completed provider results release the local active turn even when thread status remains running', async () => {
+  const { runtime, openai } = makeRuntime();
+  const originalStartTurn = openai.startTurn.bind(openai);
+  const scopeRef = {
+    platform: 'weixin',
+    externalScopeId: 'wx-user-complete-local-release-1',
+  };
+
+  openai.startTurn = async ({ bridgeSession, inputText, onTurnStarted = null }) => {
+    if (inputText !== 'complete from progress') {
+      return originalStartTurn({ bridgeSession, inputText, onTurnStarted });
+    }
+    const thread = openai.threads.get(bridgeSession.codexThreadId);
+    assert.ok(thread);
+    const turnId = `${bridgeSession.codexThreadId}-turn-running-but-returned`;
+    await onTurnStarted?.({
+      turnId,
+      threadId: bridgeSession.codexThreadId,
+    });
+    thread.turns = [{
+      id: turnId,
+      status: 'running',
+      error: null,
+      items: [],
+    }];
+    return {
+      outputText: 'final answer from progress',
+      outputState: 'complete',
+      finalSource: 'progress_only',
+      turnId,
+      threadId: bridgeSession.codexThreadId,
+      title: bridgeSession.title,
+    };
+  };
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    ...scopeRef,
+    text: 'complete from progress',
+  });
+
+  assert.equal(result.messages[0]?.text ?? '', 'final answer from progress');
+  assert.equal(runtime.services.activeTurns.resolveScopeTurn(scopeRef), null);
+});
+
 test('conversation turns remain blocked when the previous provider turn is still running', async () => {
   const { runtime, openai } = makeRuntime();
   const scopeRef = {
@@ -5572,6 +5616,179 @@ test('/stop interrupts the active turn once the provider has issued a turn id', 
 
   const firstResult = await firstTurn;
   assert.equal(firstResult.meta?.codexTurn?.outputState, 'interrupted');
+});
+
+test('/stop clears the local active turn when Codex interrupt RPC times out', async () => {
+  const { runtime, openai } = makeRuntime();
+  const originalStartTurn = openai.startTurn.bind(openai);
+  const scopeRef = {
+    platform: 'weixin',
+    externalScopeId: 'wx-user-stop-timeout-release-1',
+  };
+  let releaseTurn: (value?: unknown) => void = () => {};
+  const turnGate = new Promise((resolve) => {
+    releaseTurn = resolve;
+  });
+
+  openai.startTurn = async ({ bridgeSession, inputText, onTurnStarted = null }) => {
+    if (inputText !== 'first turn') {
+      return originalStartTurn({ bridgeSession, inputText, onTurnStarted });
+    }
+    const thread = openai.threads.get(bridgeSession.codexThreadId);
+    assert.ok(thread);
+    const turnId = `${bridgeSession.codexThreadId}-turn-timeout-stop`;
+    await onTurnStarted?.({
+      turnId,
+      threadId: bridgeSession.codexThreadId,
+    });
+    thread.turns = [{
+      id: turnId,
+      status: 'running',
+      error: null,
+      items: [],
+    }];
+    await turnGate;
+    thread.turns = [{
+      id: turnId,
+      status: 'interrupted',
+      error: 'Conversation interrupted',
+      items: [],
+    }];
+    return {
+      outputText: '',
+      outputState: 'interrupted',
+      turnId,
+      threadId: bridgeSession.codexThreadId,
+      title: bridgeSession.title,
+    };
+  };
+  openai.interruptTurn = async (params) => {
+    openai.interruptTurnCalls.push(params);
+    throw new Error('Timed out waiting for Codex JSON-RPC response to turn/interrupt');
+  };
+
+  const firstTurn = runtime.services.bridgeCoordinator.handleInboundEvent({
+    ...scopeRef,
+    text: 'first turn',
+  });
+
+  await waitForCondition(() => runtime.services.activeTurns.resolveScopeTurn(scopeRef)?.turnId);
+
+  const stop = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    ...scopeRef,
+    text: '/stop',
+  });
+
+  assert.match(stop.messages.map((message) => message.text ?? '').join('\n'), /turn\/interrupt/);
+  assert.equal(runtime.services.activeTurns.resolveScopeTurn(scopeRef), null);
+
+  const next = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    ...scopeRef,
+    text: 'after stop timeout',
+  });
+
+  assert.equal(next.messages[0]?.text ?? '', 'openai: after stop timeout');
+
+  releaseTurn();
+  await firstTurn;
+});
+
+test('/stop timeout cleanup does not clear a newly started second turn', async () => {
+  const { runtime, openai } = makeRuntime();
+  const originalStartTurn = openai.startTurn.bind(openai);
+  const scopeRef = {
+    platform: 'weixin',
+    externalScopeId: 'wx-user-stop-timeout-race-1',
+  };
+  let releaseFirst: (value?: unknown) => void = () => {};
+  const firstGate = new Promise((resolve) => {
+    releaseFirst = resolve;
+  });
+  const secondTurnId = 'race-second-turn';
+
+  openai.startTurn = async ({ bridgeSession, inputText, onTurnStarted = null }) => {
+    if (inputText === 'first turn') {
+      const thread = openai.threads.get(bridgeSession.codexThreadId);
+      assert.ok(thread);
+      const turnId = `${bridgeSession.codexThreadId}-turn-timeout-race-first`;
+      await onTurnStarted?.({
+        turnId,
+        threadId: bridgeSession.codexThreadId,
+      });
+      thread.turns = [{
+        id: turnId,
+        status: 'running',
+        error: null,
+        items: [],
+      }];
+      await firstGate;
+      thread.turns = [{
+        id: turnId,
+        status: 'interrupted',
+        error: 'Conversation interrupted',
+        items: [],
+      }];
+      return {
+        outputText: '',
+        outputState: 'interrupted',
+        turnId,
+        threadId: bridgeSession.codexThreadId,
+        title: bridgeSession.title,
+      };
+    }
+    if (inputText === 'second turn') {
+      const thread = openai.threads.get(bridgeSession.codexThreadId);
+      assert.ok(thread);
+      await onTurnStarted?.({
+        turnId: secondTurnId,
+        threadId: bridgeSession.codexThreadId,
+      });
+      thread.turns = [{
+        id: secondTurnId,
+        status: 'running',
+        error: null,
+        items: [],
+      }];
+      return {
+        outputText: 'second partial output',
+        outputState: 'partial',
+        finalSource: 'progress_only',
+        turnId: secondTurnId,
+        threadId: bridgeSession.codexThreadId,
+        title: bridgeSession.title,
+      };
+    }
+    return originalStartTurn({ bridgeSession, inputText, onTurnStarted });
+  };
+  openai.interruptTurn = async () => {
+    throw new Error('Timed out waiting for Codex JSON-RPC response to turn/interrupt');
+  };
+
+  const firstTurn = runtime.services.bridgeCoordinator.handleInboundEvent({
+    ...scopeRef,
+    text: 'first turn',
+  });
+
+  await waitForCondition(() => runtime.services.activeTurns.resolveScopeTurn(scopeRef)?.turnId);
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    ...scopeRef,
+    text: '/stop',
+  });
+
+  const second = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    ...scopeRef,
+    text: 'second turn',
+  });
+
+  assert.equal(second.meta?.codexTurn?.outputState, 'partial');
+  assert.equal(runtime.services.activeTurns.resolveScopeTurn(scopeRef)?.turnId, secondTurnId);
+
+  releaseFirst();
+  await firstTurn;
+
+  assert.equal(runtime.services.activeTurns.resolveScopeTurn(scopeRef)?.turnId, secondTurnId);
+  runtime.services.activeTurns.endScopeTurn(scopeRef);
 });
 
 test('/interrupt remains a hidden compatibility alias and can queue an interrupt before turn startup completes', async () => {
