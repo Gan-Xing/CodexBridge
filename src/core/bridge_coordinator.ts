@@ -21117,7 +21117,7 @@ function resolveInternalCodexNativeApiBaseUrl(env: NodeJS.ProcessEnv): string | 
     return explicitBaseUrl;
   }
   if (!parseBooleanEnv(env.CODEXBRIDGE_INTERNAL_NATIVE_API_ENABLED)
-    && !parseBooleanEnv(env.CODEX_NATIVE_API_ENABLE)) {
+    && !parseBooleanEnv(env.CODEX_NATIVE_API_ENABLE, true)) {
     return null;
   }
   const host = normalizeEnvString(env.CODEX_NATIVE_API_HOST) ?? DEFAULT_CODEX_NATIVE_API_HOST;
@@ -21157,8 +21157,19 @@ function parsePositiveIntegerEnv(value: unknown): number | null {
   return parsed;
 }
 
-function parseBooleanEnv(value: unknown): boolean {
+function parseBooleanEnv(value: unknown, defaultValue = false): boolean {
   const normalized = String(value ?? '').trim().toLowerCase();
+  if (!normalized) {
+    return defaultValue;
+  }
+  if (
+    normalized === '0'
+    || normalized === 'false'
+    || normalized === 'no'
+    || normalized === 'off'
+  ) {
+    return false;
+  }
   return normalized === '1'
     || normalized === 'true'
     || normalized === 'yes'

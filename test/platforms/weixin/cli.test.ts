@@ -141,10 +141,9 @@ test('parseCodexNativeApiServeArgs reads standalone native-api flags', () => {
   });
 });
 
-test('resolveEmbeddedCodexNativeApiOptions defaults native-api startup to the Codex path when enabled', () => {
+test('resolveEmbeddedCodexNativeApiOptions defaults native-api startup to the Codex path', () => {
   const options = resolveEmbeddedCodexNativeApiOptions({
     env: {
-      CODEX_NATIVE_API_ENABLE: '1',
       CODEX_NATIVE_API_AUTH_TOKEN: 'native-secret',
     } as NodeJS.ProcessEnv,
     defaultProviderProfileId: 'qwen',
@@ -159,6 +158,18 @@ test('resolveEmbeddedCodexNativeApiOptions defaults native-api startup to the Co
     defaultModel: null,
     requestTitlePrefix: null,
   });
+});
+
+test('resolveEmbeddedCodexNativeApiOptions allows explicit native-api opt-out', () => {
+  const options = resolveEmbeddedCodexNativeApiOptions({
+    env: {
+      CODEX_NATIVE_API_ENABLE: '0',
+      CODEX_NATIVE_API_AUTH_TOKEN: 'native-secret',
+    } as NodeJS.ProcessEnv,
+    defaultProviderProfileId: 'openai-default',
+  });
+
+  assert.equal(options.enabled, false);
 });
 
 test('resolveEmbeddedCodexNativeApiOptions keeps embedded native-api on the Codex path while honoring host/port/model overrides', () => {

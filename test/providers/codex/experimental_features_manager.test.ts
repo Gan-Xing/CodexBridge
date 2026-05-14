@@ -110,3 +110,15 @@ test('CodexExperimentalFeaturesManager wraps Windows cmd shims through the shell
   assert.equal(calls[0]?.argsOrOptions?.windowsHide, true);
   assert.equal(calls[0]?.options, undefined);
 });
+
+test('CodexExperimentalFeaturesManager treats unavailable feature listing as empty', async () => {
+  const manager = new CodexExperimentalFeaturesManager({
+    execFileSyncImpl: (() => {
+      throw Object.assign(new Error('spawnSync codex ENOENT'), {
+        code: 'ENOENT',
+      });
+    }) as any,
+  });
+
+  assert.deepEqual(await manager.listFeatures(), []);
+});

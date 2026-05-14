@@ -83,7 +83,9 @@ For the current closure phase, the minimum supported localhost service shape is:
 - auth: optional bearer token via `CODEX_NATIVE_API_AUTH_TOKEN`
 - default backend target: `openai-default` / logged-in Codex app-server
 
-Recommended env block:
+Recommended env block. The embedded `weixin serve` path enables this service by
+default; keep `CODEX_NATIVE_API_ENABLE=1` in service env files for explicitness,
+or set it to `0` to disable the embedded API surface.
 
 ```env
 CODEX_NATIVE_API_ENABLE=1
@@ -100,7 +102,7 @@ pnpm exec tsx src/cli.ts codex native-api-serve
 ```
 
 ```bash
-CODEX_NATIVE_API_ENABLE=1 pnpm exec tsx src/cli.ts weixin serve
+pnpm exec tsx src/cli.ts weixin serve
 ```
 
 Minimal health checks:

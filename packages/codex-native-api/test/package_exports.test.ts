@@ -166,6 +166,7 @@ test('server health metadata reports public exposure when bound to 0.0.0.0', asy
       name: 'Test User',
       plan: 'plus',
       authMode: 'chatgpt',
+      authPath: '/tmp/codex-native-api-auth.json',
     }),
   });
   const server = new CodexNativeApiServer({
@@ -206,6 +207,7 @@ test('responses requests normalize builtin web_search tools and pass a constrain
       name: 'Test User',
       plan: 'plus',
       authMode: 'chatgpt',
+      authPath: '/tmp/codex-native-api-auth.json',
     }),
   });
   const providerProfile = {
@@ -348,6 +350,7 @@ test('responses output preserves provider tool transcript items and filters comm
       name: 'Test User',
       plan: 'plus',
       authMode: 'chatgpt',
+      authPath: '/tmp/codex-native-api-auth.json',
     }),
   });
   const providerProfile = {
@@ -463,6 +466,7 @@ test('streaming responses completed event includes recovered provider tool trans
       name: 'Test User',
       plan: 'plus',
       authMode: 'chatgpt',
+      authPath: '/tmp/codex-native-api-auth.json',
     }),
   });
   const providerProfile = {

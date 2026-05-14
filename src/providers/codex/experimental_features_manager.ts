@@ -41,8 +41,12 @@ export class CodexExperimentalFeaturesManager {
     codexCliBin?: string | null;
   } = {}): Promise<CodexExperimentalFeatureInfo[]> {
     const resolvedCliBin = normalizeCodexCliBin(codexCliBin);
-    const output = this.execCodexCliSync(resolvedCliBin, ['features', 'list']);
-    return parseCodexFeaturesListOutput(output);
+    try {
+      const output = this.execCodexCliSync(resolvedCliBin, ['features', 'list']);
+      return parseCodexFeaturesListOutput(output);
+    } catch {
+      return [];
+    }
   }
 
   async enableFeature(featureName: string, {

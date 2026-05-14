@@ -167,7 +167,8 @@ while leaving the existing generalized seams frozen in place.
    - [x] add the bridge-integrated startup path so `weixin serve` can
      optionally start the localhost native API service in the same process
      lifecycle
-     - landed via `CODEX_NATIVE_API_ENABLE=1` plus embedded
+     - landed via default-enabled embedded native API startup plus explicit
+       `CODEX_NATIVE_API_ENABLE=0` opt-out
        `CodexNativeApiService` startup inside `src/cli.ts runWeixinServe()`
    - [x] keep stop/restart behavior symmetrical so the bridge and native-api
      service can shut down together cleanly

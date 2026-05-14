@@ -2632,9 +2632,15 @@ function finishResponsesStreamState(
     return [];
   }
   state.terminalEmitted = true;
-  return [
+  const lifecycleEvents = [
     ...ensureResponsesStreamStarted(state),
     ...finishOpenResponsesStreamItems(state),
+  ];
+  const terminalOutput = Array.isArray(output)
+    ? mergeStreamReasoningWithTerminalOutput(cloneJson(state.output), output)
+    : cloneJson(state.output);
+  return [
+    ...lifecycleEvents,
     withResponsesStreamSequence(state, {
       type: 'response.completed',
       response: buildResponsesObject({
@@ -2643,12 +2649,29 @@ function finishResponsesStreamState(
         createdAt: state.createdAt,
         responseModel: state.responseModel,
         status,
-        output: Array.isArray(output) ? output : cloneJson(state.output),
+        output: terminalOutput,
         incompleteDetails,
         nativeApi: nativeApi ?? state.initialNativeApi,
         nativeRuntime,
       }),
     }),
+  ];
+}
+
+function mergeStreamReasoningWithTerminalOutput(
+  streamOutput: JsonRecord[],
+  terminalOutput: JsonRecord[],
+): JsonRecord[] {
+  if (terminalOutput.some((item) => item.type === 'reasoning')) {
+    return terminalOutput;
+  }
+  const reasoningOutput = streamOutput.filter((item) => item.type === 'reasoning');
+  if (reasoningOutput.length === 0) {
+    return terminalOutput;
+  }
+  return [
+    ...reasoningOutput,
+    ...terminalOutput,
   ];
 }
 
