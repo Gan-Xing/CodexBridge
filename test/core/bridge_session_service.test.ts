@@ -94,6 +94,28 @@ test('resolveOrCreateScopeSession reuses the same session for the same platform 
   assert.equal(openaiPlugin.calls.length, 1);
 });
 
+test('createSessionForScope assigns cumulative default readable titles when none is provided', async () => {
+  const openaiPlugin = new FakeProviderPlugin('openai-native');
+  const runtime = createCodexBridgeRuntime({
+    providerPlugins: [openaiPlugin as any],
+    providerProfiles: [makeProviderProfile('openai-default', 'openai-native', 'OpenAI Default')],
+  });
+
+  const first = await runtime.services.bridgeSessions.createSessionForScope(
+    { platform: 'weixin', externalScopeId: 'wx-user-1' },
+    { providerProfileId: 'openai-default' },
+  );
+  const second = await runtime.services.bridgeSessions.createSessionForScope(
+    { platform: 'weixin', externalScopeId: 'wx-user-2' },
+    { providerProfileId: 'openai-default' },
+  );
+
+  assert.equal(first.title, '新线程00001');
+  assert.equal(second.title, '新线程00002');
+  assert.equal(openaiPlugin.calls[0]?.title, '新线程00001');
+  assert.equal(openaiPlugin.calls[1]?.title, '新线程00002');
+});
+
 test('resolveOrCreateScopeSession backfills cwd onto an existing bound session', async () => {
   const openaiPlugin = new FakeProviderPlugin('openai-native');
   const runtime = createCodexBridgeRuntime({
@@ -194,6 +216,24 @@ test('listProviderThreads includes provider-archived threads only in archived vi
   assert.deepEqual(defaultView.items.map((item) => item.threadId), [first.codexThreadId]);
   assert.ok(allView.items.some((item) => item.threadId === second.codexThreadId && typeof item.archivedAt === 'number'));
   assert.deepEqual(openaiPlugin.archiveThreadCalls, [second.codexThreadId]);
+});
+
+test('listProviderThreads includes local sessions missing from provider list', async () => {
+  const openaiPlugin = new FakeProviderPlugin('openai-native');
+  const runtime = createCodexBridgeRuntime({
+    providerPlugins: [openaiPlugin as any],
+    providerProfiles: [makeProviderProfile('openai-default', 'openai-native', 'OpenAI Default')],
+  });
+  const session = await runtime.services.bridgeSessions.createSessionForScope(
+    { platform: 'weixin', externalScopeId: 'wx-user-1' },
+    { providerProfileId: 'openai-default' },
+  );
+  openaiPlugin.threads.delete(session.codexThreadId);
+
+  const threads = await runtime.services.bridgeSessions.listProviderThreads('openai-default');
+
+  assert.ok(threads.items.some((item) => item.threadId === session.codexThreadId));
+  assert.equal(threads.items.find((item) => item.threadId === session.codexThreadId)?.title, session.title);
 });
 
 test('archiveInternalProviderThreads archives parser-like CodexBridge threads', async () => {

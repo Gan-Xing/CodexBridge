@@ -1732,7 +1732,7 @@ test('/status includes active-turn state when a session is idle', async () => {
 
   const lines = result.messages.map((message) => message.text ?? '');
   assert.ok(lines.includes('接口配置：openai-default'));
-  assert.ok(lines.includes('会话标题：OpenAI Default thread 1'));
+  assert.ok(lines.includes('会话标题：新线程00001'));
   assert.ok(lines.includes('工作目录：/tmp/openai-default'));
   assert.ok(lines.includes('速度模式：normal'));
   assert.ok(lines.includes('模型：gpt-5.4'));
@@ -1764,7 +1764,7 @@ test('/status details includes full diagnostics for the current session', async 
 
   const lines = result.messages.map((message) => message.text ?? '');
   assert.ok(lines.some((line) => /Bridge 会话：/.test(line)));
-  assert.ok(lines.some((line) => /会话标题：OpenAI Default thread 1/.test(line)));
+  assert.ok(lines.some((line) => /会话标题：新线程00001/.test(line)));
   assert.ok(lines.some((line) => /Codex 线程：/.test(line)));
   assert.ok(lines.some((line) => /速度模式：normal/.test(line)));
   assert.ok(lines.some((line) => /审批策略：/.test(line)));
@@ -6605,8 +6605,8 @@ test('/threads renders a paged thread browser with previews and commands', async
 
   const text = result.messages[0]?.text ?? '';
   assert.match(text, /线程列表 \| openai-default/);
-  assert.match(text, /当前绑定：OpenAI Default thread 1/);
-  assert.match(text, /\* \d+\. OpenAI Default thread 1/);
+  assert.match(text, /当前绑定：新线程00001/);
+  assert.match(text, /\* \d+\. 新线程00001/);
   assert.match(text, /预览：hello from wx/);
   assert.match(text, /操作：\/open \d+  \/peek \d+  \/rename \d+ 新名字  \/threads del \d+  \/threads pin \d+  \/threads all  \/threads pin  \/search 关键词/);
 });
@@ -6678,12 +6678,12 @@ test('/next and /prev paginate the current thread browser page', async () => {
     text: '/prev',
   });
 
-  assert.match(firstPage.messages[0]?.text ?? '', /OpenAI Default thread 6/);
-  assert.doesNotMatch(firstPage.messages[0]?.text ?? '', /OpenAI Default thread 1/);
+  assert.match(firstPage.messages[0]?.text ?? '', /新线程00006/);
+  assert.doesNotMatch(firstPage.messages[0]?.text ?? '', /新线程00001/);
   assert.match(nextPage.messages[0]?.text ?? '', /第 2 页/);
-  assert.match(nextPage.messages[0]?.text ?? '', /OpenAI Default thread 1/);
+  assert.match(nextPage.messages[0]?.text ?? '', /新线程00001/);
   assert.match(previousPage.messages[0]?.text ?? '', /第 1 页/);
-  assert.match(previousPage.messages[0]?.text ?? '', /OpenAI Default thread 6/);
+  assert.match(previousPage.messages[0]?.text ?? '', /新线程00006/);
 });
 
 test('/search filters the thread browser by preview or title', async () => {
@@ -7136,7 +7136,7 @@ test('/threads del archives a thread from the default list, and /threads restore
     text: '/threads all',
   });
   assert.match(allView.messages[0]?.text ?? '', /视图：全部（含已归档）/);
-  assert.match(allView.messages[0]?.text ?? '', /OpenAI Default thread 2 \[已归档\]/);
+  assert.match(allView.messages[0]?.text ?? '', /新线程00002 \[已归档\]/);
   assert.match(allView.messages[0]?.text ?? '', /预览：newer thread/);
   assert.match(allView.messages[0]?.text ?? '', /\/threads restore 1/);
 
@@ -7212,8 +7212,8 @@ test('/threads del and /threads restore accept multiple indexes from the current
     text: '/threads all',
   });
   const allText = allView.messages[0]?.text ?? '';
-  assert.match(allText, /OpenAI Default thread 3 \[已归档\]/);
-  assert.match(allText, /OpenAI Default thread 1 \[已归档\]/);
+  assert.match(allText, /新线程00003 \[已归档\]/);
+  assert.match(allText, /新线程00001 \[已归档\]/);
 
   const restored = await runtime.services.bridgeCoordinator.handleInboundEvent({
     platform: 'weixin',
@@ -7274,9 +7274,9 @@ test('/threads pin and /threads unpin keep pinned threads at the top and support
     text: '/threads',
   });
   const defaultText = defaultView.messages[0]?.text ?? '';
-  assert.match(defaultText, /1\. OpenAI Default thread [12] \[置顶\]/u);
-  assert.match(defaultText, /2\. OpenAI Default thread [12] \[置顶\]/u);
-  assert.match(defaultText, /3\. OpenAI Default thread 3/u);
+  assert.match(defaultText, /1\. 新线程0000[12] \[置顶\]/u);
+  assert.match(defaultText, /2\. 新线程0000[12] \[置顶\]/u);
+  assert.match(defaultText, /3\. 新线程00003/u);
 
   const pinnedView = await runtime.services.bridgeCoordinator.handleInboundEvent({
     platform: 'weixin',
@@ -7285,9 +7285,9 @@ test('/threads pin and /threads unpin keep pinned threads at the top and support
   });
   const pinnedViewText = pinnedView.messages[0]?.text ?? '';
   assert.match(pinnedViewText, /视图：仅置顶/);
-  assert.match(pinnedViewText, /OpenAI Default thread 2 \[置顶\]/);
-  assert.match(pinnedViewText, /OpenAI Default thread 1 \[置顶\]/);
-  assert.doesNotMatch(pinnedViewText, /OpenAI Default thread 3/);
+  assert.match(pinnedViewText, /新线程00002 \[置顶\]/);
+  assert.match(pinnedViewText, /新线程00001 \[置顶\]/);
+  assert.doesNotMatch(pinnedViewText, /新线程00003/);
   assert.match(pinnedViewText, /\/threads unpin 1/);
 
   const unpinned = await runtime.services.bridgeCoordinator.handleInboundEvent({
@@ -7303,8 +7303,8 @@ test('/threads pin and /threads unpin keep pinned threads at the top and support
     text: '/threads pin',
   });
   const pinnedAfterText = pinnedViewAfterUnpin.messages[0]?.text ?? '';
-  assert.doesNotMatch(pinnedAfterText, /OpenAI Default thread 2 \[置顶\]/);
-  assert.match(pinnedAfterText, /OpenAI Default thread 1 \[置顶\]/);
+  assert.doesNotMatch(pinnedAfterText, /新线程00002 \[置顶\]/);
+  assert.match(pinnedAfterText, /新线程00001 \[置顶\]/);
 });
 
 test('/threads del natural language creates a pending batch draft and /threads confirm applies it', async () => {
@@ -7401,8 +7401,8 @@ test('/threads del natural language creates a pending batch draft and /threads c
   });
   const allText = allView.messages[0]?.text ?? '';
   assert.match(allText, /视图：全部（含已归档）/);
-  assert.match(allText, /OpenAI Default thread 1 \[已归档\]/);
-  assert.match(allText, /OpenAI Default thread 2 \[已归档\]/);
+  assert.match(allText, /新线程00001 \[已归档\]/);
+  assert.match(allText, /新线程00002 \[已归档\]/);
 });
 
 test('/threads cancel clears a pending natural-language batch draft', async () => {
