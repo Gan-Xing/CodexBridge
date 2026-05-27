@@ -4553,6 +4553,52 @@ test('/todo and /as natural language list queries stay local instead of creating
   assert.equal(openai.startTurnCalls.length, 0);
 });
 
+test('/as list defaults to todo records and keeps index actions aligned', async () => {
+  const defaultCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-assistant-as-list-todo-default-'));
+  const { runtime } = makeRuntime({ defaultCwd });
+  const scopeId = 'wx-user-assistant-as-list-todo-default-1';
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: scopeId,
+    text: '/log 今天整理丹达工程量',
+  });
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: scopeId,
+    text: '/log ok',
+  });
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: scopeId,
+    text: '/todo 提交施工进度图给 Porteo',
+  });
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: scopeId,
+    text: '/todo ok',
+  });
+
+  const list = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: scopeId,
+    text: '/as list',
+  });
+  const listText = list.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(listText, /助理记录 \| 待办/);
+  assert.match(listText, /施工进度图给 Porteo/);
+  assert.doesNotMatch(listText, /今天整理丹达工程量/);
+
+  const show = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: scopeId,
+    text: '/as show 1',
+  });
+  const showText = show.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(showText, /施工进度图给 Porteo/);
+  assert.doesNotMatch(showText, /今天整理丹达工程量/);
+});
+
 test('/todo can complete assistant todo records by index', async () => {
   const defaultCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'codexbridge-assistant-todo-'));
   const { runtime } = makeRuntime({ defaultCwd });

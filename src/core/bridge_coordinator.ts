@@ -2154,8 +2154,9 @@ export class BridgeCoordinator {
     const commandName = assistantCommandNameForType(forcedType);
     const action = String(args[0] ?? '').trim().toLowerCase();
     const typeFilter = forcedType ?? null;
+    const localTypeFilter = forcedType ?? 'todo';
     if (['list', 'ls', 'status'].includes(action)) {
-      return this.renderAssistantList(event, typeFilter);
+      return this.renderAssistantList(event, localTypeFilter);
     }
     if (action === 'search') {
       const query = args.slice(1).join(' ').trim();
@@ -2164,23 +2165,23 @@ export class BridgeCoordinator {
           this.t('coordinator.assistant.searchUsage', { command: commandName }),
         ], this.buildScopedSessionMeta(event));
       }
-      return this.renderAssistantList(event, typeFilter, query);
+      return this.renderAssistantList(event, localTypeFilter, query);
     }
     if (action === 'show') {
-      return this.handleAssistantShowCommand(event, args.slice(1), typeFilter);
+      return this.handleAssistantShowCommand(event, args.slice(1), localTypeFilter);
     }
     if (['done', 'complete'].includes(action)) {
-      return this.handleAssistantDoneCommand(event, args.slice(1), typeFilter);
+      return this.handleAssistantDoneCommand(event, args.slice(1), localTypeFilter);
     }
     if (['del', 'delete', 'archive'].includes(action)) {
-      return this.handleAssistantDeleteCommand(event, args.slice(1), typeFilter);
+      return this.handleAssistantDeleteCommand(event, args.slice(1), localTypeFilter);
     }
     if (action === 'ok' || action === 'confirm') {
       return this.handleAssistantConfirmCommand(event, typeFilter);
     }
     if (action === 'cancel') {
       if (args[1]) {
-        return this.handleAssistantCancelRecordCommand(event, args.slice(1), typeFilter);
+        return this.handleAssistantCancelRecordCommand(event, args.slice(1), localTypeFilter);
       }
       return this.handleAssistantCancelPendingCommand(event, typeFilter);
     }
@@ -2189,7 +2190,7 @@ export class BridgeCoordinator {
     }
     const rawInput = args.join(' ').trim();
     if (!rawInput) {
-      return this.renderAssistantList(event, typeFilter);
+      return this.renderAssistantList(event, localTypeFilter);
     }
     const localQuery = resolveAssistantRecordLocalQueryIntent(rawInput, forcedType);
     if (localQuery?.kind === 'list') {
@@ -17120,7 +17121,7 @@ function resolveAssistantRecordLocalQueryIntent(
     return null;
   }
   const inferredType = inferAssistantRecordTypeFromQueryText(value);
-  const typeFilter = forcedType ?? inferredType;
+  const typeFilter = forcedType ?? inferredType ?? 'todo';
   if (!isAssistantRecordListQuery(value, forcedType, inferredType)) {
     return null;
   }
