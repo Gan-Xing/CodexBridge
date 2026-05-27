@@ -669,6 +669,79 @@ test('CodexAppClient startServer prepends configured Codex CLI args', async () =
   assert.deepEqual(calls[0]?.args?.slice(0, 3), ['-c', 'model_provider="deepseek"', 'app-server']);
 });
 
+test('CodexAppClient startServer honors explicit websocket transport', async () => {
+  const calls = [];
+  const child = new EventEmitter() as EventEmitter & {
+    stderr: EventEmitter;
+    exitCode: number | null;
+  };
+  child.stderr = new EventEmitter();
+  child.exitCode = null;
+
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+    appServerTransport: 'websocket',
+    spawnImpl: ((command, args, options) => {
+      calls.push({ command, args, options });
+      return child as any;
+    }) as any,
+  });
+
+  client.connectWebSocket = async () => {
+    client.connected = true;
+    client.transportKind = 'websocket';
+  };
+  client.initialize = async () => {};
+
+  await client.startServer();
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.command, 'codex');
+  assert.equal(calls[0]?.args?.[0], 'app-server');
+  assert.deepEqual(calls[0]?.args?.slice(1, 2), ['--listen']);
+  assert.match(String(calls[0]?.args?.[2]), /^ws:\/\/127\.0\.0\.1:\d+$/);
+});
+
+test('CodexAppClient startServer falls back to websocket when stdio auto-start fails', async () => {
+  const calls = [];
+  const stdioChild = new EventEmitter() as EventEmitter & {
+    stderr: EventEmitter;
+    stdout: EventEmitter;
+    exitCode: number | null;
+  };
+  stdioChild.stderr = new EventEmitter();
+  stdioChild.stdout = new EventEmitter();
+  stdioChild.exitCode = 1;
+  const websocketChild = new EventEmitter() as EventEmitter & {
+    stderr: EventEmitter;
+    exitCode: number | null;
+  };
+  websocketChild.stderr = new EventEmitter();
+  websocketChild.exitCode = null;
+
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+    spawnImpl: ((command, args, options) => {
+      calls.push({ command, args, options });
+      return calls.length === 1 ? stdioChild as any : websocketChild as any;
+    }) as any,
+  });
+
+  client.connectWebSocket = async () => {
+    client.connected = true;
+    client.transportKind = 'websocket';
+  };
+  client.initialize = async () => {};
+
+  await client.startServer();
+
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[0]?.args?.slice(1, 3), ['--listen', 'stdio://']);
+  assert.deepEqual(calls[1]?.args?.slice(1, 2), ['--listen']);
+  assert.match(String(calls[1]?.args?.[2]), /^ws:\/\/127\.0\.0\.1:\d+$/);
+  assert.equal(client.transportKind, 'websocket');
+});
+
 test('CodexAppClient startServer wraps Windows cmd launchers through cmd.exe', async () => {
   const calls = [];
   const child = new EventEmitter() as EventEmitter & {

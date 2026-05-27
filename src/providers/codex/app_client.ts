@@ -1115,10 +1115,44 @@ export class CodexAppClient extends EventEmitter {
       });
       launcher.unref?.();
     }
+    const transportKinds = this.resolveAppServerTransportKinds();
+    let lastError: Error | null = null;
+    for (let index = 0; index < transportKinds.length; index += 1) {
+      const transportKind = transportKinds[index]!;
+      try {
+        await this.startServerWithTransport(transportKind);
+        return;
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error ?? 'Unknown Codex app-server start error'));
+        const willRetry = index < transportKinds.length - 1;
+        this.logDebug('app_server_start_failed', {
+          transportKind,
+          willRetry,
+          error: lastError.message,
+        });
+        await this.stop();
+        if (!willRetry) {
+          throw lastError;
+        }
+      }
+    }
+    throw lastError ?? new Error('Failed to start Codex app-server');
+  }
+
+  resolveAppServerTransportKinds(): Array<'websocket' | 'stdio'> {
+    if (this.appServerTransport === 'websocket') {
+      return ['websocket'];
+    }
+    if (this.appServerTransport === 'stdio') {
+      return ['stdio'];
+    }
+    return ['stdio', 'websocket'];
+  }
+
+  async startServerWithTransport(transportKind: 'websocket' | 'stdio'): Promise<void> {
     this.childStartError = null;
     this.childStderrTail = [];
     this.stdioLineBuffer = '';
-    const transportKind = this.resolveAppServerTransportKind();
     this.port = transportKind === 'websocket' ? await reservePort() : null;
     const featureArgs = this.enabledFeatures.flatMap((feature) => ['--enable', feature]);
     const appServerArgs = transportKind === 'websocket'
@@ -1191,19 +1225,13 @@ export class CodexAppClient extends EventEmitter {
           command: this.codexCliBin,
           exitCode: this.child.exitCode,
           stderrTail: this.childStderrTail,
+          transportKind,
         });
       }
     } else {
       await this.connectWebSocket();
     }
     await this.initialize();
-  }
-
-  resolveAppServerTransportKind(): 'websocket' | 'stdio' {
-    if (this.appServerTransport === 'websocket') {
-      return 'websocket';
-    }
-    return 'stdio';
   }
 
   handleStdioData(chunk: unknown): void {
@@ -4463,15 +4491,22 @@ function createCodexAppServerExitedError({
   command,
   exitCode,
   stderrTail,
+  transportKind = null,
 }: {
   command: string;
   exitCode: number;
   stderrTail: string[];
+  transportKind?: 'websocket' | 'stdio' | null;
 }): Error {
   const detail = stderrTail.length > 0
     ? ` Last stderr: ${stderrTail.join(' | ')}`
     : '';
-  return new Error(`Codex app-server exited before opening its WebSocket (command: "${command}", exit code: ${exitCode}).${detail}`);
+  const readiness = transportKind === 'websocket'
+    ? 'before opening its WebSocket'
+    : transportKind === 'stdio'
+      ? 'before becoming ready over stdio'
+      : 'before becoming ready';
+  return new Error(`Codex app-server exited ${readiness} (command: "${command}", exit code: ${exitCode}).${detail}`);
 }
 
 function createCodexConnectTimeoutError({
