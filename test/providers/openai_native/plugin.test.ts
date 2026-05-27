@@ -138,3 +138,37 @@ test('OpenAINativeProviderPlugin uses the Codex default model when the bridge se
     ['startTurn', 'gpt-5.1-codex-max'],
   ]);
 });
+
+test('OpenAINativeProviderPlugin delegates native thread compaction through CodexProviderPlugin', async () => {
+  const calls: any[] = [];
+  const plugin = new OpenAINativeProviderPlugin({
+    clientFactory: () => ({
+      async start() {
+        calls.push(['start']);
+      },
+      async compactThread(params: any) {
+        calls.push(['compactThread', params.threadId]);
+        return {
+          requestedThreadId: params.threadId,
+          threadId: params.threadId,
+          cwd: '/tmp/openai',
+          title: 'Compacted thread',
+          turnId: 'turn-compact-1',
+          status: 'completed',
+        };
+      },
+    }),
+  });
+
+  const result = await plugin.compactThread({
+    providerProfile: makeProfile(),
+    threadId: 'thread-openai-3',
+  });
+
+  assert.deepEqual(calls, [
+    ['start'],
+    ['compactThread', 'thread-openai-3'],
+  ]);
+  assert.equal(result.threadId, 'thread-openai-3');
+  assert.equal(result.turnId, 'turn-compact-1');
+});

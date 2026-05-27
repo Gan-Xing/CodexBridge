@@ -24,6 +24,7 @@ import type {
   ProviderPluginSkillSummary,
   ProviderSkillsListResult,
   ProviderSkillToolDependency,
+  ProviderThreadCompactResult,
   ProviderUsageReport,
   ProviderThreadListResult,
   ProviderThreadGoal,
@@ -621,6 +622,62 @@ export class CodexAppClient extends EventEmitter {
       threadId,
     }, { timeoutMs: 15_000 });
     return result?.cleared === true;
+  }
+
+  async compactThread({
+    threadId,
+    onTurnStarted = null,
+    timeoutMs = 2 * 60 * 1000,
+  }: {
+    threadId: string;
+    onTurnStarted?: ((meta: Record<string, unknown>) => Promise<void> | void) | null;
+    timeoutMs?: number;
+  }): Promise<ProviderThreadCompactResult> {
+    const startedTurnPromise = this.captureNextTurnStartedForThread(
+      threadId,
+      Math.min(Math.max(2_000, timeoutMs), 10_000),
+    );
+    const compactedThreadCapture = this.captureThreadCompactedForThread(threadId, timeoutMs);
+    try {
+      await this.request('thread/compact/start', {
+        threadId,
+      }, { timeoutMs: 15_000 });
+      let turnId = await startedTurnPromise;
+      if (turnId) {
+        if (typeof onTurnStarted === 'function') {
+          await onTurnStarted({
+            turnId,
+            threadId,
+          });
+        }
+        const turnResult = await this.waitForTurnResult({
+          threadId,
+          turnId,
+          timeoutMs,
+        });
+        if (turnResult.outputState === 'provider_error' && turnResult.errorMessage) {
+          throw new Error(turnResult.errorMessage);
+        }
+        turnId = turnResult.turnId ?? turnId;
+      }
+      const compactedThreadId = await Promise.race([
+        compactedThreadCapture.promise,
+        sleep(turnId ? 750 : Math.min(timeoutMs, 3_000)).then(() => null),
+      ]);
+      const resolvedThreadId = compactedThreadId || threadId;
+      const thread = await this.readThread(resolvedThreadId, false)
+        ?? (resolvedThreadId === threadId ? null : await this.readThread(threadId, false));
+      return {
+        requestedThreadId: threadId,
+        threadId: thread?.threadId ?? resolvedThreadId,
+        cwd: thread?.cwd ?? null,
+        title: thread?.title ?? null,
+        turnId,
+        status: turnId ? 'completed' : null,
+      };
+    } finally {
+      compactedThreadCapture.cancel();
+    }
   }
 
   async startTurn({
@@ -1356,6 +1413,44 @@ export class CodexAppClient extends EventEmitter {
       const timer = setTimeout(() => finish(null), Math.max(100, timeoutMs));
       this.on('notification', onNotification);
     });
+  }
+
+  captureThreadCompactedForThread(threadId: string, timeoutMs: number): {
+    promise: Promise<string | null>;
+    cancel: () => void;
+  } {
+    let finishRef: ((nextThreadId: string | null) => void) | null = null;
+    const promise = new Promise<string | null>((resolve) => {
+      let settled = false;
+      const finish = (nextThreadId: string | null) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        this.off('notification', onNotification);
+        resolve(nextThreadId);
+      };
+      finishRef = finish;
+      const onNotification = (message: any) => {
+        if (String(message?.method ?? '') !== 'thread/compacted') {
+          return;
+        }
+        const compacted = extractCompactedThreadIds(message);
+        if (!compacted.sourceThreadId || compacted.sourceThreadId !== threadId) {
+          return;
+        }
+        finish(compacted.nextThreadId ?? compacted.sourceThreadId);
+      };
+      const timer = setTimeout(() => finish(null), Math.max(100, timeoutMs));
+      this.on('notification', onNotification);
+    });
+    return {
+      promise,
+      cancel: () => {
+        finishRef?.(null);
+      },
+    };
   }
 
   getApprovedExecutions({
@@ -2612,6 +2707,10 @@ function summarizeRpcParams(method: string, params: any) {
         objective: typeof params?.objective === 'string' ? params.objective : null,
         status: typeof params?.status === 'string' ? params.status : null,
       };
+    case 'thread/compact/start':
+      return {
+        threadId: String(params?.threadId ?? ''),
+      };
     case 'thread/read':
       return {
         threadId: String(params?.threadId ?? ''),
@@ -2659,6 +2758,8 @@ function summarizeRpcResult(method: string, result: any) {
       return {
         cleared: result?.cleared === true,
       };
+    case 'thread/compact/start':
+      return summarizePlainObject(result);
     case 'thread/archive':
       return {};
     case 'thread/unarchive':
@@ -2832,16 +2933,56 @@ function extractThreadIdFromNotification(message: any): string | null {
   if (typeof params?.threadId === 'string') {
     return params.threadId;
   }
+  if (typeof params?.thread_id === 'string') {
+    return params.thread_id;
+  }
   if (typeof params?.conversationId === 'string') {
     return params.conversationId;
   }
   if (typeof params?.item?.threadId === 'string') {
     return params.item.threadId;
   }
+  if (typeof params?.thread?.id === 'string') {
+    return params.thread.id;
+  }
   if (typeof params?.event?.threadId === 'string') {
     return params.event.threadId;
   }
   return null;
+}
+
+function extractCompactedThreadIds(message: any): {
+  sourceThreadId: string | null;
+  nextThreadId: string | null;
+} {
+  const params = message?.params ?? null;
+  const sourceThreadId = normalizeNullableString(
+    params?.sourceThreadId
+    ?? params?.source_thread_id
+    ?? params?.previousThreadId
+    ?? params?.previous_thread_id
+    ?? params?.oldThreadId
+    ?? params?.old_thread_id
+    ?? params?.threadId
+    ?? params?.thread_id
+    ?? params?.fromThreadId
+    ?? params?.from_thread_id
+    ?? null,
+  );
+  const nextThreadId = normalizeNullableString(
+    params?.newThreadId
+    ?? params?.new_thread_id
+    ?? params?.compactedThreadId
+    ?? params?.compacted_thread_id
+    ?? params?.targetThreadId
+    ?? params?.target_thread_id
+    ?? params?.thread?.id
+    ?? null,
+  );
+  return {
+    sourceThreadId,
+    nextThreadId,
+  };
 }
 
 function truncateDebugText(value: unknown, limit = 240): string {

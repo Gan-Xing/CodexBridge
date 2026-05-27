@@ -171,6 +171,7 @@ class FakeProviderPlugin {
   reloadMcpServersCalls: any[];
   setSkillEnabledCalls: any[];
   archiveThreadCalls: any[];
+  compactThreadCalls: any[];
   unarchiveThreadCalls: any[];
   usageReport: any;
   skillEntries: any[];
@@ -287,6 +288,7 @@ class FakeProviderPlugin {
     this.reloadMcpServersCalls = [];
     this.setSkillEnabledCalls = [];
     this.archiveThreadCalls = [];
+    this.compactThreadCalls = [];
     this.unarchiveThreadCalls = [];
     this.usageReport = null;
     this.skillEntries = [];
@@ -423,6 +425,34 @@ class FakeProviderPlugin {
     this.threadGoals.delete(threadId);
     return true;
   }
+  async compactThread({ providerProfile, threadId, onTurnStarted = null }) {
+    this.compactThreadCalls.push({ providerProfile, threadId });
+    const existingThread = this.threads.get(threadId);
+    if (!existingThread) {
+      throw new Error(`thread not found: ${threadId}`);
+    }
+    const turnId = `${threadId}-compact-${this.compactThreadCalls.length}`;
+    if (typeof onTurnStarted === 'function') {
+      await onTurnStarted({
+        turnId,
+        threadId,
+      });
+    }
+    this.threads.set(threadId, {
+      ...existingThread,
+      updatedAt: this.nextUpdatedAt(),
+      preview: '[compacted]',
+    });
+    return {
+      requestedThreadId: threadId,
+      threadId,
+      cwd: existingThread.cwd ?? null,
+      title: existingThread.title ?? null,
+      turnId,
+      status: 'completed',
+    };
+  }
+
 
   async archiveThread({ threadId }) {
     this.archiveThreadCalls.push({ threadId });
@@ -5233,6 +5263,141 @@ test('/goal stays hidden until goals is enabled and then manages the native goal
   assert.equal(cleared.messages[0]?.text ?? '', '已清除当前线程目标。');
   assert.equal(openai.threadGoals.has(session?.codexThreadId ?? ''), false);
 });
+test('/compact compacts the current bound openai-default thread and keeps the binding when the thread id is unchanged', async () => {
+  const { runtime, openai } = makeRuntime();
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-compact-1',
+    text: '/new',
+  });
+  const session = runtime.services.bridgeSessions.resolveScopeSession({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-compact-1',
+  });
+  assert.ok(session);
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-compact-1',
+    text: '/compact',
+  });
+  assert.equal(result.messages[0]?.text ?? '', '已压缩当前 Codex 线程上下文。');
+  assert.equal(result.messages[1]?.text ?? '', `当前线程：${session?.codexThreadId}`);
+  assert.equal(openai.compactThreadCalls.length, 1);
+  assert.equal(openai.compactThreadCalls[0]?.threadId, session?.codexThreadId);
+});
+
+test('/compact updates the current binding when native compaction returns a replacement thread id', async () => {
+  const { runtime, openai } = makeRuntime();
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-compact-2',
+    text: '/new',
+  });
+  const session = runtime.services.bridgeSessions.resolveScopeSession({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-compact-2',
+  });
+  assert.ok(session);
+
+  openai.compactThread = async ({ providerProfile, threadId, onTurnStarted = null }: any) => {
+    openai.compactThreadCalls.push({ providerProfile, threadId });
+    if (typeof onTurnStarted === 'function') {
+      await onTurnStarted({
+        turnId: `${threadId}-compact-rebound`,
+        threadId: 'openai-default-thread-99',
+      });
+    }
+    openai.threads.set('openai-default-thread-99', {
+      threadId: 'openai-default-thread-99',
+      cwd: '/tmp/rebound',
+      title: 'rebound thread',
+      updatedAt: Date.now(),
+      preview: '[compacted]',
+      turns: [],
+    });
+    return {
+      requestedThreadId: threadId,
+      threadId: 'openai-default-thread-99',
+      cwd: '/tmp/rebound',
+      title: 'rebound thread',
+      turnId: `${threadId}-compact-rebound`,
+      status: 'completed',
+    };
+  };
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-compact-2',
+    text: '/compact',
+  });
+  assert.equal(
+    result.messages[0]?.text ?? '',
+    `已压缩当前 Codex 线程上下文，并切换线程绑定：${session?.codexThreadId} -> openai-default-thread-99`,
+  );
+  const rebound = runtime.services.bridgeSessions.resolveScopeSession({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-compact-2',
+  });
+  assert.equal(rebound?.codexThreadId, 'openai-default-thread-99');
+  assert.equal(rebound?.cwd, '/tmp/rebound');
+});
+
+test('/compact is rejected for non-openai-native providers', async () => {
+  const { runtime } = makeRuntime();
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-compact-3',
+    text: '/provider compat-default',
+  });
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-compact-3',
+    text: '/new',
+  });
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-compact-3',
+    text: '/compact',
+  });
+  assert.equal(
+    result.messages[0]?.text ?? '',
+    '当前 provider 不支持原生线程压缩。请先切到 openai-default 后再使用 /compact。',
+  );
+});
+
+test('/compact returns a guided stale-thread message when the bound native thread no longer exists', async () => {
+  const { runtime, openai } = makeRuntime();
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-compact-4',
+    text: '/new',
+  });
+  const session = runtime.services.bridgeSessions.resolveScopeSession({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-compact-4',
+  });
+  assert.ok(session);
+  openai.threads.delete(session?.codexThreadId);
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-compact-4',
+    text: '/compact',
+  });
+
+  assert.equal(
+    result.messages[0]?.text ?? '',
+    `当前绑定的 Codex 线程已失效：${session?.codexThreadId}`,
+  );
+  assert.match(result.messages[1]?.text ?? '', /请先 \/new 新建线程/);
+});
+
 
 test('legacy service tier values are normalized to fast/flex in status output', async () => {
   const { runtime, openai } = makeRuntime();

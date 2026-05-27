@@ -3693,3 +3693,120 @@ test('CodexAppClient returns interrupted when terminal turn reports interruption
   assert.equal(result.previewText, '');
   assert.equal(result.finalSource, 'none');
 });
+
+test('CodexAppClient compacts a thread through thread/compact/start and returns the current thread summary', async () => {
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+  });
+  const calls: Array<{ method: string; params: any }> = [];
+
+  client.captureNextTurnStartedForThread = async () => 'turn-compact-1';
+  client.waitForTurnResult = async () => ({
+    outputText: '',
+    outputState: 'complete',
+    turnId: 'turn-compact-1',
+    finalSource: 'thread_read',
+  });
+  client.readThread = async (threadId: string) => ({
+    threadId,
+    cwd: '/tmp/work',
+    title: 'Compacted thread',
+    updatedAt: null,
+    preview: null,
+    turns: null,
+  });
+  client.request = async (method, params) => {
+    calls.push({ method, params });
+    return {};
+  };
+
+  const started: any[] = [];
+  const result = await client.compactThread({
+    threadId: 'thread-1',
+    onTurnStarted: (meta) => {
+      started.push(meta);
+    },
+  });
+
+  assert.deepEqual(calls, [{
+    method: 'thread/compact/start',
+    params: { threadId: 'thread-1' },
+  }]);
+  assert.deepEqual(started, [{
+    turnId: 'turn-compact-1',
+    threadId: 'thread-1',
+  }]);
+  assert.deepEqual(result, {
+    requestedThreadId: 'thread-1',
+    threadId: 'thread-1',
+    cwd: '/tmp/work',
+    title: 'Compacted thread',
+    turnId: 'turn-compact-1',
+    status: 'completed',
+  });
+});
+
+test('CodexAppClient adopts a replacement thread id when thread/compacted is emitted', async () => {
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+  });
+
+  client.captureNextTurnStartedForThread = async () => null;
+  client.readThread = async (threadId: string) => ({
+    threadId,
+    cwd: `/tmp/${threadId}`,
+    title: `Thread ${threadId}`,
+    updatedAt: null,
+    preview: null,
+    turns: null,
+  });
+  client.request = async (method, params) => {
+    assert.equal(method, 'thread/compact/start');
+    assert.deepEqual(params, { threadId: 'thread-1' });
+    queueMicrotask(() => {
+      client.emit('notification', {
+        method: 'thread/compacted',
+        params: {
+          sourceThreadId: 'thread-1',
+          newThreadId: 'thread-2',
+        },
+      });
+    });
+    return {};
+  };
+
+  const result = await client.compactThread({
+    threadId: 'thread-1',
+  });
+
+  assert.equal(result.requestedThreadId, 'thread-1');
+  assert.equal(result.threadId, 'thread-2');
+  assert.equal(result.cwd, '/tmp/thread-2');
+  assert.equal(result.title, 'Thread thread-2');
+  assert.equal(result.turnId, null);
+  assert.equal(result.status, null);
+});
+
+test('CodexAppClient clears compact listeners when compaction fails with provider_error', async () => {
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+  });
+
+  client.captureNextTurnStartedForThread = async () => 'turn-compact-error-1';
+  client.waitForTurnResult = async () => ({
+    outputText: '',
+    outputState: 'provider_error',
+    turnId: 'turn-compact-error-1',
+    finalSource: 'thread_read',
+    errorMessage: 'thread not found: thread-1',
+  });
+  client.request = async () => ({});
+
+  await assert.rejects(
+    client.compactThread({
+      threadId: 'thread-1',
+    }),
+    /thread not found: thread-1/,
+  );
+  assert.equal(client.listenerCount('notification'), 0);
+});

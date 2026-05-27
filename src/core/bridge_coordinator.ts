@@ -1375,6 +1375,8 @@ export class BridgeCoordinator {
         return this.handlePlanCommand(event, command.args);
       case 'experimental':
         return this.handleExperimentalCommand(event, command.args);
+      case 'compact':
+        return this.handleCompactCommand(event, command.args);
       case 'goal':
         return this.handleGoalCommand(event, command.args);
       case 'personality':
@@ -4701,6 +4703,82 @@ export class BridgeCoordinator {
     }
   }
 
+  async handleCompactCommand(event, args) {
+    if (args.length > 0) {
+      return this.handleHelpsCommand(event, ['compact']);
+    }
+    const blocked = await this.rejectIfActiveTurnForCommand(event, 'compact');
+    if (blocked) {
+      return blocked;
+    }
+    const resolved = await this.resolveNativeCompactCommandContext(event);
+    if ('response' in resolved) {
+      return resolved.response;
+    }
+    const { scopeRef, session, providerProfile, providerPlugin } = resolved;
+    this.activeTurns?.beginScopeTurn(scopeRef, {
+      bridgeSessionId: session.id,
+      providerProfileId: providerProfile.id,
+      threadId: session.codexThreadId,
+    });
+    const expectedActiveTurn = this.activeTurns?.resolveScopeTurn(scopeRef) ?? null;
+    try {
+      const compacted = await providerPlugin.compactThread({
+        providerProfile,
+        threadId: session.codexThreadId,
+        onTurnStarted: async (meta: { turnId?: string | null; threadId?: string | null } = {}) => {
+          const active = this.activeTurns?.updateScopeTurn(scopeRef, {
+            bridgeSessionId: session.id,
+            providerProfileId: providerProfile.id,
+            threadId: meta.threadId ?? session.codexThreadId,
+            turnId: meta.turnId ?? null,
+          }) ?? null;
+          if (active?.interruptRequested && active.turnId && !active.interruptDispatched) {
+            await this.dispatchInterruptForActiveTurn(active);
+          }
+        },
+      });
+      const nextSession = compacted.threadId !== session.codexThreadId
+        ? this.bridgeSessions.updateSession(session.id, {
+          codexThreadId: compacted.threadId,
+          cwd: compacted.cwd ?? session.cwd,
+          title: compacted.title ?? session.title,
+        })
+        : session;
+      const lines = compacted.threadId !== session.codexThreadId
+        ? [
+          this.t('coordinator.compact.completedRebound', {
+            previous: session.codexThreadId,
+            current: compacted.threadId,
+          }),
+        ]
+        : [
+          this.t('coordinator.compact.completed'),
+          this.t('coordinator.compact.threadBound', {
+            value: compacted.threadId,
+          }),
+        ];
+      return messageResponse(lines, buildSessionMeta(nextSession));
+    } catch (error) {
+      if (isStaleThreadError(error)) {
+        return messageResponse([
+          this.t('coordinator.compact.staleThread', {
+            threadId: session.codexThreadId,
+          }),
+          this.t('coordinator.compact.rebindHint'),
+        ], buildSessionMeta(session));
+      }
+      return messageResponse([
+        this.t('coordinator.compact.failed', { error: formatUserError(error) }),
+      ], buildSessionMeta(session));
+    } finally {
+      await this.releaseActiveTurnIfStillRunning(scopeRef, {
+        localTurnFinished: true,
+        expectedActiveTurn,
+      });
+    }
+  }
+
   async handleGoalCommand(event, args) {
     if (!(await this.isCodexGoalCommandAvailable())) {
       return messageResponse([
@@ -4886,6 +4964,41 @@ export class BridgeCoordinator {
       return {
         response: messageResponse([
           this.t('coordinator.goal.providerUnsupported'),
+        ], buildSessionMeta(session)),
+      };
+    }
+    return {
+      scopeRef,
+      session,
+      providerProfile,
+      providerPlugin,
+    };
+  }
+
+  async resolveNativeCompactCommandContext(event) {
+    const scopeRef = toScopeRef(event);
+    const session = this.resolveSessionForEvent(scopeRef, event);
+    if (!session) {
+      return {
+        response: messageResponse([
+          this.t('coordinator.compact.noThread'),
+          this.t('coordinator.compact.setupHint'),
+        ], this.buildScopedSessionMeta(event)),
+      };
+    }
+    const providerProfile = this.requireProviderProfile(session.providerProfileId);
+    if (providerProfile?.providerKind !== 'openai-native') {
+      return {
+        response: messageResponse([
+          this.t('coordinator.compact.providerUnsupported'),
+        ], buildSessionMeta(session)),
+      };
+    }
+    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+    if (typeof providerPlugin?.compactThread !== 'function') {
+      return {
+        response: messageResponse([
+          this.t('coordinator.compact.providerUnsupported'),
         ], buildSessionMeta(session)),
       };
     }
@@ -11911,6 +12024,7 @@ function renderCommandBlockedMessage(commandName, interruptRequested, i18n: Tran
     open: i18n.t('coordinator.action.open'),
     models: i18n.t('coordinator.action.models'),
     model: i18n.t('coordinator.action.model'),
+    compact: i18n.t('coordinator.action.compact'),
     personality: i18n.t('coordinator.action.personality'),
     instructions: i18n.t('coordinator.action.instructions'),
     fast: i18n.t('coordinator.action.fast'),
@@ -17949,6 +18063,21 @@ function getCommandHelpSpecs(i18n: Translator) {
       i18n.t('coordinator.help.note.experimental'),
     ],
   }),
+  compact: freezeCommandHelp({
+    name: 'compact',
+    aliases: [],
+    summary: i18n.t('coordinator.help.summary.compact'),
+    usage: [
+      '/compact',
+      '/compact -h',
+    ],
+    examples: [
+      '/compact',
+    ],
+    notes: [
+      i18n.t('coordinator.help.note.compact'),
+    ],
+  }),
   goal: freezeCommandHelp({
     name: 'goal',
     aliases: [],
@@ -18324,6 +18453,7 @@ const COMMAND_HELP_ORDER = Object.freeze([
   'model',
   'plan',
   'experimental',
+  'compact',
   'goal',
   'personality',
   'instructions',
@@ -18374,6 +18504,7 @@ const COMMAND_ALIAS_DEFINITIONS = Object.freeze({
   model: ['m'],
   plan: ['pl'],
   experimental: ['experiment', 'experiments', 'exp'],
+  compact: [],
   goal: [],
   personality: ['psn'],
   instructions: ['ins'],

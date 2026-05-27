@@ -157,6 +157,15 @@ export interface ProviderThreadGoal {
   updatedAt?: string | null;
 }
 
+export interface ProviderThreadCompactResult {
+  requestedThreadId: string;
+  threadId: string;
+  cwd: string | null;
+  title: string | null;
+  turnId: string | null;
+  status: string | null;
+}
+
 export interface ProviderThreadStartResult {
   threadId: string;
   cwd: string | null;
@@ -448,6 +457,11 @@ export interface ProviderPluginContract {
     providerProfile: ProviderProfile;
     threadId: string;
   }): Promise<boolean>;
+  compactThread?(params: {
+    providerProfile: ProviderProfile;
+    threadId: string;
+    onTurnStarted?: ((meta: Record<string, unknown>) => Promise<void> | void) | null;
+  }): Promise<ProviderThreadCompactResult>;
   listThreads(params: {
     providerProfile: ProviderProfile;
     limit?: number;

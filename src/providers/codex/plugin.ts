@@ -165,6 +165,22 @@ export class CodexProviderPlugin {
     return client.clearThreadGoal(threadId);
   }
 
+  async compactThread({
+    providerProfile,
+    threadId,
+    onTurnStarted = null,
+  }: {
+    providerProfile: ProviderProfile;
+    threadId: string;
+    onTurnStarted?: ((meta: Record<string, unknown>) => Promise<void> | void) | null;
+  }) {
+    const client = await this.ensureClient(providerProfile);
+    return client.compactThread({
+      threadId,
+      onTurnStarted,
+    });
+  }
+
   async listThreads({
     providerProfile,
     limit = 20,
