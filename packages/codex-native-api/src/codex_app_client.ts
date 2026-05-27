@@ -342,6 +342,8 @@ export class CodexAppClient extends EventEmitter {
 
   socket: WebSocket | null;
 
+  stdioLineBuffer: string;
+
   pending: Map<string, PendingRequest>;
 
   pendingApprovals: Map<string, PendingApproval>;
@@ -398,6 +400,7 @@ export class CodexAppClient extends EventEmitter {
 
     this.child = null;
     this.socket = null;
+    this.stdioLineBuffer = '';
     this.pending = new Map();
     this.pendingApprovals = new Map();
     this.approvedExecutions = new Map();
@@ -1019,21 +1022,22 @@ export class CodexAppClient extends EventEmitter {
     }
     this.childStartError = null;
     this.childStderrTail = [];
-    this.port = await reservePort();
+    this.stdioLineBuffer = '';
+    this.port = null;
     const featureArgs = this.enabledFeatures.flatMap((feature) => ['--enable', feature]);
     const launchSpec = createCodexAppServerLaunchSpec({
       command: this.codexCliBin,
-      args: [...this.codexCliArgs, 'app-server', ...featureArgs, '--listen', `ws://127.0.0.1:${this.port}`],
+      args: [...this.codexCliArgs, 'app-server', ...featureArgs, '--listen', 'stdio://'],
       platform: this.platform,
     });
     try {
       this.child = launchSpec.args
         ? this.spawnImpl(launchSpec.command, launchSpec.args, {
-          stdio: ['ignore', 'pipe', 'pipe'],
+          stdio: ['pipe', 'pipe', 'pipe'],
           ...launchSpec.options,
         })
         : this.spawnImpl(launchSpec.command, {
-          stdio: ['ignore', 'pipe', 'pipe'],
+          stdio: ['pipe', 'pipe', 'pipe'],
           ...launchSpec.options,
         });
     } catch (error) {
@@ -1053,6 +1057,7 @@ export class CodexAppClient extends EventEmitter {
       autolaunch: this.autolaunch,
       launchCommand: this.launchCommand,
     });
+    this.child.stdout?.on('data', (chunk) => this.handleStdioData(chunk));
     this.child.stderr?.on('data', (chunk) => {
       const text = String(chunk).trim();
       if (text) {
@@ -1071,8 +1076,34 @@ export class CodexAppClient extends EventEmitter {
       this.connected = false;
       this.socket = null;
     });
-    await this.connectWebSocket();
+    this.connected = true;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    if (this.childStartError) {
+      throw this.childStartError;
+    }
+    if (this.child && this.child.exitCode !== null) {
+      throw createCodexAppServerExitedError({
+        command: this.codexCliBin,
+        exitCode: this.child.exitCode,
+        stderrTail: this.childStderrTail,
+      });
+    }
     await this.initialize();
+  }
+
+  handleStdioData(chunk: unknown): void {
+    this.stdioLineBuffer += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk ?? '');
+    for (;;) {
+      const newlineIndex = this.stdioLineBuffer.indexOf('\n');
+      if (newlineIndex < 0) {
+        break;
+      }
+      const line = this.stdioLineBuffer.slice(0, newlineIndex).trim();
+      this.stdioLineBuffer = this.stdioLineBuffer.slice(newlineIndex + 1);
+      if (line) {
+        this.handleMessage(line);
+      }
+    }
   }
 
   async connectWebSocket(): Promise<void> {
@@ -1140,7 +1171,7 @@ export class CodexAppClient extends EventEmitter {
   }
 
   async request(method: string, params: any, { timeoutMs = 30_000 }: { timeoutMs?: number } = {}): Promise<any> {
-    if (!this.socket || !this.connected) {
+    if (!this.child || !this.connected) {
       await this.start();
     }
     const id = String(++this.requestId);
@@ -1191,10 +1222,10 @@ export class CodexAppClient extends EventEmitter {
   }
 
   send(payload: any): void {
-    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
-      throw new Error('Codex app-server socket is not open');
+    if (!this.child?.stdin?.writable) {
+      throw new Error('Codex app-server stdio is not open');
     }
-    this.socket.send(JSON.stringify(payload));
+    this.child.stdin.write(`${JSON.stringify(payload)}\n`);
   }
 
   handleMessage(raw: string): void {

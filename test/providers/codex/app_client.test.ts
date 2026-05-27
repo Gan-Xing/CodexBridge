@@ -618,7 +618,7 @@ test('CodexAppClient startServer inherits the default Codex feature config when 
     exitCode: number | null;
   };
   child.stderr = new EventEmitter();
-  child.exitCode = 0;
+  child.exitCode = null;
 
   const client = new CodexAppClient({
     codexCliBin: 'codex',
@@ -638,8 +638,7 @@ test('CodexAppClient startServer inherits the default Codex feature config when 
   assert.equal(calls.length, 1);
   assert.equal(calls[0]?.command, 'codex');
   assert.equal(calls[0]?.args?.[0], 'app-server');
-  assert.deepEqual(calls[0]?.args?.slice(1, 2), ['--listen']);
-  assert.match(String(calls[0]?.args?.[2]), /^ws:\/\/127\.0\.0\.1:\d+$/);
+  assert.deepEqual(calls[0]?.args?.slice(1, 3), ['--listen', 'stdio://']);
 });
 
 test('CodexAppClient startServer prepends configured Codex CLI args', async () => {
@@ -649,7 +648,7 @@ test('CodexAppClient startServer prepends configured Codex CLI args', async () =
     exitCode: number | null;
   };
   child.stderr = new EventEmitter();
-  child.exitCode = 0;
+  child.exitCode = null;
 
   const client = new CodexAppClient({
     codexCliBin: 'codex',
@@ -677,7 +676,7 @@ test('CodexAppClient startServer wraps Windows cmd launchers through cmd.exe', a
     exitCode: number | null;
   };
   child.stderr = new EventEmitter();
-  child.exitCode = 0;
+  child.exitCode = null;
 
   const client = new CodexAppClient({
     codexCliBin: 'C:\\Program Files\\Codex\\codex.cmd',
@@ -703,7 +702,7 @@ test('CodexAppClient startServer wraps Windows cmd launchers through cmd.exe', a
   assert.equal(calls[0]?.args, null);
   assert.equal(calls[0]?.options?.shell, true);
   assert.equal(calls[0]?.options?.windowsHide, true);
-  assert.match(String(calls[0]?.command), /^"C:\\Program Files\\Codex\\codex\.cmd" app-server --listen ws:\/\/127\.0\.0\.1:\d+$/);
+  assert.match(String(calls[0]?.command), /^"C:\\Program Files\\Codex\\codex\.cmd" app-server --listen stdio:\/\/$/);
 });
 
 test('CodexAppClient startServer surfaces a helpful Windows Codex ENOENT error', async () => {

@@ -1123,7 +1123,7 @@ export class CodexAppClient extends EventEmitter {
     const featureArgs = this.enabledFeatures.flatMap((feature) => ['--enable', feature]);
     const appServerArgs = transportKind === 'websocket'
       ? [...this.codexCliArgs, 'app-server', ...featureArgs, '--listen', `ws://127.0.0.1:${this.port}`]
-      : [...this.codexCliArgs, 'app-server', ...featureArgs];
+      : [...this.codexCliArgs, 'app-server', ...featureArgs, '--listen', 'stdio://'];
     const launchSpec = createCodexAppServerLaunchSpec({
       command: this.codexCliBin,
       args: appServerArgs,
@@ -1182,6 +1182,17 @@ export class CodexAppClient extends EventEmitter {
     if (transportKind === 'stdio') {
       this.transportKind = 'stdio';
       this.connected = true;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      if (this.childStartError) {
+        throw this.childStartError;
+      }
+      if (this.child && this.child.exitCode !== null) {
+        throw createCodexAppServerExitedError({
+          command: this.codexCliBin,
+          exitCode: this.child.exitCode,
+          stderrTail: this.childStderrTail,
+        });
+      }
     } else {
       await this.connectWebSocket();
     }
@@ -1189,10 +1200,10 @@ export class CodexAppClient extends EventEmitter {
   }
 
   resolveAppServerTransportKind(): 'websocket' | 'stdio' {
-    if (this.appServerTransport === 'stdio') {
-      return 'stdio';
+    if (this.appServerTransport === 'websocket') {
+      return 'websocket';
     }
-    return 'websocket';
+    return 'stdio';
   }
 
   handleStdioData(chunk: unknown): void {
