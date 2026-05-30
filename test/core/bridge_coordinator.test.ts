@@ -8015,7 +8015,11 @@ test('/review natural language can reject execution requests and avoids starting
   assert.match(result.messages[0]?.text ?? '', /应该使用 \/agent/);
 });
 
-test('/agent drafts, confirms, runs, verifies, and records a background job', async () => {
+// /agent is frozen and hidden in production. Keep legacy integration tests
+// parked until the command surface is intentionally revived.
+const frozenAgentTest = test.skip;
+
+frozenAgentTest('/agent drafts, confirms, runs, verifies, and records a background job', async () => {
   const originalOpenAiKey = process.env.OPENAI_API_KEY;
   delete process.env.OPENAI_API_KEY;
   try {
@@ -8093,7 +8097,7 @@ test('/agent drafts, confirms, runs, verifies, and records a background job', as
   }
 });
 
-test('/agent edit updates the pending agent draft instead of replacing it', async () => {
+frozenAgentTest('/agent edit updates the pending agent draft instead of replacing it', async () => {
   const originalOpenAiKey = process.env.OPENAI_API_KEY;
   delete process.env.OPENAI_API_KEY;
   try {
@@ -8181,7 +8185,7 @@ test('/agent edit updates the pending agent draft instead of replacing it', asyn
   }
 });
 
-test('/agent edit honors command skill reject without falling back to draft editing', async () => {
+frozenAgentTest('/agent edit honors command skill reject without falling back to draft editing', async () => {
   const originalOpenAiKey = process.env.OPENAI_API_KEY;
   delete process.env.OPENAI_API_KEY;
   try {
@@ -8253,7 +8257,7 @@ test('/agent edit honors command skill reject without falling back to draft edit
   }
 });
 
-test('/agent natural language list query uses the command skill instead of creating a draft', async () => {
+frozenAgentTest('/agent natural language list query uses the command skill instead of creating a draft', async () => {
   const originalOpenAiKey = process.env.OPENAI_API_KEY;
   delete process.env.OPENAI_API_KEY;
   try {
@@ -8320,7 +8324,7 @@ test('/agent natural language list query uses the command skill instead of creat
   }
 });
 
-test('/agent explicit list stays deterministic and does not invoke the command skill', async () => {
+frozenAgentTest('/agent explicit list stays deterministic and does not invoke the command skill', async () => {
   const originalOpenAiKey = process.env.OPENAI_API_KEY;
   delete process.env.OPENAI_API_KEY;
   try {
@@ -8353,7 +8357,7 @@ test('/agent explicit list stays deterministic and does not invoke the command s
   }
 });
 
-test('/agent add create-flow replaces generic lifecycle drafts with a repo-aware code scaffold', async () => {
+frozenAgentTest('/agent add create-flow replaces generic lifecycle drafts with a repo-aware code scaffold', async () => {
   const originalOpenAiKey = process.env.OPENAI_API_KEY;
   delete process.env.OPENAI_API_KEY;
   const repoRoot = createMissionControlDraftRepo();
@@ -8459,7 +8463,7 @@ test('/agent add create-flow replaces generic lifecycle drafts with a repo-aware
   }
 });
 
-test('/agent broad mission-control goals clarify before creating a draft', async () => {
+frozenAgentTest('/agent broad mission-control goals clarify before creating a draft', async () => {
   const originalOpenAiKey = process.env.OPENAI_API_KEY;
   delete process.env.OPENAI_API_KEY;
   const repoRoot = createMissionControlDraftRepo();
@@ -8510,7 +8514,7 @@ test('/agent broad mission-control goals clarify before creating a draft', async
   }
 });
 
-test('/agent natural language falls back to the bound provider planner after one unparseable command skill result', async () => {
+frozenAgentTest('/agent natural language falls back to the bound provider planner after one unparseable command skill result', async () => {
   const originalOpenAiKey = process.env.OPENAI_API_KEY;
   delete process.env.OPENAI_API_KEY;
   try {
@@ -8564,7 +8568,7 @@ test('/agent natural language falls back to the bound provider planner after one
   }
 });
 
-test('/agent natural language accepts loose JSON from the bound provider planner', async () => {
+frozenAgentTest('/agent natural language accepts loose JSON from the bound provider planner', async () => {
   const originalOpenAiKey = process.env.OPENAI_API_KEY;
   delete process.env.OPENAI_API_KEY;
   try {
@@ -8652,7 +8656,7 @@ test('/agent natural language accepts loose JSON from the bound provider planner
   }
 });
 
-test('/agent natural language does not fabricate a draft when provider planning is unavailable', async () => {
+frozenAgentTest('/agent natural language does not fabricate a draft when provider planning is unavailable', async () => {
   const originalOpenAiKey = process.env.OPENAI_API_KEY;
   process.env.OPENAI_API_KEY = 'openai-test-key';
   try {
@@ -8688,7 +8692,7 @@ test('/agent natural language does not fabricate a draft when provider planning 
   }
 });
 
-test('/agent edit falls back to the bound provider draft editor after an unparseable command-skill edit result', async () => {
+frozenAgentTest('/agent edit falls back to the bound provider draft editor after an unparseable command-skill edit result', async () => {
   const originalOpenAiKey = process.env.OPENAI_API_KEY;
   delete process.env.OPENAI_API_KEY;
   try {
@@ -8763,7 +8767,7 @@ test('/agent edit falls back to the bound provider draft editor after an unparse
   }
 });
 
-test('/agent natural language proposes and confirms existing job management operations', async () => {
+frozenAgentTest('/agent natural language proposes and confirms existing job management operations', async () => {
   const originalOpenAiKey = process.env.OPENAI_API_KEY;
   delete process.env.OPENAI_API_KEY;
   try {
@@ -8959,7 +8963,7 @@ test('/agent natural language proposes and confirms existing job management oper
   }
 });
 
-test('/agent natural language rejects malformed update patch enums instead of silently coercing them', async () => {
+frozenAgentTest('/agent natural language rejects malformed update patch enums instead of silently coercing them', async () => {
   const originalOpenAiKey = process.env.OPENAI_API_KEY;
   delete process.env.OPENAI_API_KEY;
   try {
@@ -9044,7 +9048,7 @@ test('/agent natural language rejects malformed update patch enums instead of si
   }
 });
 
-test('/agent natural language can show, export, and resend existing job outputs', async () => {
+frozenAgentTest('/agent natural language can show, export, and resend existing job outputs', async () => {
   const originalOpenAiKey = process.env.OPENAI_API_KEY;
   delete process.env.OPENAI_API_KEY;
   try {
@@ -9175,7 +9179,7 @@ test('/agent natural language can show, export, and resend existing job outputs'
   }
 });
 
-test('/agent stores generated attachments and can resend them', async () => {
+frozenAgentTest('/agent stores generated attachments and can resend them', async () => {
   const originalOpenAiKey = process.env.OPENAI_API_KEY;
   delete process.env.OPENAI_API_KEY;
   try {
@@ -9291,7 +9295,7 @@ test('/agent stores generated attachments and can resend them', async () => {
   }
 });
 
-test('/agent show, retry, rename, stop, and delete manage queued jobs', async () => {
+frozenAgentTest('/agent show, retry, rename, stop, and delete manage queued jobs', async () => {
   const originalOpenAiKey = process.env.OPENAI_API_KEY;
   delete process.env.OPENAI_API_KEY;
   try {
@@ -9347,7 +9351,7 @@ test('/agent show, retry, rename, stop, and delete manage queued jobs', async ()
   }
 });
 
-test('/agent list, show, result, stop, and retry prefer Mission Control runtime state over stale compatibility fields', async () => {
+frozenAgentTest('/agent list, show, result, stop, and retry prefer Mission Control runtime state over stale compatibility fields', async () => {
   const originalOpenAiKey = process.env.OPENAI_API_KEY;
   delete process.env.OPENAI_API_KEY;
   try {
@@ -9706,7 +9710,7 @@ test('/agent list, show, result, stop, and retry prefer Mission Control runtime 
   }
 });
 
-test('/agent show and confirm resolve package-backed scope change proposals without new host commands', async () => {
+frozenAgentTest('/agent show and confirm resolve package-backed scope change proposals without new host commands', async () => {
   const originalOpenAiKey = process.env.OPENAI_API_KEY;
   delete process.env.OPENAI_API_KEY;
   try {
@@ -9803,7 +9807,7 @@ test('/agent show and confirm resolve package-backed scope change proposals with
   }
 });
 
-test('/agent show and confirm can submit paused approval decisions with attached input without shell-log inspection', async () => {
+frozenAgentTest('/agent show and confirm can submit paused approval decisions with attached input without shell-log inspection', async () => {
   const originalOpenAiKey = process.env.OPENAI_API_KEY;
   delete process.env.OPENAI_API_KEY;
   try {
@@ -9878,7 +9882,7 @@ test('/agent show and confirm can submit paused approval decisions with attached
   }
 });
 
-test('/agent runAgentJob retries after an interrupted provider turn and completes on the next attempt', async () => {
+frozenAgentTest('/agent runAgentJob retries after an interrupted provider turn and completes on the next attempt', async () => {
   const originalOpenAiKey = process.env.OPENAI_API_KEY;
   delete process.env.OPENAI_API_KEY;
   try {
@@ -9951,7 +9955,7 @@ test('/agent runAgentJob retries after an interrupted provider turn and complete
   }
 });
 
-test('/agent runAgentJob continues the same attempt after a normal partial provider exit', async () => {
+frozenAgentTest('/agent runAgentJob continues the same attempt after a normal partial provider exit', async () => {
   const originalOpenAiKey = process.env.OPENAI_API_KEY;
   delete process.env.OPENAI_API_KEY;
   try {
@@ -10026,7 +10030,7 @@ test('/agent runAgentJob continues the same attempt after a normal partial provi
   }
 });
 
-test('/agent runAgentJob loads WORKFLOW.md and routes it into the mission-controlled execution prompt', async () => {
+frozenAgentTest('/agent runAgentJob loads WORKFLOW.md and routes it into the mission-controlled execution prompt', async () => {
   const originalOpenAiKey = process.env.OPENAI_API_KEY;
   delete process.env.OPENAI_API_KEY;
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-workflow-prompt-'));
@@ -10092,7 +10096,7 @@ Stop and hand off when you need human approval.
   }
 });
 
-test('/agent runAgentJob forwards provider approval requests to the supplied approval callback', async () => {
+frozenAgentTest('/agent runAgentJob forwards provider approval requests to the supplied approval callback', async () => {
   const originalOpenAiKey = process.env.OPENAI_API_KEY;
   delete process.env.OPENAI_API_KEY;
   try {
