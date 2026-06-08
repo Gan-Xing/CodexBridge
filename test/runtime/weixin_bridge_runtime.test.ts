@@ -37,6 +37,7 @@ interface RuntimeHarnessOptions {
   commitSyncCursor?: (syncCursor: string) => Promise<void> | void;
   previewSoftTargetBytes?: number;
   previewIntervalMs?: number;
+  progressDeliveryEnabled?: boolean;
   typingKeepaliveMs?: number;
   inboundAttachmentMergeWindowMs?: number;
   automationPollMs?: number;
@@ -55,6 +56,7 @@ function makeRuntime({
   commitSyncCursor,
   previewSoftTargetBytes = 1,
   previewIntervalMs = 0,
+  progressDeliveryEnabled = true,
   typingKeepaliveMs = 8000,
   inboundAttachmentMergeWindowMs = 3000,
   automationPollMs = 30_000,
@@ -109,6 +111,7 @@ function makeRuntime({
     assistantRecords,
     previewSoftTargetBytes,
     previewIntervalMs,
+    progressDeliveryEnabled,
     typingKeepaliveMs,
     inboundAttachmentMergeWindowMs,
     automationPollMs,
@@ -1535,6 +1538,38 @@ test('WeixinBridgeRuntime merges commentary and final-answer progress into the p
   assert.deepEqual(sent, [
     { externalScopeId: 'wxid_1', content: '我先检查一下上下文。' },
     { externalScopeId: 'wxid_1', content: '最终答案第一段。\n\n最终答案第二段。' },
+  ]);
+});
+
+test('WeixinBridgeRuntime can disable Weixin progress preview delivery and send only the final response', async () => {
+  const sent: Array<{ externalScopeId: string; content: string }> = [];
+  const runtime = makeRuntime({
+    sendText: async ({ externalScopeId, content }) => {
+      sent.push({ externalScopeId, content });
+    },
+    progressDeliveryEnabled: false,
+    previewSoftTargetBytes: 1024,
+    coordinator: {
+      async handleInboundEvent(_event: any, options: any = {}) {
+        await options.onProgress?.({
+          text: '第一段预览。',
+          delta: '第一段预览。',
+          outputKind: 'commentary',
+        });
+        await options.onProgress?.({
+          text: '最终答案。',
+          delta: '最终答案。',
+          outputKind: 'final_answer',
+        });
+        return completeResponse('最终答案。');
+      },
+    },
+  });
+
+  await runtime.runOnce();
+
+  assert.deepEqual(sent, [
+    { externalScopeId: 'wxid_1', content: '最终答案。' },
   ]);
 });
 

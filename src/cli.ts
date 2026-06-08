@@ -237,6 +237,7 @@ async function runWeixinServe(args: string[]) {
     automationJobs: runtime.services.automationJobs,
     agentJobs: runtime.services.agentJobs,
     assistantRecords: runtime.services.assistantRecords,
+    progressDeliveryEnabled: parseBooleanEnv(process.env.CODEXBRIDGE_WEIXIN_PROGRESS_DELIVERY, false),
     onError: (async (error: unknown) => {
       process.stderr.write(`[weixin] ${formatError(error)}\n`);
     }) as any,
