@@ -116,13 +116,71 @@ export class BridgeSessionService {
   async resolveOrCreateScopeSession(scopeRef: PlatformScopeRef, options: SessionCreationOptions): Promise<BridgeSession> {
     const existing = this.resolveScopeSession(scopeRef);
     if (existing) {
+      const restorableExisting = await this.restoreBoundSessionIfArchived(existing);
       const resolvedCwd = normalizeCwd(options?.cwd);
-      if (!existing.cwd && resolvedCwd) {
-        return this.updateSession(existing.id, { cwd: resolvedCwd });
+      if (!restorableExisting.cwd && resolvedCwd) {
+        return this.updateSession(restorableExisting.id, { cwd: resolvedCwd });
       }
-      return existing;
+      return restorableExisting;
     }
     return this.createSessionForScope(scopeRef, options);
+  }
+
+  async restoreBoundSessionIfArchived(session: BridgeSession): Promise<BridgeSession> {
+    const providerProfile = this.providerProfiles.get(session.providerProfileId);
+    if (!providerProfile) {
+      return session;
+    }
+    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+    const archived = await this.isProviderThreadArchived(
+      providerPlugin,
+      providerProfile,
+      session.codexThreadId,
+    );
+    if (!archived) {
+      return session;
+    }
+    if (typeof providerPlugin.unarchiveThread === 'function') {
+      await providerPlugin.unarchiveThread({
+        providerProfile,
+        threadId: session.codexThreadId,
+      });
+    }
+    this.setProviderThreadArchived(session.providerProfileId, session.codexThreadId, false);
+    return this.updateSession(session.id, {});
+  }
+
+  async isProviderThreadArchived(providerPlugin: ProviderPluginContract, providerProfile: any, threadId: string): Promise<boolean> {
+    const metadata = this.getThreadMetadata(providerProfile.id, threadId);
+    if (typeof metadata?.archivedAt === 'number') {
+      return true;
+    }
+    if (typeof providerPlugin.listThreads !== 'function') {
+      return false;
+    }
+    let cursor: string | null = null;
+    for (let page = 0; page < 20; page += 1) {
+      const result = await providerPlugin.listThreads({
+        providerProfile,
+        limit: 100,
+        cursor,
+        archived: true,
+      });
+      const items = Array.isArray(result)
+        ? result
+        : Array.isArray(result?.items)
+          ? result.items
+          : [];
+      if (items.some((item) => item?.threadId === threadId)) {
+        return true;
+      }
+      const nextCursor = typeof result?.nextCursor === 'string' ? result.nextCursor : null;
+      if (!nextCursor || nextCursor === cursor) {
+        return false;
+      }
+      cursor = nextCursor;
+    }
+    return false;
   }
 
   async createSessionForScope(scopeRef: PlatformScopeRef, options: SessionCreationOptions): Promise<BridgeSession> {

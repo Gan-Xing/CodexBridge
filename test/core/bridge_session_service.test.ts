@@ -94,6 +94,60 @@ test('resolveOrCreateScopeSession reuses the same session for the same platform 
   assert.equal(openaiPlugin.calls.length, 1);
 });
 
+test('resolveOrCreateScopeSession restores an archived provider thread before reuse', async () => {
+  const openaiPlugin = new FakeProviderPlugin('openai-native');
+  const runtime = createCodexBridgeRuntime({
+    providerPlugins: [openaiPlugin as any],
+    providerProfiles: [makeProviderProfile('openai-default', 'openai-native', 'OpenAI Default')],
+  });
+
+  const scopeRef = { platform: 'weixin', externalScopeId: 'wx-user-1' };
+  const created = await runtime.services.bridgeSessions.resolveOrCreateScopeSession(scopeRef, {
+    providerProfileId: 'openai-default',
+  });
+  await openaiPlugin.archiveThread({ threadId: created.codexThreadId });
+
+  const resolved = await runtime.services.bridgeSessions.resolveOrCreateScopeSession(scopeRef, {
+    providerProfileId: 'openai-default',
+  });
+
+  assert.equal(resolved.id, created.id);
+  assert.deepEqual(openaiPlugin.unarchiveThreadCalls, [created.codexThreadId]);
+  assert.equal(openaiPlugin.archivedThreadIds.has(created.codexThreadId), false);
+  assert.equal(openaiPlugin.calls.length, 1);
+});
+
+test('resolveOrCreateScopeSession clears local archived metadata before reuse', async () => {
+  const openaiPlugin = new FakeProviderPlugin('openai-native');
+  const runtime = createCodexBridgeRuntime({
+    providerPlugins: [openaiPlugin as any],
+    providerProfiles: [makeProviderProfile('openai-default', 'openai-native', 'OpenAI Default')],
+  });
+
+  const scopeRef = { platform: 'weixin', externalScopeId: 'wx-user-1' };
+  const created = await runtime.services.bridgeSessions.resolveOrCreateScopeSession(scopeRef, {
+    providerProfileId: 'openai-default',
+  });
+  runtime.services.bridgeSessions.setProviderThreadArchived(
+    created.providerProfileId,
+    created.codexThreadId,
+    true,
+  );
+
+  const resolved = await runtime.services.bridgeSessions.resolveOrCreateScopeSession(scopeRef, {
+    providerProfileId: 'openai-default',
+  });
+  const metadata = runtime.services.bridgeSessions.getThreadMetadata(
+    created.providerProfileId,
+    created.codexThreadId,
+  );
+
+  assert.equal(resolved.id, created.id);
+  assert.deepEqual(openaiPlugin.unarchiveThreadCalls, [created.codexThreadId]);
+  assert.equal(metadata?.archivedAt, null);
+  assert.equal(openaiPlugin.calls.length, 1);
+});
+
 test('createSessionForScope assigns cumulative default readable titles when none is provided', async () => {
   const openaiPlugin = new FakeProviderPlugin('openai-native');
   const runtime = createCodexBridgeRuntime({
