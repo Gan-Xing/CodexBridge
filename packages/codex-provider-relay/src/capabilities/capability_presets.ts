@@ -19,6 +19,7 @@ export type OpenAICompatibleCapabilityPresetId =
   | 'minimax'
   | 'qwen'
   | 'openrouter'
+  | 'requesty'
   | 'iflow'
   | 'kimi'
   | 'antigravity'
@@ -150,6 +151,15 @@ const PRESETS: Record<OpenAICompatibleCapabilityPresetId, OpenAICompatibleProvid
     defaultModel: 'openai/gpt-4o-mini',
     ownedBy: 'openrouter',
     categories: ['openrouter'],
+  }),
+  requesty: buildPreset({
+    id: 'requesty',
+    displayName: 'Requesty',
+    apiKeyEnv: 'REQUESTY_API_KEY',
+    baseUrl: 'https://router.requesty.ai/v1',
+    defaultModel: 'openai/gpt-4o-mini',
+    ownedBy: 'requesty',
+    categories: ['requesty'],
   }),
   iflow: buildPreset({
     id: 'iflow',
@@ -297,6 +307,10 @@ export const OPENAI_COMPATIBLE_PROFILE_PRESET_REGISTRATIONS: readonly OpenAIComp
   {
     presetId: 'openrouter',
     envPrefix: 'OPENROUTER',
+  },
+  {
+    presetId: 'requesty',
+    envPrefix: 'REQUESTY',
   },
   {
     presetId: 'kimi',
@@ -798,6 +812,7 @@ function normalizePresetId(id: string | null | undefined): OpenAICompatibleCapab
     case 'minimax':
     case 'qwen':
     case 'openrouter':
+    case 'requesty':
     case 'iflow':
     case 'kimi':
     case 'antigravity':

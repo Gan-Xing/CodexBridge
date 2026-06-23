@@ -19,6 +19,14 @@ export EMBEDDINGS_API_ENDPOINT=https://openrouter.ai/api/v1/embeddings
 export EMBEDDINGS_MODEL=qwen/qwen3-embedding-8b
 ```
 
+Requesty is an OpenAI-compatible gateway and can be smoke-tested the same way (`provider/model` naming):
+
+```bash
+export REQUESTY_API_KEY=...
+export REQUESTY_BASE_URL=https://router.requesty.ai/v1
+export REQUESTY_DEFAULT_MODEL=openai/gpt-4o-mini
+```
+
 The embedding endpoint/model are defaults only. Any OpenAI-compatible embeddings API can be used.
 
 ## Smoke 1: Mixed Runtime

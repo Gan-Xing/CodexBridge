@@ -28,6 +28,10 @@ const PROVIDERS: LiveProviderSpec[] = [{
   profileId: 'openrouter',
   name: 'OpenRouter',
   apiKeyEnvHint: ['OPENROUTER_API_KEY'],
+}, {
+  profileId: 'requesty',
+  name: 'Requesty',
+  apiKeyEnvHint: ['REQUESTY_API_KEY'],
 }];
 
 for (const provider of PROVIDERS) {

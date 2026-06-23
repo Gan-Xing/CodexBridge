@@ -19,6 +19,21 @@ const runtime = new CodexProviderRuntime({
 });
 ```
 
+## Mixed Requesty Runtime
+
+Requesty is an OpenAI-compatible LLM gateway. Wire it exactly like OpenRouter, swapping the base URL, provider label, and API key env var. Models use `provider/model` naming (for example `openai/gpt-4o-mini`).
+
+```ts
+const runtime = new CodexProviderRuntime({
+  apiKey: process.env.REQUESTY_API_KEY!,
+  upstreamBaseUrl: "https://router.requesty.ai/v1",
+  defaultModel: "openai/gpt-4o-mini",
+  providerLabel: "requesty",
+  profileMode: "mixed",
+  toolStrategy: "codex-local-first",
+});
+```
+
 ## Relay-Emulated Hosted Tools
 
 Relay-emulated tools must be declared and registered.
@@ -67,6 +82,16 @@ Use the new prefix for new deployments:
 CODEX_PROVIDER_RELAY_CAPABILITY_PRESET=openrouter
 CODEX_PROVIDER_RELAY_API_KEY=...
 CODEX_PROVIDER_RELAY_MODEL=deepseek/deepseek-chat
+CODEX_PROVIDER_RELAY_TRACE=stderr-json
+codex-provider-server
+```
+
+The same shape works for the `requesty` preset (base `https://router.requesty.ai/v1`):
+
+```bash
+CODEX_PROVIDER_RELAY_CAPABILITY_PRESET=requesty
+CODEX_PROVIDER_RELAY_API_KEY=...
+CODEX_PROVIDER_RELAY_MODEL=openai/gpt-4o-mini
 CODEX_PROVIDER_RELAY_TRACE=stderr-json
 codex-provider-server
 ```
