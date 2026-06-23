@@ -19,7 +19,8 @@ export type CliproxyModelCategory =
   | 'antigravity'
   | 'minimax-codex'
   | 'deepseek-codex'
-  | 'openrouter';
+  | 'openrouter'
+  | 'requesty';
 
 export interface CliproxyModelCatalogEntry {
   category: CliproxyModelCategory;
@@ -152,6 +153,7 @@ const DIRECT_COMPAT_MODELS: CliproxyModelCatalogEntry[] = [
   model('deepseek-codex', 'deepseek-v4-flash', 'deepseek', 'DeepSeek V4 Flash', null, { maxOutputTokens: 65536 }),
   model('deepseek-codex', 'deepseek-v4-pro', 'deepseek', 'DeepSeek V4 Pro', null, { maxOutputTokens: 65536 }),
   model('openrouter', 'openai/gpt-4o-mini', 'openrouter', 'OpenAI GPT-4o Mini', null, { maxOutputTokens: 16384 }),
+  model('requesty', 'openai/gpt-4o-mini', 'requesty', 'OpenAI GPT-4o Mini', null, { maxOutputTokens: 16384 }),
 ];
 
 export const CLIPROXY_COMPAT_MODEL_CATALOG: CliproxyModelCatalogEntry[] = [
