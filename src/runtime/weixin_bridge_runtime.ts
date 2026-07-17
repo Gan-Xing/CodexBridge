@@ -145,6 +145,7 @@ interface WeixinBridgeRuntimeOptions {
   previewSoftTargetBytes?: number;
   previewHardLimitBytes?: number;
   previewIntervalMs?: number;
+  progressDeliveryEnabled?: boolean;
   typingKeepaliveMs?: number;
   inboundAttachmentMergeWindowMs?: number;
   automationPollMs?: number;
@@ -174,6 +175,8 @@ export class WeixinBridgeRuntime {
   previewHardLimitBytes: number;
 
   previewIntervalMs: number;
+
+  progressDeliveryEnabled: boolean;
 
   typingKeepaliveMs: number;
 
@@ -219,6 +222,7 @@ export class WeixinBridgeRuntime {
     previewSoftTargetBytes = 2048,
     previewHardLimitBytes = 2048,
     previewIntervalMs = 3000,
+    progressDeliveryEnabled = true,
     typingKeepaliveMs = WeixinBridgeRuntime.DEFAULT_TYPING_KEEPALIVE_MS,
     inboundAttachmentMergeWindowMs = 3000,
     automationPollMs = 30_000,
@@ -234,6 +238,7 @@ export class WeixinBridgeRuntime {
     this.previewSoftTargetBytes = previewSoftTargetBytes;
     this.previewHardLimitBytes = previewHardLimitBytes;
     this.previewIntervalMs = previewIntervalMs;
+    this.progressDeliveryEnabled = progressDeliveryEnabled;
     this.typingKeepaliveMs = typingKeepaliveMs;
     this.inboundAttachmentMergeWindowMs = inboundAttachmentMergeWindowMs;
     this.automationPollMs = automationPollMs;
@@ -534,7 +539,7 @@ export class WeixinBridgeRuntime {
     try {
       const response = await this.bridgeCoordinator.handleInboundEvent(event, {
         onProgress: async (progress) => {
-          if (options.suppressProgressDelivery) {
+          if (options.suppressProgressDelivery || !this.progressDeliveryEnabled) {
             return;
           }
           await this.handleProgressUpdate(event, streamState, progress);
