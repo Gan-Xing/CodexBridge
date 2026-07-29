@@ -50,6 +50,145 @@ test('loadWeixinConfig restores token and base URL from saved account state', ()
   assert.deepEqual(config.allowFrom, ['wxid_a', 'wxid_b']);
 });
 
+test('loadWeixinConfig selects the active account when multiple Weixin accounts are saved', () => {
+  const rootDir = makeTempAccountsDir();
+  const accountStore = new WeixinAccountStore({ rootDir });
+  accountStore.saveAccount({
+    accountId: 'old-account',
+    token: 'old-token',
+    baseUrl: 'https://old.example.com',
+  });
+  accountStore.saveAccount({
+    accountId: 'new-account',
+    token: 'new-token',
+    baseUrl: 'https://new.example.com',
+  });
+  accountStore.setActiveAccount('new-account');
+
+  const config = loadWeixinConfig({
+    env: {},
+    accountStore,
+    stateDir: path.dirname(path.dirname(rootDir)),
+  });
+
+  assert.equal(config.accountId, 'new-account');
+  assert.equal(config.token, 'new-token');
+  assert.equal(config.baseUrl, 'https://new.example.com');
+});
+
+test('WeixinPlatformPlugin notifies iLink during start and before transport cleanup', async () => {
+  const rootDir = makeTempAccountsDir();
+  const originalFetch = globalThis.fetch;
+  const requests: string[] = [];
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    requests.push(String(input));
+    return new Response(JSON.stringify({ ret: 0 }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof globalThis.fetch;
+
+  try {
+    const plugin = makePlugin({
+      config: {
+        enabled: true,
+        accountId: 'bot-account',
+        token: 'token',
+        baseUrl: 'https://ilink.example.com',
+        cdnBaseUrl: 'https://novac2c.cdn.weixin.qq.com/c2c',
+        dmPolicy: 'open',
+        groupPolicy: 'disabled',
+        allowFrom: [],
+        groupAllowFrom: [],
+        stateDir: path.dirname(path.dirname(rootDir)),
+        accountsDir: rootDir,
+        maxMessageLength: 4000,
+      },
+    });
+
+    await plugin.start();
+    assert.ok(plugin.client);
+    await plugin.stop();
+
+    assert.deepEqual(requests, [
+      'https://ilink.example.com/ilink/bot/msg/notifystart',
+      'https://ilink.example.com/ilink/bot/msg/notifystop',
+    ]);
+    assert.equal(plugin.client, null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('WeixinPlatformPlugin keeps its lifecycle running when iLink rejects an online-state notification', async () => {
+  const rootDir = makeTempAccountsDir();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(JSON.stringify({
+    errcode: -14,
+    errmsg: 'session timeout',
+  }), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  })) as typeof globalThis.fetch;
+
+  try {
+    const plugin = makePlugin({
+      config: {
+        enabled: true,
+        accountId: 'bot-account',
+        token: 'token',
+        baseUrl: 'https://ilink.example.com',
+        cdnBaseUrl: 'https://novac2c.cdn.weixin.qq.com/c2c',
+        dmPolicy: 'open',
+        groupPolicy: 'disabled',
+        allowFrom: [],
+        groupAllowFrom: [],
+        stateDir: path.dirname(path.dirname(rootDir)),
+        accountsDir: rootDir,
+        maxMessageLength: 4000,
+      },
+    });
+
+    await plugin.start();
+    assert.equal(plugin.running, true);
+    await plugin.stop();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('WeixinPlatformPlugin exposes reauthorization-required status after session expiry', async () => {
+  const rootDir = makeTempAccountsDir();
+  const plugin = makePlugin({
+    config: {
+      enabled: true,
+      accountId: 'bot-account',
+      token: 'token',
+      baseUrl: 'https://ilink.example.com',
+      cdnBaseUrl: 'https://novac2c.cdn.weixin.qq.com/c2c',
+      dmPolicy: 'open',
+      groupPolicy: 'disabled',
+      allowFrom: [],
+      groupAllowFrom: [],
+      stateDir: path.dirname(path.dirname(rootDir)),
+      accountsDir: rootDir,
+      maxMessageLength: 4000,
+    },
+  });
+  plugin.running = true;
+  (plugin as any).client = {
+    async getUpdates() {
+      return { errcode: -14, errmsg: 'session timeout' };
+    },
+  };
+
+  await plugin.pollOnce();
+
+  const status = plugin.getStatus().data as Record<string, unknown>;
+  assert.equal(status.connectionState, 'reauthorization_required');
+  assert.equal(status.reauthorizationRequired, true);
+});
+
 test('WeixinPlatformPlugin normalizes inbound DM text and persists context token', async () => {
   const rootDir = makeTempAccountsDir();
   const accountStore = new WeixinAccountStore({ rootDir });

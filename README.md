@@ -383,6 +383,14 @@ codex --version
 
 If `codex --version` still fails, fix that before attempting `weixin:login` or `weixin:serve`.
 
+After login or any service restart, use the non-sensitive health check:
+
+```bash
+npm run weixin:status
+```
+
+It reports the selected account, service lock/PID, and last recorded connection state without exposing tokens. If it reports `reauthorization_required`, run `npm run weixin:login` and confirm the new QR code.
+
 ### Linux
 
 ```bash
@@ -566,6 +574,8 @@ That file is the stable place to adjust:
 - `CODEX_DEFAULT_PROVIDER_PROFILE_ID`
 - optional OpenAI-compatible provider keys such as `DEEPSEEK_*`, `MINIMAX_*`, `QWEN_*`, `OPENROUTER_*`, or `CODEX_COMPAT_*`
 - `CODEXBRIDGE_DEBUG_WEIXIN`
+
+When more than one Weixin account is saved, a successful `weixin:login` marks the new account as active. Leave `WEIXIN_ACCOUNT_ID` blank to use that active account, or set it explicitly only when intentionally overriding it.
 
 ### Windows Scheduled Task
 

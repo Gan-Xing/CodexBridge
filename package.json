@@ -33,6 +33,7 @@
     "codex-provider:test": "tsx --test packages/codex-provider-relay/test/*.test.ts",
     "codex-provider:typecheck": "tsc -p packages/codex-provider-relay/tsconfig.json --noEmit",
     "weixin:login": "tsx src/cli.ts weixin login",
+    "weixin:status": "tsx src/cli.ts weixin status",
     "weixin:clear-context": "tsx src/cli.ts weixin clear-context",
     "weixin:serve": "tsx src/cli.ts weixin serve",
     "codex:cleanup-internal-threads": "tsx src/cli.ts codex cleanup-internal-threads",

@@ -55,5 +55,6 @@ test('officialQrLogin follows confirmed QR flow and persists credentials', async
 
   assert.equal(credentials?.account_id, 'bot-account');
   assert.equal(accountStore.loadAccount('bot-account')?.token, 'bot-token');
+  assert.equal(accountStore.getActiveAccount(), 'bot-account');
   assert.equal(accountStore.getContextToken('bot-account', 'wxid_sender'), null);
 });

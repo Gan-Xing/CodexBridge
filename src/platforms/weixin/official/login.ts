@@ -8,7 +8,7 @@ export const DEFAULT_ILINK_BOT_TYPE = '3';
 export const FIXED_QR_BASE_URL = 'https://ilinkai.weixin.qq.com';
 
 interface OfficialQrLoginOptions {
-  accountStore: Pick<WeixinAccountStore, 'saveAccount'>;
+  accountStore: Pick<WeixinAccountStore, 'saveAccount' | 'setActiveAccount'>;
   accountsDir?: string | null;
   fetchImpl?: WeixinOfficialFetch;
   locale?: string | null;
@@ -142,6 +142,7 @@ export async function officialQrLogin(
         baseUrl: credentials.base_url,
         userId: credentials.user_id,
       });
+      accountStore.setActiveAccount(credentials.account_id);
       return credentials;
     }
 
