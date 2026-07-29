@@ -42,9 +42,14 @@ export function loadWeixinConfig({
 } = {}): WeixinConfig {
   let accountId = normalizeString(env.WEIXIN_ACCOUNT_ID);
   if (!accountId) {
-    const accountIds = accountStore.listAccounts();
-    if (accountIds.length === 1) {
+    const activeAccountId = accountStore.getActiveAccount();
+    if (activeAccountId && accountStore.loadAccount(activeAccountId)) {
+      accountId = activeAccountId;
+    } else {
+      const accountIds = accountStore.listAccounts();
+      if (accountIds.length === 1) {
       [accountId] = accountIds;
+      }
     }
   }
 

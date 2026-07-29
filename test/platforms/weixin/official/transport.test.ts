@@ -191,6 +191,31 @@ test('WeixinOfficialTransport.getUpdates posts iLink payload with authorization'
   assert.equal(body.base_info.channel_version, '2.2.0');
 });
 
+test('WeixinOfficialTransport notifies iLink when the bot starts and stops', async () => {
+  const { fetchImpl, calls } = createFetchMock([
+    { body: { ret: 0 } },
+    { body: { ret: 0 } },
+  ]);
+  const transport = createWeixinOfficialTransport({
+    baseUrl: 'https://ilink.example.com/',
+    token: 'bot-token',
+    fetchImpl,
+  });
+
+  await transport.notifyStart();
+  await transport.notifyStop();
+
+  assert.equal(calls[0].url, 'https://ilink.example.com/ilink/bot/msg/notifystart');
+  assert.equal(calls[1].url, 'https://ilink.example.com/ilink/bot/msg/notifystop');
+  for (const call of calls) {
+    assert.equal(call.init.method, 'POST');
+    const headers = call.init.headers as Record<string, string>;
+    assert.match(headers.Authorization, /^Bearer bot-token$/);
+    const body = JSON.parse(String(call.init.body));
+    assert.deepEqual(body, { base_info: { channel_version: '2.2.0' } });
+  }
+});
+
 test('WeixinOfficialTransport.sendMessage and getConfig use Hermes-compatible payload fields', async () => {
   const { fetchImpl, calls } = createFetchMock([
     { body: { ret: 0 } },

@@ -15,6 +15,7 @@ import {
   parseCodexNativeApiServeArgs,
   parseWeixinClearContextArgs,
   parseWeixinLoginArgs,
+  parseWeixinStatusArgs,
   parseWeixinServeArgs,
   readPendingRestartNotifications,
   resolveEmbeddedCodexNativeApiOptions,
@@ -75,6 +76,13 @@ test('parseWeixinServeArgs reads state-dir flag', () => {
 
   assert.equal(parsed.stateDir, '/tmp/codexbridge-state');
   assert.equal(parsed.cwd, '/tmp/project');
+});
+
+test('parseWeixinStatusArgs reads an optional state directory', () => {
+  assert.deepEqual(parseWeixinStatusArgs(['--state-dir', '/tmp/codexbridge-state']), {
+    stateDir: '/tmp/codexbridge-state',
+  });
+  assert.deepEqual(parseWeixinStatusArgs([]), { stateDir: null });
 });
 
 test('createWeixinServeCodexAuthManager stores account data under runtime/codex-login', () => {

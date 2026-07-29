@@ -15,6 +15,10 @@ export interface SavedWeixinAccount {
 }
 
 type ContextTokenMap = Record<string, string>;
+type ActiveAccountRecord = {
+  account_id: string;
+  selected_at: string;
+};
 export class WeixinAccountStore {
   constructor({ rootDir = defaultWeixinAccountsDir() } = {}) {
     this.rootDir = rootDir;
@@ -27,6 +31,7 @@ export class WeixinAccountStore {
     const entries = fs.readdirSync(this.rootDir, { withFileTypes: true });
     return entries
       .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
+      .filter((entry) => entry.name !== 'active-account.json')
       .filter((entry) => !entry.name.endsWith('.context-tokens.json'))
       .filter((entry) => !entry.name.endsWith('.sync.json'))
       .map((entry) => entry.name.slice(0, -'.json'.length))
@@ -46,6 +51,23 @@ export class WeixinAccountStore {
 
   loadAccount(accountId: string) {
     return this.readJson<SavedWeixinAccount>(this.accountFile(accountId));
+  }
+
+  setActiveAccount(accountId: string) {
+    const normalizedAccountId = String(accountId ?? '').trim();
+    if (!normalizedAccountId) {
+      return;
+    }
+    this.writeJson(this.activeAccountFile(), {
+      account_id: normalizedAccountId,
+      selected_at: new Date().toISOString(),
+    } satisfies ActiveAccountRecord);
+  }
+
+  getActiveAccount() {
+    const record = this.readJson<ActiveAccountRecord>(this.activeAccountFile());
+    const accountId = typeof record?.account_id === 'string' ? record.account_id.trim() : '';
+    return accountId || null;
   }
 
   getContextToken(accountId: string, peerId: string) {
@@ -70,6 +92,10 @@ export class WeixinAccountStore {
 
   accountFile(accountId: string) {
     return path.join(this.rootDir, `${accountId}.json`);
+  }
+
+  activeAccountFile() {
+    return path.join(this.rootDir, 'active-account.json');
   }
 
   contextTokensFile(accountId: string) {

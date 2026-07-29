@@ -184,6 +184,18 @@ export interface SendTypingResp {
   errmsg?: string;
 }
 
+export interface NotifyStartResp {
+  ret?: number;
+  errcode?: number;
+  errmsg?: string;
+}
+
+export interface NotifyStopResp {
+  ret?: number;
+  errcode?: number;
+  errmsg?: string;
+}
+
 export interface GetConfigReq {
   ilink_user_id?: string;
   context_token?: string;

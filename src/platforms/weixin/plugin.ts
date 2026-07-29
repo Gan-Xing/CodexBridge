@@ -25,6 +25,7 @@ import {
   SESSION_EXPIRED_ERRCODE,
 } from './official/session_guard.js';
 import { WeixinConfigManager } from './official/config_cache.js';
+import { writeWeixinConnectionStatus, type WeixinConnectionState } from './connection_status.js';
 import { downloadMediaFromItem } from './official/media/media_download.js';
 import { getExtensionFromMime, getMimeFromFilename } from './official/media/mime.js';
 import { buildTextMessageReq } from './official/send.js';
@@ -124,6 +125,7 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
       accountStore: this.accountStore,
     });
     this.running = false;
+    this.reauthorizationRequired = false;
     this.typingTickets = new Map();
     this.configManager = null;
     this.client = null;
@@ -148,6 +150,7 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
   i18n: Translator;
   messageSendQueue: Promise<void>;
   nextMessageSendAt: number;
+  reauthorizationRequired: boolean;
 
   async start() {
     if (this.running && this.client) {
@@ -162,6 +165,7 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
       token: this.config.token,
       locale: this.i18n.locale,
     });
+    await this.notifyOnlineState('start');
     this.configManager = this.createConfigManager();
     restoreStoredContextTokens(this.config.accountsDir, this.config.accountId);
     this.running = true;
@@ -169,6 +173,8 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
 
   async stop() {
     this.running = false;
+    await this.notifyOnlineState('stop');
+    this.recordConnectionStatus('stopped');
     this.configManager?.clear();
     this.configManager = null;
     this.client = null;
@@ -281,7 +287,7 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
     });
     const response = await this.client.getUpdates({ syncCursor });
     if (isSessionExpiredResponse(response)) {
-      pauseSession(this.config.accountId);
+      this.markSessionExpired();
       return {
         syncCursor,
         events: [],
@@ -492,7 +498,7 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
           result,
         });
         if (isSessionExpiredResponse(result)) {
-          pauseSession(this.config.accountId);
+          this.markSessionExpired();
           return {
             success: false,
             error: `session expired (errcode ${SESSION_EXPIRED_ERRCODE})`,
@@ -586,7 +592,7 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
       status: delivery.payload.status,
     });
     if (isSessionExpiredResponse(response)) {
-      pauseSession(this.config.accountId);
+      this.markSessionExpired();
     }
   }
 
@@ -662,7 +668,7 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
         : null;
       if (captionErrorCode === SESSION_EXPIRED_ERRCODE
         || (captionError && captionError.includes(String(SESSION_EXPIRED_ERRCODE)))) {
-        pauseSession(this.config.accountId);
+        this.markSessionExpired();
       }
       if (captionError) {
         debugWeixin('send_media_caption_failed', {
@@ -697,7 +703,7 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
       });
       if ((isWeixinSendResponseError(error) && error.code === SESSION_EXPIRED_ERRCODE)
         || message.includes(String(SESSION_EXPIRED_ERRCODE))) {
-        pauseSession(this.config.accountId);
+        this.markSessionExpired();
       }
       return {
         success: false,
@@ -720,6 +726,8 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
       data: {
         accountId: this.config.accountId,
         running: this.running,
+        connectionState: this.reauthorizationRequired ? 'reauthorization_required' : this.running ? 'connected' : 'stopped',
+        reauthorizationRequired: this.reauthorizationRequired,
         sessionPaused: isSessionPaused(this.config.accountId),
         remainingPauseMs,
         remainingPauseMinutes: remainingPauseMs > 0 ? Math.ceil(remainingPauseMs / 60_000) : 0,
@@ -777,7 +785,7 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
         contextToken,
       }) ?? { ret: -1 },
       nowFn: this.nowFn,
-      onSessionExpired: () => pauseSession(this.config.accountId),
+      onSessionExpired: () => this.markSessionExpired(),
       log: (message) => debugWeixin('config_cache', { message }),
     });
   }
@@ -787,6 +795,55 @@ export class WeixinPlatformPlugin implements Pick<PlatformPluginContract, 'id' |
       this.configManager = this.createConfigManager();
     }
     return this.configManager;
+  }
+
+  private async notifyOnlineState(state: 'start' | 'stop') {
+    if (!this.client) {
+      return;
+    }
+    try {
+      const response = state === 'start'
+        ? await this.client.notifyStart()
+        : await this.client.notifyStop();
+      if (Number(response?.ret ?? 0) !== 0 || Number(response?.errcode ?? 0) !== 0) {
+        if (Number(response?.ret) === SESSION_EXPIRED_ERRCODE
+          || Number(response?.errcode) === SESSION_EXPIRED_ERRCODE) {
+          this.markSessionExpired();
+        }
+        debugWeixin('online_state_notification_failed', {
+          state,
+          ret: response?.ret ?? null,
+          errcode: response?.errcode ?? null,
+          errmsg: response?.errmsg ?? null,
+        });
+        return;
+      }
+      if (state === 'start') {
+        this.reauthorizationRequired = false;
+        this.recordConnectionStatus('connected');
+      }
+      debugWeixin('online_state_notification_succeeded', { state });
+    } catch (error) {
+      debugWeixin('online_state_notification_failed', {
+        state,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  private markSessionExpired() {
+    this.reauthorizationRequired = true;
+    pauseSession(this.config.accountId);
+    this.recordConnectionStatus('reauthorization_required', SESSION_EXPIRED_ERRCODE);
+  }
+
+  private recordConnectionStatus(state: WeixinConnectionState, errorCode: number | null = null) {
+    writeWeixinConnectionStatus({
+      stateDir: this.config.stateDir,
+      accountId: this.config.accountId,
+      state,
+      errorCode,
+    });
   }
 }
 

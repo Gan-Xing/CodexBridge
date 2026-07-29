@@ -9,6 +9,8 @@ import type {
   GetUploadUrlResp,
   GetUpdatesReq,
   GetUpdatesResp,
+  NotifyStartResp,
+  NotifyStopResp,
   SendMessageReq,
   SendMessageResp,
   SendTypingReq,
@@ -135,6 +137,28 @@ export async function sendTyping(
       typing_ticket: params.typing_ticket,
       status: params.status,
     },
+    timeoutMs: params.timeoutMs ?? DEFAULT_CONFIG_TIMEOUT_MS,
+  });
+}
+
+export async function notifyStart(
+  params: WeixinOfficialApiOptions,
+): Promise<NotifyStartResp> {
+  return postJson<NotifyStartResp>({
+    ...params,
+    endpoint: 'ilink/bot/msg/notifystart',
+    payload: {},
+    timeoutMs: params.timeoutMs ?? DEFAULT_CONFIG_TIMEOUT_MS,
+  });
+}
+
+export async function notifyStop(
+  params: WeixinOfficialApiOptions,
+): Promise<NotifyStopResp> {
+  return postJson<NotifyStopResp>({
+    ...params,
+    endpoint: 'ilink/bot/msg/notifystop',
+    payload: {},
     timeoutMs: params.timeoutMs ?? DEFAULT_CONFIG_TIMEOUT_MS,
   });
 }

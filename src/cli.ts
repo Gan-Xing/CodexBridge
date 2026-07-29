@@ -5,7 +5,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import QRCode from 'qrcode';
 import { WeixinAccountStore } from './platforms/weixin/account_store.js';
-import { WEIXIN_DEFAULT_BASE_URL, defaultCodexBridgeStateDir } from './platforms/weixin/config.js';
+import { readWeixinConnectionStatus } from './platforms/weixin/connection_status.js';
+import { WEIXIN_DEFAULT_BASE_URL, defaultCodexBridgeStateDir, loadWeixinConfig } from './platforms/weixin/config.js';
 import { WeixinPlatformPlugin } from './platforms/weixin/plugin.js';
 import { DEFAULT_ILINK_BOT_TYPE, officialQrLogin } from './platforms/weixin/official/login.js';
 import { clearContextTokensForAccount } from './platforms/weixin/official/context_tokens.js';
@@ -97,6 +98,9 @@ async function main(argv: string[] = process.argv.slice(2)) {
   }
   if (group === 'weixin' && command === 'clear-context') {
     return runWeixinClearContext(args);
+  }
+  if (group === 'weixin' && command === 'status') {
+    return runWeixinStatus(args);
   }
   if (group === 'codex' && command === 'cleanup-internal-threads') {
     return runCodexCleanupInternalThreads(args);
@@ -194,6 +198,32 @@ async function runWeixinClearContext(args: string[]) {
   clearContextTokensForAccount(accountsDir, accountId);
   process.stdout.write(`${i18n.t('cli.clearContext.success')}\n`);
   process.stdout.write(`${i18n.t('cli.clearContext.account', { value: accountId })}\n`);
+}
+
+function runWeixinStatus(args: string[]) {
+  const options = parseWeixinStatusArgs(args);
+  const stateDir = path.resolve(options.stateDir ?? defaultCodexBridgeStateDir());
+  const accountsDir = path.join(stateDir, 'weixin', 'accounts');
+  const accountStore = new WeixinAccountStore({ rootDir: accountsDir });
+  const config = loadWeixinConfig({ stateDir, accountStore });
+  const lockPath = path.join(stateDir, 'runtime', 'weixin-serve.lock');
+  const lock = readServeLock(lockPath);
+  const report = {
+    stateDir,
+    account: {
+      activeAccountId: accountStore.getActiveAccount(),
+      configuredAccountId: config.accountId,
+      savedAccountIds: accountStore.listAccounts(),
+    },
+    service: {
+      lockPath,
+      running: Boolean(lock?.pid && isProcessAlive(lock.pid)),
+      pid: lock?.pid ?? null,
+      startedAt: lock?.startedAt ?? null,
+    },
+    connection: readWeixinConnectionStatus(stateDir),
+  };
+  process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
 }
 
 async function runWeixinServe(args: string[]) {
@@ -528,6 +558,17 @@ function parseWeixinLoginArgs(args: string[]): WeixinLoginArgs {
       }
       index += 1;
       continue;
+    }
+  }
+  return options;
+}
+
+function parseWeixinStatusArgs(args: string[]) {
+  const options: { stateDir: string | null } = { stateDir: null };
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] === '--state-dir' && args[index + 1]) {
+      options.stateDir = args[index + 1] ?? null;
+      index += 1;
     }
   }
   return options;
@@ -947,6 +988,7 @@ function printUsage() {
   process.stdout.write([
     createI18n().t('cli.usage.title'),
     createI18n().t('cli.usage.login'),
+    createI18n().t('cli.usage.status'),
     createI18n().t('cli.usage.clearContext'),
     createI18n().t('cli.usage.serve'),
     createI18n().t('cli.usage.cleanupInternalThreads'),
@@ -1113,6 +1155,7 @@ export {
   resolveEmbeddedCodexNativeApiOptions,
   parseWeixinClearContextArgs,
   parseWeixinLoginArgs,
+  parseWeixinStatusArgs,
   parseWeixinServeArgs,
   readPendingRestartNotifications,
   resolveClearContextAccountId,

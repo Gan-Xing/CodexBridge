@@ -3,6 +3,8 @@ import {
   getConfig,
   getQrStatus,
   getUpdates,
+  notifyStart,
+  notifyStop,
   sendMessage,
   sendTyping,
   type WeixinOfficialFetch,
@@ -12,6 +14,8 @@ import { sendWeixinMediaFile } from './send_media.js';
 import type {
   GetConfigResp,
   GetUpdatesResp,
+  NotifyStartResp,
+  NotifyStopResp,
   SendMessageResp,
   SendTypingResp,
   WeixinQrCodeResponse,
@@ -27,6 +31,8 @@ export interface WeixinOfficialTransport {
   fetch: WeixinOfficialFetch | undefined;
   locale: string | null;
   getUpdates(params?: { syncCursor?: string; timeoutMs?: number }): Promise<GetUpdatesResp>;
+  notifyStart(): Promise<NotifyStartResp>;
+  notifyStop(): Promise<NotifyStopResp>;
   sendMessage(params: {
     toUserId: string;
     text: string;
@@ -86,6 +92,22 @@ export function createWeixinOfficialTransport({
         locale,
         timeoutMs,
         get_updates_buf: syncCursor,
+      });
+    },
+    async notifyStart() {
+      return notifyStart({
+        baseUrl: normalizedBaseUrl,
+        token,
+        fetchImpl: effectiveFetchImpl,
+        locale,
+      });
+    },
+    async notifyStop() {
+      return notifyStop({
+        baseUrl: normalizedBaseUrl,
+        token,
+        fetchImpl: effectiveFetchImpl,
+        locale,
       });
     },
     async sendMessage({ toUserId, text, contextToken = null, clientId, timeoutMs }) {
